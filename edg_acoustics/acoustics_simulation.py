@@ -977,6 +977,7 @@ class AcousticsSimulation:
             # 'RP' refers to real pole pairs, i.e., :math:`A` (stored in 1st row), :math:`\\zeta` (stored in 2nd row).
             #     'CP' refers to complex pole pairs, i.e., :math:`B` (stored in 1st row), :math:`C` (stored in 2nd row),
             #          :math:`\\alpha` (stored in 3rd row), :math:`\\beta`(stored in 4th row).
+            # vn: 公式(7),(8)
             BCvar[index]["vn"] = (
                 self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
                 * Vx.reshape(-1)[self.BCnode[index]["vmap"]]
@@ -986,16 +987,16 @@ class AcousticsSimulation:
                 * Vz.reshape(-1)[self.BCnode[index]["vmap"]]
             )
             BCvar[index]["ou"] = (
-                BCvar[index]["vn"] + P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 / self.c0
+                BCvar[index]["vn"] + P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 / self.c0 # 公式(16)
             )
-            BCvar[index]["in"] = BCvar[index]["ou"] * paras["RI"]
+            BCvar[index]["in"] = BCvar[index]["ou"] * paras["RI"] # 公式(18)的第一项,RI表示R无穷
 
             for polekey in paras:
                 if polekey == "RP":
                     for i in range(paras["RP"].shape[1]):
-                        BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i]
+                        BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i] # 公式(18)的第二项
                         BCvar[index]["phi"][i] = (
-                            BCvar[index]["ou"] - paras["RP"][1, i] * BCvar[index]["phi"][i]
+                            BCvar[index]["ou"] - paras["RP"][1, i] * BCvar[index]["phi"][i] # 公式(20a)
                         )  # RHS for BCvar[index]['phi']
 
                 elif polekey == "CP":
@@ -1003,17 +1004,18 @@ class AcousticsSimulation:
                         BCvar[index]["in"] += (
                             paras["CP"][0, i] * BCvar[index]["kexi1"][i]
                             + paras["CP"][1, i] * BCvar[index]["kexi2"][i]
-                        )
+                        ) # 公式(18)第三项
                         kexi1temp = BCvar[index]["kexi1"][i].copy()
                         BCvar[index]["kexi1"][i] = (
                             BCvar[index]["ou"]
                             - paras["CP"][2, i] * BCvar[index]["kexi1"][i]
-                            - paras["CP"][3, i] * BCvar[index]["kexi2"][i]
-                        )  # RHS for BCvar[index]['kexi1']
+                            - paras["CP"][3, i] * BCvar[index]["kexi2"][i] # 公式(20b)
+                        )  # RHS for BCvar[index]['kexi1'] 
                         BCvar[index]["kexi2"][i] = (
                             -paras["CP"][2, i] * BCvar[index]["kexi2"][i]
-                            + paras["CP"][3, i] * kexi1temp
+                            + paras["CP"][3, i] * kexi1temp # 公式(20c)
                         )  # RHS for BCvar[index]['kexi2']
+            # 
             fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (
                 self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
                 * P.reshape(-1)[self.BCnode[index]["vmap"]]
