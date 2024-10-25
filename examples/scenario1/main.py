@@ -5,6 +5,8 @@ import os
 import glob
 import numpy
 import scipy.io
+import sys
+sys.path.append('/media/liu/research/linux/fastcae/edg-acoustics/')
 import edg_acoustics
 
 # endregion
