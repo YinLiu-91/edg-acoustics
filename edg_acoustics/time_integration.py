@@ -2,6 +2,8 @@
 
 The edg_acoustics.time_integration provide more necessary functionalities 
 (based upon :mod:`edg_acoustics.acoustics_simulation`) to setup time integration.
+Ref:
+[3]: An arbitrary high-order discontinuous Galerkin method with local time-stepping for linear acoustic wave propagation
 """
 
 from __future__ import annotations
@@ -128,15 +130,16 @@ class TSI_TI(TimeIntegrator):
 
         ##########################
         for Tind in range(1, self.Nt + 1):
-            # Compute L (L^{Tind-1} q)
+            # Compute L (L^{Tind-1} q) 即计算Ref[3]中公式(14)中左边项
             P0, Vx0, Vy0, Vz0, BC.BCvar = self.L_operator(P0, Vx0, Vy0, Vz0, BC.BCvar)
 
-            # Add the Taylor term \frac{dt^{Tind}}{Tind!}L^{Tind}q
+            # Add the Taylor term \frac{dt^{Tind}}{Tind!}L^{Tind}q，即Ref[3]中公式(15),(16)
             Vx += self.dt**Tind / math.factorial(Tind) * Vx0
             Vy += self.dt**Tind / math.factorial(Tind) * Vy0
             Vz += self.dt**Tind / math.factorial(Tind) * Vz0
             P += self.dt**Tind / math.factorial(Tind) * P0
 
+            # 这里是对Ref[1]的公式(20a-c)ODE的求解
             for index, paras in enumerate(BC.BCpara):
                 for polekey in paras:
                     if polekey == "RP":

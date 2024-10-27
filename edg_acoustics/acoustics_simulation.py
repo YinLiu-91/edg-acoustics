@@ -2,6 +2,9 @@
 The AcousticsSimulation class sets up the DG finite element discretization for the solution to the acoustic wave propagation problem.
 
 Note that objects enclosed by square brackets (e.g., ``[dimension1, dimension2]``) denotes a matrix of dimension `[dimension1, dimension2]`.
+Ref:
+[2]: Room acoustics modelling in the time-domain with the nodal discontinuous Galerkin method
+[3]: An arbitrary high-order discontinuous Galerkin method with local time-stepping for linear acoustic wave propagation
 """
 
 from __future__ import annotations
@@ -144,6 +147,7 @@ class AcousticsSimulation:
     Ref:
     [1]: Time-domain impedance boundary condition modeling with the discontinuous Galerkin method for room acoustics simulations
     [2]: Room acoustics modelling in the time-domain with the nodal discontinuous Galerkin method
+    [3]: An arbitrary high-order discontinuous Galerkin method with local time-stepping for linear acoustic wave propagation
     """
 
     def __init__(
@@ -961,7 +965,7 @@ class AcousticsSimulation:
         dVz = numpy.zeros_like(dVx)
         dP = numpy.zeros_like(dVx)
 
-        # calculate jump values across the faces of neighboring elements
+        # 来自参考[2]的公式(15)下面的的定义, calculate jump values across the faces of neighboring elements
         dVx.reshape(-1)[:] = Vx.reshape(-1)[self.vmapM] - Vx.reshape(-1)[self.vmapP]
         # print(f"dVx ID {id(dVx)}, sim.dVx ID {id(self.sim.dVx)}")
         dVy.reshape(-1)[:] = Vy.reshape(-1)[self.vmapM] - Vy.reshape(-1)[self.vmapP]
@@ -969,36 +973,36 @@ class AcousticsSimulation:
         dP.reshape(-1)[:] = P.reshape(-1)[self.vmapM] - P.reshape(-1)[self.vmapP]
 
         # Compute the inter-element fluxes
-        fluxVx = self.flux.FluxVx(dVx, dVy, dVz, dP)  # has return object, might make copy,
-        fluxVy = self.flux.FluxVy(dVx, dVy, dVz, dP)
-        fluxVz = self.flux.FluxVz(dVx, dVy, dVz, dP)
-        fluxP = self.flux.FluxP(dVx, dVy, dVz, dP)
+        fluxVx = self.flux.FluxVx(dVx, dVy, dVz, dP)    # has return object, might make copy, Ref[2]的公式(15a)
+        fluxVy = self.flux.FluxVy(dVx, dVy, dVz, dP)    # Ref[2]的公式(15a)
+        fluxVz = self.flux.FluxVz(dVx, dVy, dVz, dP)    # Ref[2]的公式(15b)
+        fluxP = self.flux.FluxP(dVx, dVy, dVz, dP)      # Ref[2]的公式(15c)
 
         for index, paras in enumerate(self.BC.BCpara):
             # 'RI' refers to the limit value of the reflection coefficient as the frequency approaches infinity, i.e., :math:`R_\\inf`.
             # 'RP' refers to real pole pairs, i.e., :math:`A` (stored in 1st row), :math:`\\zeta` (stored in 2nd row).
             #     'CP' refers to complex pole pairs, i.e., :math:`B` (stored in 1st row), :math:`C` (stored in 2nd row),
             #          :math:`\\alpha` (stored in 3rd row), :math:`\\beta`(stored in 4th row).
-            # vn: 公式(7),(8)
+            # vn: Ref[1]公式(7),(8)
             BCvar[index]["vn"] = (
                 self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
                 * Vx.reshape(-1)[self.BCnode[index]["vmap"]]
                 + self.n_xyz[1].reshape(-1)[self.BCnode[index]["map"]]
                 * Vy.reshape(-1)[self.BCnode[index]["vmap"]]
                 + self.n_xyz[2].reshape(-1)[self.BCnode[index]["map"]]
-                * Vz.reshape(-1)[self.BCnode[index]["vmap"]]
+                * Vz.reshape(-1)[self.BCnode[index]["vmap"]] # 计算的是各个速度分量在在face法向上的分量
             )
             BCvar[index]["ou"] = (
-                BCvar[index]["vn"] + P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 / self.c0 # [1]公式(16)
+                BCvar[index]["vn"] + P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 / self.c0 # Ref[1]公式(16)
             )
-            BCvar[index]["in"] = BCvar[index]["ou"] * paras["RI"] # [1]公式(18)的第一项,RI表示R无穷
+            BCvar[index]["in"] = BCvar[index]["ou"] * paras["RI"] # Ref[1]公式(18)的第一项,RI表示R无穷
 
             for polekey in paras:
                 if polekey == "RP":
                     for i in range(paras["RP"].shape[1]):
-                        BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i] # [1]公式(18)的第二项
+                        BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i] # Ref[1]公式(18)的第二项
                         BCvar[index]["phi"][i] = (
-                            BCvar[index]["ou"] - paras["RP"][1, i] * BCvar[index]["phi"][i] # [1]公式(20a)
+                            BCvar[index]["ou"] - paras["RP"][1, i] * BCvar[index]["phi"][i] # Ref[1]公式(20a),Ref[3]公式(13a-c),这里这样写是为了时间推进(Ref[3]公式(14))
                         )  # RHS for BCvar[index]['phi']
 
                 elif polekey == "CP":
@@ -1006,18 +1010,19 @@ class AcousticsSimulation:
                         BCvar[index]["in"] += (
                             paras["CP"][0, i] * BCvar[index]["kexi1"][i]
                             + paras["CP"][1, i] * BCvar[index]["kexi2"][i]
-                        ) # [1]公式(18)第三项
+                        ) # Ref[1]公式(18)第三项
                         kexi1temp = BCvar[index]["kexi1"][i].copy()
                         BCvar[index]["kexi1"][i] = (
                             BCvar[index]["ou"]
                             - paras["CP"][2, i] * BCvar[index]["kexi1"][i]
-                            - paras["CP"][3, i] * BCvar[index]["kexi2"][i] # [1]公式(20b)
+                            - paras["CP"][3, i] * BCvar[index]["kexi2"][i] # Ref[1]公式(20b),Ref[3]公式(13a-c),时间推进
                         )  # RHS for BCvar[index]['kexi1'] 
                         BCvar[index]["kexi2"][i] = (
                             -paras["CP"][2, i] * BCvar[index]["kexi2"][i]
-                            + paras["CP"][3, i] * kexi1temp # [1]公式(20c)
+                            + paras["CP"][3, i] * kexi1temp # Ref[1]公式(20c),Ref[3]公式(13a-c),时间推进
                         )  # RHS for BCvar[index]['kexi2']
-            # 
+            # Ref[1]: 公式(15)关于LA的乘积可见 https://github.com/YinLiu-91/dgfem-acoustic-my/issues/33#issuecomment-2437623660
+            # 但是fluxVx,fluxVy,fluxVz前面的p是怎么来的？
             fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (
                 self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
                 * P.reshape(-1)[self.BCnode[index]["vmap"]]

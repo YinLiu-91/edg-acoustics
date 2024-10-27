@@ -31,8 +31,8 @@ monopole_xyz = numpy.array([3.04, 2.59, 1.62])  # x,y,z coordinate of the source
 freq_upper_limit = 200  # upper limit of the frequency content of the source signal in Hz. The source signal is a Gaussian pulse with a frequency content up to this limit.
 
 # Approximation degrees
-Nx = 4  # in space
-Nt = 4  # in time
+Nx = 4  # in space  # 阶次
+Nt = 4  # in time   # 阶次
 CFL = 0.5  # CFL number, default is 0.5.
 recx = numpy.array([4.26])
 recy = numpy.array([1.76])
