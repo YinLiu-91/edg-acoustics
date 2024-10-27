@@ -1,4 +1,6 @@
 """This module provides preprocessing functionalities for the edg_acoustics package.
+    Ref:
+    [2]: Room acoustics modelling in the time-domain with the nodal discontinuous Galerkin method
 """
 
 from __future__ import annotations
@@ -64,6 +66,7 @@ class UpwindFlux(Flux):
         self.rho0 = rho0
         self.c0 = c0
         self.n_xyz = n_xyz
+        # 下面的定义见ref[2]的公式(15)
         self.cn1s = -c0 * n_xyz[0] ** 2 / 2
         self.cn2s = -c0 * n_xyz[1] ** 2 / 2
         self.cn3s = -c0 * n_xyz[2] ** 2 / 2
@@ -94,7 +97,7 @@ class UpwindFlux(Flux):
 
         Returns:
             numpy.ndarray: The calculated pressure flux.
-
+        Ref[2]的公式(15d)
         """
         return self.csn1rho * dvx + self.csn2rho * dvy + self.csn3rho * dvz - self.c0 / 2 * dp
 
@@ -115,6 +118,7 @@ class UpwindFlux(Flux):
 
         Returns:
             numpy.ndarray: The calculated flux of velocity in x-direction.
+        Ref[2]的公式(15a)
         """
         return self.cn1s * dvx + self.cn1n2 * dvy + self.cn1n3 * dvz + self.n1rho * dp
 
@@ -135,6 +139,7 @@ class UpwindFlux(Flux):
 
         Returns:
             numpy.ndarray: The calculated flux of velocity in y-direction.
+        Ref[2]的公式(15b)
         """
         return self.cn1n2 * dvx + self.cn2s * dvy + self.cn2n3 * dvz + self.n2rho * dp
 
@@ -155,5 +160,6 @@ class UpwindFlux(Flux):
 
         Returns:
             numpy.ndarray: The calculated flux of velocity in z-direction.
+        Ref[2]的公式(15c)
         """
         return self.cn1n3 * dvx + self.cn2n3 * dvy + self.cn3s * dvz + self.n3rho * dp
