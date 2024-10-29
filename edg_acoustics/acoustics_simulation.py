@@ -1022,7 +1022,7 @@ class AcousticsSimulation:
                             + paras["CP"][3, i] * kexi1temp # Ref[1]公式(20c),Ref[3]公式(13a-c),时间推进
                         )  # RHS for BCvar[index]['kexi2']
             # Ref[1]: 公式(15)关于LA的乘积可见 https://github.com/YinLiu-91/dgfem-acoustic-my/issues/33#issuecomment-2437623660
-            # 但是fluxVx,fluxVy,fluxVz前面的p是怎么来的？
+            # 但是fluxVx,fluxVy,fluxVz前面的p是怎么来的？从ref[2]的公式(10)(12)中可以看出原因，一部分是q+一部分是q-
             fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (
                 self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
                 * P.reshape(-1)[self.BCnode[index]["vmap"]]
