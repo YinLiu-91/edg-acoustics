@@ -143,3 +143,6 @@ else
         'AS','lambdaS','freq' )
 end
 
+% RP,CP定义在python代码中，A_k,\xi_k这些定义在 Ref[1]的公式(18),公式(20)中
+% RP=[AS,lambdaS]=[C,-diag(A)]=[A_k,\xi_k]
+% CP=[BS,CS,alphaS,betaS]=[real(C),imag(C),-real(A),-imag(A)]=[B_l,C_l,\alpha_l,\beta_L]
