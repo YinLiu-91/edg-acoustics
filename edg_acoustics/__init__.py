@@ -1,16 +1,24 @@
-"""Documentation about edg_acoustics (in init.py file)."""
+"""edg_acoustics package."""
 
-import logging
-from .acoustics_simulation import AcousticsSimulation
-from .mesh import Mesh
-from .boundary_condition import BoundaryCondition, AbsorbBC
-from .initial_condition import InitialCondition, Monopole_IC
-from .preprocessing import Flux, UpwindFlux
-from .time_integration import TimeIntegrator, TSI_TI
-from .postprocessing import Monopole_postprocessor
+from __future__ import annotations
 
-logging.getLogger(__name__).addHandler(logging.NullHandler())
+from edg_acoustics.acoustics_simulation import AcousticsSimulation
+from edg_acoustics.boundary_condition import BoundaryCondition, AbsorbBC
+from edg_acoustics.preprocessing import Flux, UpwindFlux
+from edg_acoustics.initial_condition import InitialCondition, Monopole_IC
+from edg_acoustics.time_integration import TimeIntegrator, RungeKutta
+from edg_acoustics.mesh import Mesh
+import torch  # 添加PyTorch导入
 
-__author__ = "Huiqing Wang, Artur Palha"
-__email__ = "h.wang6@tue.nl, A.Palha@tudelft.nl"
-__version__ = "1.0.0-alpha.1"
+__all__ = [
+    "AcousticsSimulation",
+    "BoundaryCondition",
+    "AbsorbBC",
+    "Flux",
+    "UpwindFlux",
+    "InitialCondition",
+    "Monopole_IC",
+    "TimeIntegrator",
+    "RungeKutta",
+    "Mesh",
+]

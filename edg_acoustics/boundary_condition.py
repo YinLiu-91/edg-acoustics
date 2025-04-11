@@ -13,7 +13,8 @@ Todo:
 
 from __future__ import annotations
 import abc
-import numpy
+import torch
+import numpy as np  # 保留numpy用于与numpy数组的兼容性
 
 __all__ = ["BoundaryCondition", "AbsorbBC", "FREQ_MAX"]
 
@@ -43,21 +44,46 @@ class BoundaryCondition(abc.ABC):
         BCvar = []
         for index, paras in enumerate(BCpara):
             BCvar.append({"label": paras["label"]})
+            # 确定设备
+            device = 'cpu'
+            for key, value in paras.items():
+                if isinstance(value, torch.Tensor):
+                    device = value.device
+                    break
+
+            # 创建变量
+            for key in BCnode[index]["map"]:
+                if isinstance(BCnode[index]["map"], np.ndarray):
+                    map_shape = BCnode[index]["map"].shape
+                    map_tensor = torch.from_numpy(
+                        BCnode[index]["map"]).to(device)
+                else:
+                    map_shape = BCnode[index]["map"].shape
+                    map_tensor = BCnode[index]["map"]
+
             BCvar[index].update(
-                {key: numpy.zeros(BCnode[index]["map"].shape) for key in ["vn", "ou", "in"]}
+                {key: torch.zeros(map_shape, device=device)
+                 for key in ["vn", "ou", "in"]}
             )
+
             for polekey in paras:
                 if polekey == "RP":
+                    rp_shape = paras["RP"].shape if isinstance(
+                        paras["RP"], torch.Tensor) else torch.from_numpy(paras["RP"]).shape
                     BCvar[index].update(
                         {
-                            key: numpy.zeros([paras["RP"].shape[1], BCnode[index]["map"].shape[0]])
+                            key: torch.zeros(
+                                [rp_shape[1], map_shape[0]], device=device)
                             for key in ["phi", "PHI"]
                         }
                     )
                 elif polekey == "CP":
+                    cp_shape = paras["CP"].shape if isinstance(
+                        paras["CP"], torch.Tensor) else torch.from_numpy(paras["CP"]).shape
                     BCvar[index].update(
                         {
-                            key: numpy.zeros([paras["CP"].shape[1], BCnode[index]["map"].shape[0]])
+                            key: torch.zeros(
+                                [cp_shape[1], map_shape[0]], device=device)
                             for key in ["kexi1", "kexi2", "KEXI1", "KEXI2"]
                         }
                     )
@@ -93,7 +119,15 @@ class BoundaryCondition(abc.ABC):
             AssertionError: If the number of BC types is not the same in the BC_labels and BC_para, an error is raised.
             AssertionError: If the causality and reality conditions are not met, an error is raised.
         """
-        omega = numpy.arange(1.0, freq_max)
+        # 确定设备
+        device = 'cpu'
+        for para in BCpara:
+            for key, value in para.items():
+                if isinstance(value, torch.Tensor):
+                    device = value.device
+                    break
+
+        omega = torch.arange(1.0, freq_max, device=device)
 
         assert len(BCpara) == len(BCnode), (
             "[edg_acoustics.BoundaryCondition] The number of BC types must be the same "
@@ -110,12 +144,15 @@ class BoundaryCondition(abc.ABC):
                 "and all labels in the BCnode must have boundary parameters input."
             )
             assert (
-                numpy.abs(AbsorbBC.compute_Re(omega, paras)) <= 1.0
+                torch.abs(AbsorbBC.compute_Re(omega, paras)) <= 1.0
             ).all(), "[edg_acoustics.BoundaryCondition] All reflection coefficient must be smaller than 1"
 
             for polekey in paras:
                 if polekey == "RP":
-                    zeta = paras["RP"][1, :]
+                    if isinstance(paras["RP"], np.ndarray):
+                        zeta = torch.from_numpy(paras["RP"][1, :]).to(device)
+                    else:
+                        zeta = paras["RP"][1, :]
                     assert (zeta > 0).all(), (
                         "[edg_acoustics.BoundaryCondition] To satisfy causality and reality conditions, "
                         "all real poles must have positive damping ratio, physical boundary "
@@ -123,7 +160,10 @@ class BoundaryCondition(abc.ABC):
                         + " has failed the physical admissbility test"
                     )
                 elif polekey == "CP":
-                    alpha = paras["CP"][2, :]
+                    if isinstance(paras["CP"], np.ndarray):
+                        alpha = torch.from_numpy(paras["CP"][2, :]).to(device)
+                    else:
+                        alpha = paras["CP"][2, :]
                     assert ((alpha > 0)).all(), (
                         "[edg_acoustics.BoundaryCondition] To satisfy causality and reality conditions, "
                         "all complex poles must have positive damping ratio, physical boundary "
@@ -137,37 +177,65 @@ class BoundaryCondition(abc.ABC):
             )
 
     @staticmethod
-    def compute_Re(omega: numpy.ndarray, paras: dict):
+    def compute_Re(omega: torch.Tensor, paras: dict):
         """Computes the reflection coefficient given the passed parameter of the multi-pole model at the frequencies of omega.
 
         Args:
-            omega (numpy.ndarray): angular frequency.
+            omega (torch.Tensor): angular frequency.
             paras (dict): see :attr:`edg_acoustics.boundary_condition.AbsorbBC.BCpara`.
 
         Returns:
-            Re (numpy.ndarray): reflection coefficient at the frequencies of omega.
+            Re (torch.Tensor): reflection coefficient at the frequencies of omega.
         """
-        Re = numpy.ones(omega.shape)
+        # 确定设备
+        device = omega.device
+
+        Re = torch.ones(omega.shape, device=device)
 
         for polekey in paras:
             if polekey == "RI":
-                Re = Re * paras["RI"]
+                if isinstance(paras["RI"], np.ndarray):
+                    Re = Re * torch.from_numpy(paras["RI"]).to(device)
+                else:
+                    Re = Re * paras["RI"]
             elif polekey == "RP":
-                Re = Re * paras["RI"]
-                A = paras["RP"][0, :]
-                zeta = paras["RP"][1, :]
+                if isinstance(paras["RI"], np.ndarray):
+                    Re = Re * torch.from_numpy(paras["RI"]).to(device)
+                else:
+                    Re = Re * paras["RI"]
+
+                if isinstance(paras["RP"], np.ndarray):
+                    A = torch.from_numpy(paras["RP"][0, :]).to(device)
+                    zeta = torch.from_numpy(paras["RP"][1, :]).to(device)
+                else:
+                    A = paras["RP"][0, :]
+                    zeta = paras["RP"][1, :]
+
                 for j, a in enumerate(A):
                     Re = Re + a / (1j * omega + zeta[j])
             elif polekey == "CP":
-                Re = Re * paras["RI"]
-                B = paras["CP"][0, :]
-                C = paras["CP"][1, :]
-                alpha = paras["CP"][2, :]
-                beta = paras["CP"][3, :]
+                if isinstance(paras["RI"], np.ndarray):
+                    Re = Re * torch.from_numpy(paras["RI"]).to(device)
+                else:
+                    Re = Re * paras["RI"]
+
+                if isinstance(paras["CP"], np.ndarray):
+                    B = torch.from_numpy(paras["CP"][0, :]).to(device)
+                    C = torch.from_numpy(paras["CP"][1, :]).to(device)
+                    alpha = torch.from_numpy(paras["CP"][2, :]).to(device)
+                    beta = torch.from_numpy(paras["CP"][3, :]).to(device)
+                else:
+                    B = paras["CP"][0, :]
+                    C = paras["CP"][1, :]
+                    alpha = paras["CP"][2, :]
+                    beta = paras["CP"][3, :]
+
                 for j, _ in enumerate(B):
                     Re = Re + 0.5 * (
-                        (B[j] + 1j * C[j]) / (alpha[j] + 1j * beta[j] + 1j * omega)
-                        + (B[j] - 1j * C[j]) / (alpha[j] - 1j * beta[j] + 1j * omega)
+                        (B[j] + 1j * C[j]) /
+                        (alpha[j] + 1j * beta[j] + 1j * omega)
+                        + (B[j] - 1j * C[j]) /
+                        (alpha[j] - 1j * beta[j] + 1j * omega)
                     )
         return Re
 
@@ -185,7 +253,7 @@ class AbsorbBC(BoundaryCondition):
 
     Attributes:
         BCpara (list [dict]): a list of boundary conditon parameters from the multi-pole model. Each element is a dictionary
-            with keys (values) ['label'(int),'RI'(float),'RP'(numpy.ndarray),'CP'(numpy.ndarray)].
+            with keys (values) ['label'(int),'RI'(float),'RP'(torch.Tensor),'CP'(torch.Tensor)].
             'RI' refers to the limit value of the reflection coefficient as the frequency approaches infinity, i.e., :math:`R_\\infty`.
             'RP' refers to real pole pairs, i.e., :math:`A` (stored in 1st row), :math:`\\zeta` (stored in 2nd row).
             'CP' refers to complex pole pairs, i.e., :math:`B` (stored in 1st row), :math:`C` (stored in 2nd row), :math:`\\alpha` (stored in 3rd row), :math:`\\beta` (stored in 4th row).
