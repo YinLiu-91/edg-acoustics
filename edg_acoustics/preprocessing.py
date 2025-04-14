@@ -1,10 +1,9 @@
-"""This module provides preprocessing functionalities for the edg_acoustics package.
-"""
+"""This module provides preprocessing functionalities for the edg_acoustics package."""
 
 from __future__ import annotations
 import abc
 import numpy
-
+import torch
 
 __all__ = ["Flux", "UpwindFlux"]
 
@@ -96,7 +95,12 @@ class UpwindFlux(Flux):
             numpy.ndarray: The calculated pressure flux.
 
         """
-        return self.csn1rho * dvx + self.csn2rho * dvy + self.csn3rho * dvz - self.c0 / 2 * dp
+        return (
+            torch.from_numpy(self.csn1rho) * dvx
+            + torch.from_numpy(self.csn2rho) * dvy
+            + torch.from_numpy(self.csn3rho) * dvz
+            - self.c0 / 2 * dp
+        )
 
     def FluxVx(
         self,
@@ -116,7 +120,12 @@ class UpwindFlux(Flux):
         Returns:
             numpy.ndarray: The calculated flux of velocity in x-direction.
         """
-        return self.cn1s * dvx + self.cn1n2 * dvy + self.cn1n3 * dvz + self.n1rho * dp
+        return (
+            torch.from_numpy(self.cn1s) * dvx
+            + torch.from_numpy(self.cn1n2) * dvy
+            + torch.from_numpy(self.cn1n3) * dvz
+            + torch.from_numpy(self.n1rho) * dp
+        )
 
     def FluxVy(
         self,
@@ -136,7 +145,12 @@ class UpwindFlux(Flux):
         Returns:
             numpy.ndarray: The calculated flux of velocity in y-direction.
         """
-        return self.cn1n2 * dvx + self.cn2s * dvy + self.cn2n3 * dvz + self.n2rho * dp
+        return (
+            torch.from_numpy(self.cn1n2) * dvx
+            + torch.from_numpy(self.cn2s) * dvy
+            + torch.from_numpy(self.cn2n3) * dvz
+            + torch.from_numpy(self.n2rho) * dp
+        )
 
     def FluxVz(
         self,
@@ -156,4 +170,9 @@ class UpwindFlux(Flux):
         Returns:
             numpy.ndarray: The calculated flux of velocity in z-direction.
         """
-        return self.cn1n3 * dvx + self.cn2n3 * dvy + self.cn3s * dvz + self.n3rho * dp
+        return (
+            torch.from_numpy(self.cn1n3) * dvx
+            + torch.from_numpy(self.cn2n3) * dvy
+            + torch.from_numpy(self.cn3s) * dvz
+            + torch.from_numpy(self.n3rho) * dp
+        )

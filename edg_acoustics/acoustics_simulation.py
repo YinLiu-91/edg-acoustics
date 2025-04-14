@@ -11,7 +11,8 @@ import scipy
 import modepy
 from scipy.spatial.qhull import Delaunay
 import edg_acoustics
-import time;
+import time
+import torch
 
 __all__ = ["AcousticsSimulation", "NODETOL"]
 
@@ -171,7 +172,9 @@ class AcousticsSimulation:
         self.node_tolerance = node_tolerance  # define a tolerance value for determining if a node belongs to a facet or not
 
         # Compute attributes
-        self.Np = AcousticsSimulation.compute_Np(Nx)  # number of colocation nodes in an element
+        self.Np = AcousticsSimulation.compute_Np(
+            Nx
+        )  # number of colocation nodes in an element
         self.Nfp = AcousticsSimulation.compute_Nfp(Nx)  # number of nodes in a face
 
         # dtype_input: str ='float64'
@@ -190,7 +193,9 @@ class AcousticsSimulation:
         self.V = AcousticsSimulation.compute_van_der_monde_matrix(self.Nx, self.rst)
 
         # Compute the derivative matrices
-        self.Dr, self.Ds, self.Dt = AcousticsSimulation.compute_derivative_matrix(self.Nx, self.rst)
+        self.Dr, self.Ds, self.Dt = AcousticsSimulation.compute_derivative_matrix(
+            self.Nx, self.rst
+        )
 
         # Find all the ``Nfp`` face nodes that lie on each surface.
         self.Fmask = AcousticsSimulation.compute_Fmask(self.rst, self.node_tolerance)
@@ -221,7 +226,9 @@ class AcousticsSimulation:
             self.BC_list, self.mesh.EToV, self.vmapM, self.mesh.BC_triangles, self.Nx
         )
 
-        self.dtscale = AcousticsSimulation.diameter_3d(self.Fscale) / self.c0 / (2 * self.Nx + 1)
+        self.dtscale = (
+            AcousticsSimulation.diameter_3d(self.Fscale) / self.c0 / (2 * self.Nx + 1)
+        )
 
     # Static methods ---------------------------------------------------------------------------------------------------
     @staticmethod
@@ -358,7 +365,9 @@ class AcousticsSimulation:
         return rst, xyz
 
     @staticmethod
-    def compute_van_der_monde_matrix(Nx: int, rst: numpy.ndarray, dim: int = 3) -> numpy.ndarray:
+    def compute_van_der_monde_matrix(
+        Nx: int, rst: numpy.ndarray, dim: int = 3
+    ) -> numpy.ndarray:
         """Compute vandermonde matrix of the orthonormal basis functions on the reference simplex element. Polynomial basis
             can exactly represent polynomials up to degree :attr:`Nx`. Consider the set of :attr:`~.AcousticsSimulation.Np` 3D nodes, with the coordinates of each node :math:`i` equal to
             :math:`(r_{i}, s_{i}, t_{i})`, in :attr:`.rst`, and the set of :math:`m` orthonormal basis functions,
@@ -420,7 +429,9 @@ class AcousticsSimulation:
         Nx = AcousticsSimulation.compute_Nx_from_Np(
             Np
         )  # get the polynomial degree of approximation
-        Nfp = AcousticsSimulation.compute_Nfp(Nx)  # get the number of collocation points per face
+        Nfp = AcousticsSimulation.compute_Nfp(
+            Nx
+        )  # get the number of collocation points per face
 
         Fmask = numpy.zeros([4, Nfp], dtype=numpy.uint8)
 
@@ -473,7 +484,9 @@ class AcousticsSimulation:
                 faceS = rst[2, Fmask[3]]
 
             simplex_basis = modepy.simplex_onb(2, Nx)
-            vandermondeFace = modepy.vandermonde(simplex_basis, numpy.vstack((faceR, faceS)))
+            vandermondeFace = modepy.vandermonde(
+                simplex_basis, numpy.vstack((faceR, faceS))
+            )
             vandermondeFace = numpy.asarray(
                 vandermondeFace
             )  # just to make sure it is a numpy array to avoid errors
@@ -517,7 +530,11 @@ class AcousticsSimulation:
         zt = Dt @ xyz[2]
 
         # Compute the Jacobian determinant of the coordinate transformation
-        J = xr * (ys * zt - zs * yt) - yr * (xs * zt - zs * xt) + zr * (xs * yt - ys * xt)
+        J = (
+            xr * (ys * zt - zs * yt)
+            - yr * (xs * zt - zs * xt)
+            + zr * (xs * yt - ys * xt)
+        )
 
         # Compute the derivates of the local coordinates at the nodal points
         rst_xyz = numpy.zeros([3, 3, Np, N_tets])  # pre-allocate memory space
@@ -539,7 +556,10 @@ class AcousticsSimulation:
 
     @staticmethod
     def normals_3d(
-        xyz: numpy.ndarray, rst_xyz: numpy.ndarray, J: numpy.ndarray, Fmask: numpy.ndarray
+        xyz: numpy.ndarray,
+        rst_xyz: numpy.ndarray,
+        J: numpy.ndarray,
+        Fmask: numpy.ndarray,
     ):
         """Compute outward pointing normals at element's faces as well as surface Jacobians.
 
@@ -610,7 +630,9 @@ class AcousticsSimulation:
         norm_n = numpy.sqrt(
             (n_xyz[0, :, :] ** 2) + (n_xyz[1, :, :] ** 2) + (n_xyz[2, :, :] ** 2)
         )  # vector norm of normal vectors
-        n_xyz = n_xyz / norm_n  # this does broadcasting over all the 3 direction x, y, z
+        n_xyz = (
+            n_xyz / norm_n
+        )  # this does broadcasting over all the 3 direction x, y, z
 
         # Compute the face Jacobians
         sJ = norm_n * J[Fmask.reshape(-1)]
@@ -750,7 +772,9 @@ class AcousticsSimulation:
         BCType = BCType.repeat(Nfp, axis=0)
 
         for i in range(len(BC_list)):
-            BCnode[i]["map"] = numpy.nonzero(BCType.reshape(-1) == BCnode[i]["label"])[0]
+            BCnode[i]["map"] = numpy.nonzero(BCType.reshape(-1) == BCnode[i]["label"])[
+                0
+            ]
             BCnode[i]["vmap"] = vmapM[BCnode[i]["map"]]
 
         return BCnode
@@ -769,7 +793,7 @@ class AcousticsSimulation:
         diameter = 6 / AtoV
         return diameter.min()
 
-    def grad_3d(self, U: numpy.ndarray, axis: str):
+    def grad_3d(self, U: torch.tensor, axis: str):
         """Compute partial derivative dU/dx, dU/dy, dU/dz, or gradient dU/dx + dU/dy + dU/dz
 
         Args:
@@ -782,20 +806,38 @@ class AcousticsSimulation:
             dUdz (numpy.ndarray): ``[Np, N_tets]`` derivatives :math:`\\frac{\\partial U}{\\partial z}` at every nodal point, if axis is 'z'.
             Tuple of gradient (numpy.ndarray): ``[Np, N_tets]`` gradient (:math:`\\frac{\\partial U}{\\partial x}, \\frac{\\partial U}{\\partial y}, \\frac{\\partial U}{\\partial z}`), if axis is 'xyz'.
         """
-        dUdr = self.Dr @ U
-        dUds = self.Ds @ U
-        dUdt = self.Dt @ U
+        dUdr = torch.from_numpy(self.Dr) @ U
+        dUds = torch.from_numpy(self.Ds) @ U
+        dUdt = torch.from_numpy(self.Dt) @ U
         if axis == "x":
-            return self.rst_xyz[0, 0] * dUdr + self.rst_xyz[1, 0] * dUds + self.rst_xyz[2, 0] * dUdt
+            return (
+                torch.from_numpy(self.rst_xyz[0, 0]) * dUdr
+                + torch.from_numpy(self.rst_xyz[1, 0]) * dUds
+                + torch.from_numpy(self.rst_xyz[2, 0]) * dUdt
+            )
         elif axis == "y":
-            return self.rst_xyz[0, 1] * dUdr + self.rst_xyz[1, 1] * dUds + self.rst_xyz[2, 1] * dUdt
+            return (
+                torch.from_numpy(self.rst_xyz[0, 1]) * dUdr
+                + torch.from_numpy(self.rst_xyz[1, 1]) * dUds
+                + torch.from_numpy(self.rst_xyz[2, 1]) * dUdt
+            )
         elif axis == "z":
-            return self.rst_xyz[0, 2] * dUdr + self.rst_xyz[1, 2] * dUds + self.rst_xyz[2, 2] * dUdt
+            return (
+                torch.from_numpy(self.rst_xyz[0, 2]) * dUdr
+                + torch.from_numpy(self.rst_xyz[1, 2]) * dUds
+                + torch.from_numpy(self.rst_xyz[2, 2]) * dUdt
+            )
         elif axis == "xyz":
             return (
-                self.rst_xyz[0, 0] * dUdr + self.rst_xyz[1, 0] * dUds + self.rst_xyz[2, 0] * dUdt,
-                self.rst_xyz[0, 1] * dUdr + self.rst_xyz[1, 1] * dUds + self.rst_xyz[2, 1] * dUdt,
-                self.rst_xyz[0, 2] * dUdr + self.rst_xyz[1, 2] * dUds + self.rst_xyz[2, 2] * dUdt,
+                torch.from_numpy(self.rst_xyz[0, 0]) * dUdr
+                + torch.from_numpy(self.rst_xyz[1, 0]) * dUds
+                + torch.from_numpy(self.rst_xyz[2, 0]) * dUdt,
+                torch.from_numpy(self.rst_xyz[0, 1]) * dUdr
+                + torch.from_numpy(self.rst_xyz[1, 1]) * dUds
+                + torch.from_numpy(self.rst_xyz[2, 1]) * dUdt,
+                torch.from_numpy(self.rst_xyz[0, 2]) * dUdr
+                + torch.from_numpy(self.rst_xyz[1, 2]) * dUds
+                + torch.from_numpy(self.rst_xyz[2, 2]) * dUdt,
             )
         else:
             raise ValueError(f"Invalid axis: {axis}")
@@ -838,7 +880,9 @@ class AcousticsSimulation:
             v2r = v2.T.reshape((3, 1, n_tet))
             v3r = v3.T.reshape((3, 1, n_tet))
             mat = numpy.concatenate((v1r, v2r, v3r), axis=1)
-            inv_mat = numpy.linalg.inv(mat.T).T  # https://stackoverflow.com/a/41851137/12056867
+            inv_mat = numpy.linalg.inv(
+                mat.T
+            ).T  # https://stackoverflow.com/a/41851137/12056867
             N_rec = rec.shape[1]
             orir = numpy.repeat(ori[:, :, numpy.newaxis], N_rec, axis=2)
             newp = numpy.einsum("imk,kmj->kij", inv_mat, rec - orir)
@@ -874,7 +918,9 @@ class AcousticsSimulation:
             self.mesh.vertices, self.mesh.EToV, self.rec, methodLocate
         )
 
-        old_nodes = self.xyz[:, :, nodeindex]  # old_nodes.shape = (3, Np, N_rec) #type: ignore
+        old_nodes = self.xyz[
+            :, :, nodeindex
+        ]  # old_nodes.shape = (3, Np, N_rec) #type: ignore
         simplex_basis = modepy.simplex_onb(self.dim, self.Nx)
         v_new = modepy.vandermonde(simplex_basis, self.rec)
         sampleWeight = numpy.zeros([self.rec.shape[1], len(simplex_basis)])
@@ -952,110 +998,140 @@ class AcousticsSimulation:
             RHS_Vz (numpy.ndarray): Right-hand side values for velocity in the z-direction.
             BCvar (list[dict]): updated boundary condition variables.
         """
+        P = torch.from_numpy(P)
+        Vx = torch.from_numpy(Vx)
+        Vy = torch.from_numpy(Vy)
+        Vz = torch.from_numpy(Vz)
 
         # Initialize jump variables
-        dVx = numpy.zeros_like(self.Fscale)
-        dVy = numpy.zeros_like(dVx)
-        dVz = numpy.zeros_like(dVx)
-        dP = numpy.zeros_like(dVx)
+        dVx = torch.zeros_like(torch.from_numpy(self.Fscale))
+        dVy = torch.zeros_like(dVx)
+        dVz = torch.zeros_like(dVx)
+        dP = torch.zeros_like(dVx)
 
         # calculate jump values across the faces of neighboring elements
-        dVx.reshape(-1)[:] = Vx.reshape(-1)[self.vmapM] - Vx.reshape(-1)[self.vmapP]
+        dVx.reshape(-1)[:] = (
+            Vx.reshape(-1)[torch.from_numpy(self.vmapM).long()]
+            - Vx.reshape(-1)[torch.from_numpy(self.vmapP).long()]
+        )
         # print(f"dVx ID {id(dVx)}, sim.dVx ID {id(self.sim.dVx)}")
-        dVy.reshape(-1)[:] = Vy.reshape(-1)[self.vmapM] - Vy.reshape(-1)[self.vmapP]
-        dVz.reshape(-1)[:] = Vz.reshape(-1)[self.vmapM] - Vz.reshape(-1)[self.vmapP]
-        dP.reshape(-1)[:] = P.reshape(-1)[self.vmapM] - P.reshape(-1)[self.vmapP]
+        dVy.reshape(-1)[:] = (
+            Vy.reshape(-1)[torch.from_numpy(self.vmapM).long()]
+            - Vy.reshape(-1)[torch.from_numpy(self.vmapP).long()]
+        )
+        dVz.reshape(-1)[:] = (
+            Vz.reshape(-1)[torch.from_numpy(self.vmapM).long()]
+            - Vz.reshape(-1)[torch.from_numpy(self.vmapP).long()]
+        )
+        dP.reshape(-1)[:] = (
+            P.reshape(-1)[torch.from_numpy(self.vmapM).long()]
+            - P.reshape(-1)[torch.from_numpy(self.vmapP).long()]
+        )
 
         # Compute the inter-element fluxes
-        fluxVx = self.flux.FluxVx(dVx, dVy, dVz, dP)  # has return object, might make copy,
+        fluxVx = self.flux.FluxVx(
+            dVx, dVy, dVz, dP
+        )  # has return object, might make copy,
         fluxVy = self.flux.FluxVy(dVx, dVy, dVz, dP)
         fluxVz = self.flux.FluxVz(dVx, dVy, dVz, dP)
         fluxP = self.flux.FluxP(dVx, dVy, dVz, dP)
 
-        for index, paras in enumerate(self.BC.BCpara):
-            # 'RI' refers to the limit value of the reflection coefficient as the frequency approaches infinity, i.e., :math:`R_\\inf`.
-            # 'RP' refers to real pole pairs, i.e., :math:`A` (stored in 1st row), :math:`\\zeta` (stored in 2nd row).
-            #     'CP' refers to complex pole pairs, i.e., :math:`B` (stored in 1st row), :math:`C` (stored in 2nd row),
-            #          :math:`\\alpha` (stored in 3rd row), :math:`\\beta`(stored in 4th row).
-            BCvar[index]["vn"] = (
-                self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
-                * Vx.reshape(-1)[self.BCnode[index]["vmap"]]
-                + self.n_xyz[1].reshape(-1)[self.BCnode[index]["map"]]
-                * Vy.reshape(-1)[self.BCnode[index]["vmap"]]
-                + self.n_xyz[2].reshape(-1)[self.BCnode[index]["map"]]
-                * Vz.reshape(-1)[self.BCnode[index]["vmap"]]
-            )
-            BCvar[index]["ou"] = (
-                BCvar[index]["vn"] + P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 / self.c0
-            )
-            BCvar[index]["in"] = BCvar[index]["ou"] * paras["RI"]
+        # for index, paras in enumerate(self.BC.BCpara):
+        #     # 'RI' refers to the limit value of the reflection coefficient as the frequency approaches infinity, i.e., :math:`R_\\inf`.
+        #     # 'RP' refers to real pole pairs, i.e., :math:`A` (stored in 1st row), :math:`\\zeta` (stored in 2nd row).
+        #     #     'CP' refers to complex pole pairs, i.e., :math:`B` (stored in 1st row), :math:`C` (stored in 2nd row),
+        #     #          :math:`\\alpha` (stored in 3rd row), :math:`\\beta`(stored in 4th row).
+        #     BCvar[index]["vn"] = (
+        #         self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
+        #         * Vx.reshape(-1)[self.BCnode[index]["vmap"]]
+        #         + self.n_xyz[1].reshape(-1)[self.BCnode[index]["map"]]
+        #         * Vy.reshape(-1)[self.BCnode[index]["vmap"]]
+        #         + self.n_xyz[2].reshape(-1)[self.BCnode[index]["map"]]
+        #         * Vz.reshape(-1)[self.BCnode[index]["vmap"]]
+        #     )
+        #     BCvar[index]["ou"] = (
+        #         BCvar[index]["vn"] + P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 / self.c0
+        #     )
+        #     BCvar[index]["in"] = BCvar[index]["ou"] * paras["RI"]
 
-            for polekey in paras:
-                if polekey == "RP":
-                    for i in range(paras["RP"].shape[1]):
-                        BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i]
-                        BCvar[index]["phi"][i] = (
-                            BCvar[index]["ou"] - paras["RP"][1, i] * BCvar[index]["phi"][i]
-                        )  # RHS for BCvar[index]['phi']
+        #     for polekey in paras:
+        #         if polekey == "RP":
+        #             for i in range(paras["RP"].shape[1]):
+        #                 BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i]
+        #                 BCvar[index]["phi"][i] = (
+        #                     BCvar[index]["ou"] - paras["RP"][1, i] * BCvar[index]["phi"][i]
+        #                 )  # RHS for BCvar[index]['phi']
 
-                elif polekey == "CP":
-                    for i in range(paras["CP"].shape[1]):
-                        BCvar[index]["in"] += (
-                            paras["CP"][0, i] * BCvar[index]["kexi1"][i]
-                            + paras["CP"][1, i] * BCvar[index]["kexi2"][i]
-                        )
-                        kexi1temp = BCvar[index]["kexi1"][i].copy()
-                        BCvar[index]["kexi1"][i] = (
-                            BCvar[index]["ou"]
-                            - paras["CP"][2, i] * BCvar[index]["kexi1"][i]
-                            - paras["CP"][3, i] * BCvar[index]["kexi2"][i]
-                        )  # RHS for BCvar[index]['kexi1']
-                        BCvar[index]["kexi2"][i] = (
-                            -paras["CP"][2, i] * BCvar[index]["kexi2"][i]
-                            + paras["CP"][3, i] * kexi1temp
-                        )  # RHS for BCvar[index]['kexi2']
-            fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (
-                self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
-                * P.reshape(-1)[self.BCnode[index]["vmap"]]
-                / self.rho0
-                - self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
-                * self.c0
-                * (BCvar[index]["ou"] + BCvar[index]["in"])
-                / 2
-            )
-            fluxVy.reshape(-1)[self.BCnode[index]["map"]] = (
-                self.n_xyz[1].reshape(-1)[self.BCnode[index]["map"]]
-                * P.reshape(-1)[self.BCnode[index]["vmap"]]
-                / self.rho0
-                - self.n_xyz[1].reshape(-1)[self.BCnode[index]["map"]]
-                * self.c0
-                * (BCvar[index]["ou"] + BCvar[index]["in"])
-                / 2
-            )
-            fluxVz.reshape(-1)[self.BCnode[index]["map"]] = (
-                self.n_xyz[2].reshape(-1)[self.BCnode[index]["map"]]
-                * P.reshape(-1)[self.BCnode[index]["vmap"]]
-                / self.rho0
-                - self.n_xyz[2].reshape(-1)[self.BCnode[index]["map"]]
-                * self.c0
-                * (BCvar[index]["ou"] + BCvar[index]["in"])
-                / 2
-            )
-            fluxP.reshape(-1)[self.BCnode[index]["map"]] = (
-                self.c0**2
-                * self.rho0
-                * (BCvar[index]["vn"] - 0.5 * (BCvar[index]["ou"] - BCvar[index]["in"]))
-            )
+        #         elif polekey == "CP":
+        #             for i in range(paras["CP"].shape[1]):
+        #                 BCvar[index]["in"] += (
+        #                     paras["CP"][0, i] * BCvar[index]["kexi1"][i]
+        #                     + paras["CP"][1, i] * BCvar[index]["kexi2"][i]
+        #                 )
+        #                 kexi1temp = BCvar[index]["kexi1"][i].copy()
+        #                 BCvar[index]["kexi1"][i] = (
+        #                     BCvar[index]["ou"]
+        #                     - paras["CP"][2, i] * BCvar[index]["kexi1"][i]
+        #                     - paras["CP"][3, i] * BCvar[index]["kexi2"][i]
+        #                 )  # RHS for BCvar[index]['kexi1']
+        #                 BCvar[index]["kexi2"][i] = (
+        #                     -paras["CP"][2, i] * BCvar[index]["kexi2"][i]
+        #                     + paras["CP"][3, i] * kexi1temp
+        #                 )  # RHS for BCvar[index]['kexi2']
+        #     fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (
+        #         self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
+        #         * P.reshape(-1)[self.BCnode[index]["vmap"]]
+        #         / self.rho0
+        #         - self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
+        #         * self.c0
+        #         * (BCvar[index]["ou"] + BCvar[index]["in"])
+        #         / 2
+        #     )
+        #     fluxVy.reshape(-1)[self.BCnode[index]["map"]] = (
+        #         self.n_xyz[1].reshape(-1)[self.BCnode[index]["map"]]
+        #         * P.reshape(-1)[self.BCnode[index]["vmap"]]
+        #         / self.rho0
+        #         - self.n_xyz[1].reshape(-1)[self.BCnode[index]["map"]]
+        #         * self.c0
+        #         * (BCvar[index]["ou"] + BCvar[index]["in"])
+        #         / 2
+        #     )
+        #     fluxVz.reshape(-1)[self.BCnode[index]["map"]] = (
+        #         self.n_xyz[2].reshape(-1)[self.BCnode[index]["map"]]
+        #         * P.reshape(-1)[self.BCnode[index]["vmap"]]
+        #         / self.rho0
+        #         - self.n_xyz[2].reshape(-1)[self.BCnode[index]["map"]]
+        #         * self.c0
+        #         * (BCvar[index]["ou"] + BCvar[index]["in"])
+        #         / 2
+        #     )
+        #     fluxP.reshape(-1)[self.BCnode[index]["map"]] = (
+        #         self.c0**2
+        #         * self.rho0
+        #         * (BCvar[index]["vn"] - 0.5 * (BCvar[index]["ou"] - BCvar[index]["in"]))
+        #     )
 
         dPdx, dPdy, dPdz = self.grad_3d(P, "xyz")
         RHS_P = -self.c0**2 * self.rho0 * (
             self.grad_3d(Vx, "x") + self.grad_3d(Vy, "y") + self.grad_3d(Vz, "z")  # type: ignore
-        ) + self.lift @ (self.Fscale * fluxP)
-        RHS_Vx = -dPdx / self.rho0 + self.lift @ (self.Fscale * fluxVx)
-        RHS_Vy = -dPdy / self.rho0 + self.lift @ (self.Fscale * fluxVy)
-        RHS_Vz = -dPdz / self.rho0 + self.lift @ (self.Fscale * fluxVz)
+        ) + torch.from_numpy(self.lift) @ (torch.from_numpy(self.Fscale) * fluxP)
+        RHS_Vx = -dPdx / self.rho0 + torch.from_numpy(self.lift) @ (
+            torch.from_numpy(self.Fscale) * fluxVx
+        )
+        RHS_Vy = -dPdy / self.rho0 + torch.from_numpy(self.lift) @ (
+            torch.from_numpy(self.Fscale) * fluxVy
+        )
+        RHS_Vz = -dPdz / self.rho0 + torch.from_numpy(self.lift) @ (
+            torch.from_numpy(self.Fscale) * fluxVz
+        )
 
-        return RHS_P, RHS_Vx, RHS_Vy, RHS_Vz, BCvar
+        return (
+            torch.Tensor.numpy(RHS_P),
+            torch.Tensor.numpy(RHS_Vx),
+            torch.Tensor.numpy(RHS_Vy),
+            torch.Tensor.numpy(RHS_Vz),
+            BCvar,
+        )
 
     def time_integration(self, **kwargs):
         """Perform time integration for the acoustics simulation. Additional keyword arguments are optional and can vary:
@@ -1106,18 +1182,25 @@ class AcousticsSimulation:
                 newTime = time.time()
                 elapsed = newTime - curTime
                 if prevEstimated == 0:
-                    estimated = (self.Ntimesteps - (StepIndex + 1)) * elapsed/10
+                    estimated = (self.Ntimesteps - (StepIndex + 1)) * elapsed / 10
                 else:
-                    estimated = 0.99 * prevEstimated + 0.01 * (self.Ntimesteps - (StepIndex + 1)) * elapsed/10
-                    
-                minutes = math.floor(estimated/60)
+                    estimated = (
+                        0.99 * prevEstimated
+                        + 0.01 * (self.Ntimesteps - (StepIndex + 1)) * elapsed / 10
+                    )
+
+                minutes = math.floor(estimated / 60)
                 seconds = math.floor(estimated - 60 * minutes)
                 print(f"Estimated time left: {minutes} minutes {seconds} seconds")
-                print(f"Percentage done: {round(100*(StepIndex + 1)/self.Ntimesteps)} %")
-                curTime = newTime;
-                prevEstimated = estimated;
+                print(
+                    f"Percentage done: {round(100*(StepIndex + 1)/self.Ntimesteps)} %"
+                )
+                curTime = newTime
+                prevEstimated = estimated
                 print(f"Current/Total step {StepIndex+1}/{self.Ntimesteps}")
-                print(f"Current/Total time {self.time_integrator.dt * StepIndex}/{total_time}")
+                print(
+                    f"Current/Total time {self.time_integrator.dt * StepIndex}/{total_time}"
+                )
                 print(f"P at mic locations {self.prec[:,StepIndex]}")
 
             if "save_step" in kwargs and StepIndex % kwargs["save_step"] == 0:
@@ -1173,4 +1256,6 @@ class AcousticsSimulation:
                 CFL=self.time_integrator.CFL,
             )
         else:
-            raise ValueError("Invalid format, the format should be either 'mat' or 'npy'.")
+            raise ValueError(
+                "Invalid format, the format should be either 'mat' or 'npy'."
+            )
