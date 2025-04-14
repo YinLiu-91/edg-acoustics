@@ -1036,82 +1036,82 @@ class AcousticsSimulation:
         fluxVz = self.flux.FluxVz(dVx, dVy, dVz, dP)
         fluxP = self.flux.FluxP(dVx, dVy, dVz, dP)
 
-        # for index, paras in enumerate(self.BC.BCpara):
-        #     # 'RI' refers to the limit value of the reflection coefficient as the frequency approaches infinity, i.e., :math:`R_\\inf`.
-        #     # 'RP' refers to real pole pairs, i.e., :math:`A` (stored in 1st row), :math:`\\zeta` (stored in 2nd row).
-        #     #     'CP' refers to complex pole pairs, i.e., :math:`B` (stored in 1st row), :math:`C` (stored in 2nd row),
-        #     #          :math:`\\alpha` (stored in 3rd row), :math:`\\beta`(stored in 4th row).
-        #     BCvar[index]["vn"] = (
-        #         self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
-        #         * Vx.reshape(-1)[self.BCnode[index]["vmap"]]
-        #         + self.n_xyz[1].reshape(-1)[self.BCnode[index]["map"]]
-        #         * Vy.reshape(-1)[self.BCnode[index]["vmap"]]
-        #         + self.n_xyz[2].reshape(-1)[self.BCnode[index]["map"]]
-        #         * Vz.reshape(-1)[self.BCnode[index]["vmap"]]
-        #     )
-        #     BCvar[index]["ou"] = (
-        #         BCvar[index]["vn"]
-        #         + P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 / self.c0
-        #     )
-        #     BCvar[index]["in"] = BCvar[index]["ou"] * paras["RI"]
+        for index, paras in enumerate(self.BC.BCpara):
+            # 'RI' refers to the limit value of the reflection coefficient as the frequency approaches infinity, i.e., :math:`R_\\inf`.
+            # 'RP' refers to real pole pairs, i.e., :math:`A` (stored in 1st row), :math:`\\zeta` (stored in 2nd row).
+            #     'CP' refers to complex pole pairs, i.e., :math:`B` (stored in 1st row), :math:`C` (stored in 2nd row),
+            #          :math:`\\alpha` (stored in 3rd row), :math:`\\beta`(stored in 4th row).
+            BCvar[index]["vn"] = (
+                torch.from_numpy(self.n_xyz[0]).reshape(-1)[self.BCnode[index]["map"]]
+                * Vx.reshape(-1)[self.BCnode[index]["vmap"]]
+                + torch.from_numpy(self.n_xyz[1]).reshape(-1)[self.BCnode[index]["map"]]
+                * Vy.reshape(-1)[self.BCnode[index]["vmap"]]
+                + torch.from_numpy(self.n_xyz[2]).reshape(-1)[self.BCnode[index]["map"]]
+                * Vz.reshape(-1)[self.BCnode[index]["vmap"]]
+            )
+            BCvar[index]["ou"] = (
+                BCvar[index]["vn"]
+                + P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 / self.c0
+            )
+            BCvar[index]["in"] = BCvar[index]["ou"] * paras["RI"]
 
-        #     for polekey in paras:
-        #         if polekey == "RP":
-        #             for i in range(paras["RP"].shape[1]):
-        #                 BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i]
-        #                 BCvar[index]["phi"][i] = (
-        #                     BCvar[index]["ou"]
-        #                     - paras["RP"][1, i] * BCvar[index]["phi"][i]
-        #                 )  # RHS for BCvar[index]['phi']
+            for polekey in paras:
+                if polekey == "RP":
+                    for i in range(paras["RP"].shape[1]):
+                        BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i]
+                        BCvar[index]["phi"][i] = (
+                            BCvar[index]["ou"]
+                            - paras["RP"][1, i] * BCvar[index]["phi"][i]
+                        )  # RHS for BCvar[index]['phi']
 
-        #         elif polekey == "CP":
-        #             for i in range(paras["CP"].shape[1]):
-        #                 BCvar[index]["in"] += (
-        #                     paras["CP"][0, i] * BCvar[index]["kexi1"][i]
-        #                     + paras["CP"][1, i] * BCvar[index]["kexi2"][i]
-        #                 )
-        #                 kexi1temp = BCvar[index]["kexi1"][i].copy()
-        #                 BCvar[index]["kexi1"][i] = (
-        #                     BCvar[index]["ou"]
-        #                     - paras["CP"][2, i] * BCvar[index]["kexi1"][i]
-        #                     - paras["CP"][3, i] * BCvar[index]["kexi2"][i]
-        #                 )  # RHS for BCvar[index]['kexi1']
-        #                 BCvar[index]["kexi2"][i] = (
-        #                     -paras["CP"][2, i] * BCvar[index]["kexi2"][i]
-        #                     + paras["CP"][3, i] * kexi1temp
-        #                 )  # RHS for BCvar[index]['kexi2']
-        #     fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (
-        #         self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
-        #         * P.reshape(-1)[self.BCnode[index]["vmap"]]
-        #         / self.rho0
-        #         - self.n_xyz[0].reshape(-1)[self.BCnode[index]["map"]]
-        #         * self.c0
-        #         * (BCvar[index]["ou"] + BCvar[index]["in"])
-        #         / 2
-        #     )
-        #     fluxVy.reshape(-1)[self.BCnode[index]["map"]] = (
-        #         self.n_xyz[1].reshape(-1)[self.BCnode[index]["map"]]
-        #         * P.reshape(-1)[self.BCnode[index]["vmap"]]
-        #         / self.rho0
-        #         - self.n_xyz[1].reshape(-1)[self.BCnode[index]["map"]]
-        #         * self.c0
-        #         * (BCvar[index]["ou"] + BCvar[index]["in"])
-        #         / 2
-        #     )
-        #     fluxVz.reshape(-1)[self.BCnode[index]["map"]] = (
-        #         self.n_xyz[2].reshape(-1)[self.BCnode[index]["map"]]
-        #         * P.reshape(-1)[self.BCnode[index]["vmap"]]
-        #         / self.rho0
-        #         - self.n_xyz[2].reshape(-1)[self.BCnode[index]["map"]]
-        #         * self.c0
-        #         * (BCvar[index]["ou"] + BCvar[index]["in"])
-        #         / 2
-        #     )
-        #     fluxP.reshape(-1)[self.BCnode[index]["map"]] = (
-        #         self.c0**2
-        #         * self.rho0
-        #         * (BCvar[index]["vn"] - 0.5 * (BCvar[index]["ou"] - BCvar[index]["in"]))
-        #     )
+                elif polekey == "CP":
+                    for i in range(paras["CP"].shape[1]):
+                        BCvar[index]["in"] += (
+                            paras["CP"][0, i] * BCvar[index]["kexi1"][i]
+                            + paras["CP"][1, i] * BCvar[index]["kexi2"][i]
+                        )
+                        kexi1temp = BCvar[index]["kexi1"][i].clone()
+                        BCvar[index]["kexi1"][i] = (
+                            BCvar[index]["ou"]
+                            - paras["CP"][2, i] * BCvar[index]["kexi1"][i]
+                            - paras["CP"][3, i] * BCvar[index]["kexi2"][i]
+                        )  # RHS for BCvar[index]['kexi1']
+                        BCvar[index]["kexi2"][i] = (
+                            -paras["CP"][2, i] * BCvar[index]["kexi2"][i]
+                            + paras["CP"][3, i] * kexi1temp
+                        )  # RHS for BCvar[index]['kexi2']
+            fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (
+                torch.from_numpy(self.n_xyz[0]).reshape(-1)[self.BCnode[index]["map"]]
+                * P.reshape(-1)[self.BCnode[index]["vmap"]]
+                / self.rho0
+                - torch.from_numpy(self.n_xyz[0]).reshape(-1)[self.BCnode[index]["map"]]
+                * self.c0
+                * (BCvar[index]["ou"] + BCvar[index]["in"])
+                / 2
+            )
+            fluxVy.reshape(-1)[self.BCnode[index]["map"]] = (
+                torch.from_numpy(self.n_xyz[1]).reshape(-1)[self.BCnode[index]["map"]]
+                * P.reshape(-1)[self.BCnode[index]["vmap"]]
+                / self.rho0
+                - torch.from_numpy(self.n_xyz[1]).reshape(-1)[self.BCnode[index]["map"]]
+                * self.c0
+                * (BCvar[index]["ou"] + BCvar[index]["in"])
+                / 2
+            )
+            fluxVz.reshape(-1)[self.BCnode[index]["map"]] = (
+                torch.from_numpy(self.n_xyz[2]).reshape(-1)[self.BCnode[index]["map"]]
+                * P.reshape(-1)[self.BCnode[index]["vmap"]]
+                / self.rho0
+                - torch.from_numpy(self.n_xyz[2]).reshape(-1)[self.BCnode[index]["map"]]
+                * self.c0
+                * (BCvar[index]["ou"] + BCvar[index]["in"])
+                / 2
+            )
+            fluxP.reshape(-1)[self.BCnode[index]["map"]] = (
+                self.c0**2
+                * self.rho0
+                * (BCvar[index]["vn"] - 0.5 * (BCvar[index]["ou"] - BCvar[index]["in"]))
+            )
 
         dPdx, dPdy, dPdz = self.grad_3d(P, "xyz")
         RHS_P = -self.c0**2 * self.rho0 * (
