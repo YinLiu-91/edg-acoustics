@@ -127,10 +127,10 @@ class TSI_TI(TimeIntegrator):
         for index, paras in enumerate(BC.BCpara):
             for polekey in paras:
                 if polekey == "RP":
-                    BC.BCvar[index]["phi"] = BC.BCvar[index]["PHI"].copy()
+                    BC.BCvar[index]["phi"] = BC.BCvar[index]["PHI"].clone()
                 elif polekey == "CP":
-                    BC.BCvar[index]["kexi1"] = BC.BCvar[index]["KEXI1"].copy()
-                    BC.BCvar[index]["kexi2"] = BC.BCvar[index]["KEXI2"].copy()
+                    BC.BCvar[index]["kexi1"] = BC.BCvar[index]["KEXI1"].clone()
+                    BC.BCvar[index]["kexi2"] = BC.BCvar[index]["KEXI2"].clone()
 
         ##########################
         for Tind in range(1, self.Nt + 1):

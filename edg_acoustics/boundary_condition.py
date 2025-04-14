@@ -1,10 +1,10 @@
-""" This module provides boundary condition functionalities for the edg_acoustics package.
+"""This module provides boundary condition functionalities for the edg_acoustics package.
 
-The edg_acoustics.boundary_condition provide more necessary functionalities 
+The edg_acoustics.boundary_condition provide more necessary functionalities
 (based upon :mod:`edg_acoustics.acoustics_simulation`) to setup boundary condition for a specific scenario.
 
-Please note that most of used mesh functions and classes in edg_acoustics are present in the main :mod:`edg_acoustics` namespace 
-rather than in :mod:`edg_acoustics.boundary_condition`. 
+Please note that most of used mesh functions and classes in edg_acoustics are present in the main :mod:`edg_acoustics` namespace
+rather than in :mod:`edg_acoustics.boundary_condition`.
 
 Todo:
     * For future development, the module can be extended to include other types of boundary conditions.
@@ -14,6 +14,7 @@ Todo:
 from __future__ import annotations
 import abc
 import numpy
+import torch
 
 __all__ = ["BoundaryCondition", "AbsorbBC", "FREQ_MAX"]
 
@@ -44,20 +45,27 @@ class BoundaryCondition(abc.ABC):
         for index, paras in enumerate(BCpara):
             BCvar.append({"label": paras["label"]})
             BCvar[index].update(
-                {key: numpy.zeros(BCnode[index]["map"].shape) for key in ["vn", "ou", "in"]}
+                {
+                    key: torch.zeros(BCnode[index]["map"].shape)
+                    for key in ["vn", "ou", "in"]
+                }
             )
             for polekey in paras:
                 if polekey == "RP":
                     BCvar[index].update(
                         {
-                            key: numpy.zeros([paras["RP"].shape[1], BCnode[index]["map"].shape[0]])
+                            key: torch.zeros(
+                                [paras["RP"].shape[1], BCnode[index]["map"].shape[0]]
+                            )
                             for key in ["phi", "PHI"]
                         }
                     )
                 elif polekey == "CP":
                     BCvar[index].update(
                         {
-                            key: numpy.zeros([paras["CP"].shape[1], BCnode[index]["map"].shape[0]])
+                            key: torch.zeros(
+                                [paras["CP"].shape[1], BCnode[index]["map"].shape[0]]
+                            )
                             for key in ["kexi1", "kexi2", "KEXI1", "KEXI2"]
                         }
                     )
@@ -198,7 +206,9 @@ class AbsorbBC(BoundaryCondition):
                 with potential keys ['label', 'vn', 'ou', 'in', 'phi', 'PHI', 'kexi1', 'kexi2', 'KEXI1', 'KEXI2'].
     """
 
-    def __init__(self, BCnode: list[dict], BCpara: list[dict], freq_max: float = FREQ_MAX):
+    def __init__(
+        self, BCnode: list[dict], BCpara: list[dict], freq_max: float = FREQ_MAX
+    ):
         BoundaryCondition.check_BCpara(BCnode, BCpara, freq_max)
         self.BCpara = BCpara
         self.BCvar = BoundaryCondition.init_ADEvariables(self.BCpara, BCnode)
