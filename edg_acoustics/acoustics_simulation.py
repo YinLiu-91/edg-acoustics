@@ -976,10 +976,10 @@ class AcousticsSimulation:
 
     def RHS_operator(
         self,
-        P: numpy.ndarray,
-        Vx: numpy.ndarray,
-        Vy: numpy.ndarray,
-        Vz: numpy.ndarray,
+        P: torch.tensor,
+        Vx: torch.tensor,
+        Vy: torch.tensor,
+        Vz: torch.tensor,
         BCvar: list[dict],
     ):
         """Compute the right-hand side of the linear acoustic equations with the DG discretization.
@@ -998,10 +998,10 @@ class AcousticsSimulation:
             RHS_Vz (numpy.ndarray): Right-hand side values for velocity in the z-direction.
             BCvar (list[dict]): updated boundary condition variables.
         """
-        P = torch.from_numpy(P)
-        Vx = torch.from_numpy(Vx)
-        Vy = torch.from_numpy(Vy)
-        Vz = torch.from_numpy(Vz)
+        # P = torch.from_numpy(P)
+        # Vx = torch.from_numpy(Vx)
+        # Vy = torch.from_numpy(Vy)
+        # Vz = torch.from_numpy(Vz)
 
         # Initialize jump variables
         dVx = torch.zeros_like(torch.from_numpy(self.Fscale))
@@ -1050,7 +1050,8 @@ class AcousticsSimulation:
         #         * Vz.reshape(-1)[self.BCnode[index]["vmap"]]
         #     )
         #     BCvar[index]["ou"] = (
-        #         BCvar[index]["vn"] + P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 / self.c0
+        #         BCvar[index]["vn"]
+        #         + P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 / self.c0
         #     )
         #     BCvar[index]["in"] = BCvar[index]["ou"] * paras["RI"]
 
@@ -1059,7 +1060,8 @@ class AcousticsSimulation:
         #             for i in range(paras["RP"].shape[1]):
         #                 BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i]
         #                 BCvar[index]["phi"][i] = (
-        #                     BCvar[index]["ou"] - paras["RP"][1, i] * BCvar[index]["phi"][i]
+        #                     BCvar[index]["ou"]
+        #                     - paras["RP"][1, i] * BCvar[index]["phi"][i]
         #                 )  # RHS for BCvar[index]['phi']
 
         #         elif polekey == "CP":
@@ -1125,11 +1127,19 @@ class AcousticsSimulation:
             torch.from_numpy(self.Fscale) * fluxVz
         )
 
+        # return (
+        #     torch.Tensor.numpy(RHS_P),
+        #     torch.Tensor.numpy(RHS_Vx),
+        #     torch.Tensor.numpy(RHS_Vy),
+        #     torch.Tensor.numpy(RHS_Vz),
+        #     BCvar,
+        # )
+
         return (
-            torch.Tensor.numpy(RHS_P),
-            torch.Tensor.numpy(RHS_Vx),
-            torch.Tensor.numpy(RHS_Vy),
-            torch.Tensor.numpy(RHS_Vz),
+            RHS_P,
+            RHS_Vx,
+            RHS_Vy,
+            RHS_Vz,
             BCvar,
         )
 

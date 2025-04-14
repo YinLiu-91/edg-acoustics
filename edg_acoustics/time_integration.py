@@ -1,6 +1,6 @@
-""" This module contains the abstract base class for time integrators and the implementation of the Taylor-series time integration scheme.
+"""This module contains the abstract base class for time integrators and the implementation of the Taylor-series time integration scheme.
 
-The edg_acoustics.time_integration provide more necessary functionalities 
+The edg_acoustics.time_integration provide more necessary functionalities
 (based upon :mod:`edg_acoustics.acoustics_simulation`) to setup time integration.
 """
 
@@ -11,6 +11,7 @@ import abc
 import math
 import numpy
 import edg_acoustics
+import torch
 
 __all__ = ["TimeIntegrator", "TSI_TI", "CFL_Default"]
 
@@ -118,6 +119,11 @@ class TSI_TI(TimeIntegrator):
         Vy0 = Vy.copy()
         Vz0 = Vz.copy()
 
+        P0 = torch.from_numpy(P0)
+        Vx0 = torch.from_numpy(Vx0)
+        Vy0 = torch.from_numpy(Vy0)
+        Vz0 = torch.from_numpy(Vz0)
+
         for index, paras in enumerate(BC.BCpara):
             for polekey in paras:
                 if polekey == "RP":
@@ -132,21 +138,27 @@ class TSI_TI(TimeIntegrator):
             P0, Vx0, Vy0, Vz0, BC.BCvar = self.L_operator(P0, Vx0, Vy0, Vz0, BC.BCvar)
 
             # Add the Taylor term \frac{dt^{Tind}}{Tind!}L^{Tind}q
-            Vx += self.dt**Tind / math.factorial(Tind) * Vx0
-            Vy += self.dt**Tind / math.factorial(Tind) * Vy0
-            Vz += self.dt**Tind / math.factorial(Tind) * Vz0
-            P += self.dt**Tind / math.factorial(Tind) * P0
+            Vx += self.dt**Tind / math.factorial(Tind) * torch.Tensor.numpy(Vx0)
+            Vy += self.dt**Tind / math.factorial(Tind) * torch.Tensor.numpy(Vy0)
+            Vz += self.dt**Tind / math.factorial(Tind) * torch.Tensor.numpy(Vz0)
+            P += self.dt**Tind / math.factorial(Tind) * torch.Tensor.numpy(P0)
 
             for index, paras in enumerate(BC.BCpara):
                 for polekey in paras:
                     if polekey == "RP":
                         BC.BCvar[index]["PHI"] += (
-                            self.dt**Tind / math.factorial(Tind) * BC.BCvar[index]["phi"]
+                            self.dt**Tind
+                            / math.factorial(Tind)
+                            * BC.BCvar[index]["phi"]
                         )
                     elif polekey == "CP":
                         BC.BCvar[index]["KEXI1"] += (
-                            self.dt**Tind / math.factorial(Tind) * BC.BCvar[index]["kexi1"]
+                            self.dt**Tind
+                            / math.factorial(Tind)
+                            * BC.BCvar[index]["kexi1"]
                         )
                         BC.BCvar[index]["KEXI2"] += (
-                            self.dt**Tind / math.factorial(Tind) * BC.BCvar[index]["kexi2"]
+                            self.dt**Tind
+                            / math.factorial(Tind)
+                            * BC.BCvar[index]["kexi2"]
                         )
