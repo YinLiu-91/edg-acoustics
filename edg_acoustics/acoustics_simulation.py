@@ -812,9 +812,9 @@ class AcousticsSimulation:
             dUdz (numpy.ndarray): ``[Np, N_tets]`` derivatives :math:`\\frac{\\partial U}{\\partial z}` at every nodal point, if axis is 'z'.
             Tuple of gradient (numpy.ndarray): ``[Np, N_tets]`` gradient (:math:`\\frac{\\partial U}{\\partial x}, \\frac{\\partial U}{\\partial y}, \\frac{\\partial U}{\\partial z}`), if axis is 'xyz'.
         """
-        dUdr = torch.from_numpy(self.Dr) @ U
-        dUds = torch.from_numpy(self.Ds) @ U
-        dUdt = torch.from_numpy(self.Dt) @ U
+        dUdr = torch.from_numpy(self.Dr) @ U.to(torch.float64)
+        dUds = torch.from_numpy(self.Ds) @ U.to(torch.float64)
+        dUdt = torch.from_numpy(self.Dt) @ U.to(torch.float64)
         if axis == "x":
             return (
                 torch.from_numpy(self.rst_xyz[0, 0]) * dUdr
@@ -944,10 +944,10 @@ class AcousticsSimulation:
             IC (edg_acoustics.InitialCondition): the initial condition object.
         """
         self.IC = IC
-        self.P = self.IC.Pinit(self.xyz)
-        self.Vx = self.IC.VXinit(self.xyz)
-        self.Vy = self.IC.VYinit(self.xyz)
-        self.Vz = self.IC.VZinit(self.xyz)
+        self.P = self.IC.Pinit(torch.from_numpy(self.xyz).to(torch.float32))
+        self.Vx = self.IC.VXinit(torch.from_numpy(self.xyz).to(torch.float32))
+        self.Vy = self.IC.VYinit(torch.from_numpy(self.xyz).to(torch.float32))
+        self.Vz = self.IC.VZinit(torch.from_numpy(self.xyz).to(torch.float32))
 
     def init_BC(self, BC):
         """load the boundary condition and save it to the :class:`AcousticsSimulation` class.

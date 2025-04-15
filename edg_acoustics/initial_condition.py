@@ -8,6 +8,7 @@ import abc
 import numpy
 from scipy.interpolate import interp1d
 import torch
+import math
 
 __all__ = ["InitialCondition", "Monopole_IC"]
 
@@ -23,19 +24,19 @@ class InitialCondition(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def Pinit(self, xyz: numpy.ndarray):
+    def Pinit(self, xyz: torch.tensor):
         """Setup initial condition for pressure."""
 
     @abc.abstractmethod
-    def VXinit(self, xyz: numpy.ndarray):
+    def VXinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in x-direction."""
 
     @abc.abstractmethod
-    def VYinit(self, xyz: numpy.ndarray):
+    def VYinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in y-direction."""
 
     @abc.abstractmethod
-    def VZinit(self, xyz: numpy.ndarray):
+    def VZinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in z-direction."""
 
 
@@ -76,8 +77,9 @@ class Monopole_IC(InitialCondition):
 
         return linear_interp(frequency)
 
-    def Pinit(self, xyz: numpy.ndarray):
+    def Pinit(self, xyz: torch.tensor):
         """Setup initial condition for pressure."""
+        xyz = xyz.cpu().numpy()
         pressure = numpy.exp(
             -numpy.log(2)
             * (
@@ -89,14 +91,14 @@ class Monopole_IC(InitialCondition):
         )
         return torch.from_numpy(pressure)
 
-    def VXinit(self, xyz: numpy.ndarray):
+    def VXinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in x-direction."""
-        return torch.from_numpy(numpy.zeros([xyz.shape[1], xyz.shape[2]]))
+        return torch.zeros([xyz.shape[1], xyz.shape[2]])
 
-    def VYinit(self, xyz: numpy.ndarray):
+    def VYinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in y-direction."""
-        return torch.from_numpy(numpy.zeros([xyz.shape[1], xyz.shape[2]]))
+        return torch.zeros([xyz.shape[1], xyz.shape[2]])
 
-    def VZinit(self, xyz: numpy.ndarray):
+    def VZinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in z-direction."""
-        return torch.from_numpy(numpy.zeros([xyz.shape[1], xyz.shape[2]]))
+        return torch.zeros([xyz.shape[1], xyz.shape[2]])
