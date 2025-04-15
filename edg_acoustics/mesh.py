@@ -58,20 +58,20 @@ class Mesh:
             label named 'my_label'. If BC_labels['my_label'] is not present in the mesh, an error is raised. If a label
             is present in the mesh but not in BC_labels, an error is raised.
 
-        BC_triangles (dict[str, numpy.ndarray]): a dictionary containing the list of triangles that have a certain
-            boundary condition. self.BC_triangles['BC_label'] is a numpy.ndarray with the nodes of each triangle where
+        BC_triangles (dict[str, torch.tensor]): a dictionary containing the list of triangles that have a certain
+            boundary condition. self.BC_triangles['BC_label'] is a torch.tensor with the nodes of each triangle where
             boundary condition of type 'BC_label' is to be implemented. The nodes defining each triangle in the
-            numpy.ndarray are stored per row.
+            torch.tensor are stored per row.
 
-        EToE (numpy.ndarray): an ``[4, N_tets]`` array containing the information of which elements are neighbors of
+        EToE (torch.tensor): an ``[4, N_tets]`` array containing the information of which elements are neighbors of
             an element, i.e., EToE[j, i] returns the index of the jth neighbor of element `i`. The definition of `j`-th
             neighbor follows the mesh generator's convention.
 
-        EToF (numpy.ndarray): an ``[4 x N_tets]`` array containing the information of which face is shared between the
+        EToF (torch.tensor): an ``[4 x N_tets]`` array containing the information of which face is shared between the
             element and its neighbor,  i.e.,  EToF[j, i] returns the face index of the `j`-th neighbor of element `i`.
             Face indices follow the same convention as neighbor indices.
 
-        EToV (numpy.ndarray): An ``[4 x self.N_tets]`` array containing the 4 indices of the vertices of the :attr:`N_tets`
+        EToV (torch.tensor): An ``[4 x self.N_tets]`` array containing the 4 indices of the vertices of the :attr:`N_tets`
             tetrahedra that make up the mesh.
 
         filename (str): the file (pathlike) to read geometry or mesh data from. Current supported format includes
@@ -94,7 +94,7 @@ class Mesh:
 
         N_vertices (int): The number of vertices that make up the mesh.
 
-        vertices (numpy.ndarray): An ``[3 x self.N_vertices]`` array containing the 3 coordinates of the :attr:`N_vertices`
+        vertices (torch.tensor): An ``[3 x self.N_vertices]`` array containing the 3 coordinates of the :attr:`N_vertices`
             vertices that make up the mesh.
 
 
@@ -320,7 +320,9 @@ class Mesh:
         self.EToV = mesh_data.cells_dict["tetra"].transpose()
 
         # Compute the mesh connectivity
-        self.EToE, self.EToF = self.compute_element_connectivity(self.EToV)
+        self.EToE, self.EToF = self.compute_element_connectivity(
+            torch.from_numpy(self.EToV)
+        )
 
     # Operators --------------------------------------------------------------------------------------------------------
     def __eq__(self, other: edg_acoustics.Mesh):
@@ -356,7 +358,7 @@ class Mesh:
 
     # Static methods ---------------------------------------------------------------------------------------------------
     @staticmethod
-    def compute_element_connectivity(EToV: numpy.ndarray):
+    def compute_element_connectivity(EToV: torch.tensor):
         """Computes element connectivity.
 
         Given a mesh made up of :attr:`N_tets` tetrahedra, compute the element connectivity. Element connectivity contains the
@@ -370,15 +372,13 @@ class Mesh:
             EToE (torch.tensor): see :attr:`EToE`.
             EToF (torch.tensor): see :attr:`EToF`.
         """
-        # 将输入转换为torch tensor
-        EToV_t = torch.from_numpy(EToV)
 
         # Transpose EToV for the algorithm
-        tets_t = EToV_t.T
+        tets_t = EToV.T
 
         # Get information on the number of faces, EToV, and vertices
         N_faces_per_tet = 4
-        N_tets = EToV_t.shape[1]
+        N_tets = EToV.shape[1]
 
         # N_vertices = EToV.max() + 1  # number of vertices in the mesh, +1 because indexing starts at 0
 
