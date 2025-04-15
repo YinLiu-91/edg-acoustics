@@ -93,10 +93,10 @@ class TSI_TI(TimeIntegrator):
 
     def step_dt(
         self,
-        P: numpy.ndarray,
-        Vx: numpy.ndarray,
-        Vy: numpy.ndarray,
-        Vz: numpy.ndarray,
+        P: torch.tensor,
+        Vx: torch.tensor,
+        Vy: torch.tensor,
+        Vz: torch.tensor,
         BC: edg_acoustics.AbsorbBC,
     ):
         """Takes the pressure, velocity at the time T and evolves/updates them to time T + dt.
@@ -114,15 +114,15 @@ class TSI_TI(TimeIntegrator):
         #   P := P(T) and P(T + dt)
         # the same for all the other variables
         ##########################
-        P0 = P.copy()
-        Vx0 = Vx.copy()
-        Vy0 = Vy.copy()
-        Vz0 = Vz.copy()
+        P0 = P.clone()
+        Vx0 = Vx.clone()
+        Vy0 = Vy.clone()
+        Vz0 = Vz.clone()
 
-        P0 = torch.from_numpy(P0)
-        Vx0 = torch.from_numpy(Vx0)
-        Vy0 = torch.from_numpy(Vy0)
-        Vz0 = torch.from_numpy(Vz0)
+        # P0 = torch.from_numpy(P0)
+        # Vx0 = torch.from_numpy(Vx0)
+        # Vy0 = torch.from_numpy(Vy0)
+        # Vz0 = torch.from_numpy(Vz0)
 
         for index, paras in enumerate(BC.BCpara):
             for polekey in paras:
@@ -138,10 +138,10 @@ class TSI_TI(TimeIntegrator):
             P0, Vx0, Vy0, Vz0, BC.BCvar = self.L_operator(P0, Vx0, Vy0, Vz0, BC.BCvar)
 
             # Add the Taylor term \frac{dt^{Tind}}{Tind!}L^{Tind}q
-            Vx += self.dt**Tind / math.factorial(Tind) * torch.Tensor.numpy(Vx0)
-            Vy += self.dt**Tind / math.factorial(Tind) * torch.Tensor.numpy(Vy0)
-            Vz += self.dt**Tind / math.factorial(Tind) * torch.Tensor.numpy(Vz0)
-            P += self.dt**Tind / math.factorial(Tind) * torch.Tensor.numpy(P0)
+            Vx += self.dt**Tind / math.factorial(Tind) * (Vx0)
+            Vy += self.dt**Tind / math.factorial(Tind) * (Vy0)
+            Vz += self.dt**Tind / math.factorial(Tind) * (Vz0)
+            P += self.dt**Tind / math.factorial(Tind) * (P0)
 
             for index, paras in enumerate(BC.BCpara):
                 for polekey in paras:
