@@ -496,7 +496,7 @@ class AcousticsSimulation:
 
             Emat[Fmask[face], face * Nfp : (face + 1) * Nfp] += massFace
 
-        return V @ (V.transpose() @ Emat)
+        return torch.from_numpy(V @ (V.transpose() @ Emat))
 
     @staticmethod
     def geometric_factors_3d(
@@ -1124,16 +1124,10 @@ class AcousticsSimulation:
         dPdx, dPdy, dPdz = self.grad_3d(P, "xyz")
         RHS_P = -self.c0**2 * self.rho0 * (
             self.grad_3d(Vx, "x") + self.grad_3d(Vy, "y") + self.grad_3d(Vz, "z")  # type: ignore
-        ) + torch.from_numpy(self.lift) @ (self.Fscale * fluxP)
-        RHS_Vx = -dPdx / self.rho0 + torch.from_numpy(self.lift) @ (
-            self.Fscale * fluxVx
-        )
-        RHS_Vy = -dPdy / self.rho0 + torch.from_numpy(self.lift) @ (
-            self.Fscale * fluxVy
-        )
-        RHS_Vz = -dPdz / self.rho0 + torch.from_numpy(self.lift) @ (
-            self.Fscale * fluxVz
-        )
+        ) + (self.lift) @ (self.Fscale * fluxP)
+        RHS_Vx = -dPdx / self.rho0 + (self.lift) @ (self.Fscale * fluxVx)
+        RHS_Vy = -dPdy / self.rho0 + (self.lift) @ (self.Fscale * fluxVy)
+        RHS_Vz = -dPdz / self.rho0 + (self.lift) @ (self.Fscale * fluxVz)
 
         # return (
         #     torch.Tensor.numpy(RHS_P),
