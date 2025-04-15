@@ -11,6 +11,7 @@ import meshio
 import gmsh
 import numpy
 import edg_acoustics
+import torch
 
 __all__ = ["Mesh", "PPW_Default", "Nx_default"]
 
@@ -177,10 +178,14 @@ class Mesh:
             Mesh.mesh_geo_file(geo_file, length_of_mesh)
 
             if PPW < 8:
-                print("PPW is less than 8. Decreasing the characteristic length of the mesh")
+                print(
+                    "PPW is less than 8. Decreasing the characteristic length of the mesh"
+                )
                 length_of_mesh_high = length_of_mesh
             elif PPW > 10:
-                print("PPW is greater than 10. Increasing the characteristic length of the mesh")
+                print(
+                    "PPW is greater than 10. Increasing the characteristic length of the mesh"
+                )
                 length_of_mesh_low = length_of_mesh
             else:
                 break
@@ -286,7 +291,9 @@ class Mesh:
         BC_labels_in_mesh = sorted(
             numpy.unique(mesh_data.cell_data_dict["gmsh:physical"]["triangle"])
         )  # get labels in the mesh, sort for faster comparison below
-        BC_labels_in_input = sorted(BC_labels.values())  # get all labels specified in input
+        BC_labels_in_input = sorted(
+            BC_labels.values()
+        )  # get all labels specified in input
         if not BC_labels_in_input == BC_labels_in_mesh:
             raise ValueError(
                 "[edg_acoustics.Mesh] All BC labels must be present in the mesh and all labels in the mesh must be "
@@ -298,7 +305,8 @@ class Mesh:
         self.BC_triangles = {}
         for BC_label in BC_labels:
             triangles_have_label = (
-                mesh_data.cell_data_dict["gmsh:physical"]["triangle"] == BC_labels[BC_label]
+                mesh_data.cell_data_dict["gmsh:physical"]["triangle"]
+                == BC_labels[BC_label]
             )  # array with bools specifying if triangle has BC_label or not
             self.N_BC_triangles[BC_label] = (
                 triangles_have_label.sum()
@@ -356,19 +364,22 @@ class Mesh:
         neighbor shared. This information is returned in two arrays: EToE and EToF.
 
         Args:
-            EToV (numpy.ndarray): see :attr:`EToV`.
+            EToV (torch.tensor): see :attr:`EToV`.
 
         Returns:
-            EToE (numpy.ndarray): see :attr:`EToE`.
-            EToF (numpy.ndarray): see :attr:`EToF`.
+            EToE (torch.tensor): see :attr:`EToE`.
+            EToF (torch.tensor): see :attr:`EToF`.
         """
+        # 将输入转换为torch tensor
+        EToV_t = torch.from_numpy(EToV)
 
         # Transpose EToV for the algorithm
-        tets_t = EToV.transpose()
+        tets_t = EToV_t.T
 
         # Get information on the number of faces, EToV, and vertices
-        N_faces_per_tet = 4  # number of faces per element
-        N_tets = EToV.shape[1]  # number of elements in the mesh
+        N_faces_per_tet = 4
+        N_tets = EToV_t.shape[1]
+
         # N_vertices = EToV.max() + 1  # number of vertices in the mesh, +1 because indexing starts at 0
 
         # Create a unique identifier for each face based on the vertices that make up the face
@@ -380,7 +391,7 @@ class Mesh:
         #    Face 1: made up of vertices [0, 1, 3]
         #    Face 2: made up of vertices [1, 2, 3]
         #    Face 3: made up of vertices [0, 2, 3]
-        face_vertices = numpy.vstack(
+        face_vertices = torch.vstack(
             [
                 tets_t[:, [0, 1, 2]],
                 tets_t[:, [0, 1, 3]],
@@ -391,24 +402,24 @@ class Mesh:
 
         # Then we sort the indices in each face, so that we can easily identify if two faces are the same by the ordered
         # sequence of nodes
-        face_vertices.sort(axis=-1)
+        face_vertices, _ = torch.sort(face_vertices, dim=-1)
 
         # Construct and array with the index of each face in face_vertices
-        face_vertices_idx = numpy.arange(0, N_tets * N_faces_per_tet)
+        face_vertices_idx = torch.arange(0, N_tets * N_faces_per_tet)
 
         # EToE must be initialized with (the element index of the element)
         # EToE = [[ 0  1  2 ... (N_tets - 1)]
         #         [ 0  1  2 ... (N_tests - 1)]
         #         [ 0  1  2 ... (N_tests - 1)]
         #         [ 0  1  2 ... (N_tests - 1)]]
-        EToE = numpy.arange(0, N_tets).reshape([1, -1]).repeat(repeats=N_faces_per_tet, axis=0)
+        EToE = torch.arange(0, N_tets).reshape(1, -1).repeat(N_faces_per_tet, 1)
 
         # EToF must be initialized with (the face index)
         # EToF = [[  0  0  0  ... 0]       |
         #         [  1  1  1  ... 1]       |> has N_tets columns
         #         [  2  2  2  ... 2]       |
         #         [  3  3  3  ... 3]]      |
-        EToF = numpy.arange(0, 4).repeat(repeats=N_tets, axis=0).reshape([-1, N_tets])
+        EToF = torch.arange(0, 4).repeat_interleave(N_tets).reshape(-1, N_tets)
 
         # We now need to uniquely number each set of three faces by their node numbers
         # We could use the old algorithm (here in Matlab form)
@@ -416,17 +427,20 @@ class Mesh:
         # Or we can explicitly use a hash (which is essentially what the old code does). A hash just transforms the
         # three indices that defines all faces into a unique number. Note that we apply the hash to each row
         # (hence the 1).
-        face_ids = numpy.apply_along_axis(lambda x: hash(tuple(x)), 1, face_vertices)
+        face_ids = torch.sum(
+            face_vertices * torch.tensor([1, N_tets, N_tets * N_tets]), dim=1
+        )
 
         # We now sort the face_ids so that we have the identical faces next to each other
-        face_ids_sort_indices = numpy.argsort(face_ids)  # get the ordering that sorts the face_ids
-        face_ids = face_ids[face_ids_sort_indices]  # sort the face ids
-        face_vertices = face_vertices[
-            face_ids_sort_indices, :
-        ]  # reorder the faces so that their corresponding face_ids are sorted
-        face_vertices_idx = face_vertices_idx[
-            face_ids_sort_indices
-        ]  # reorder the face indices so that their corresponding face_ids are sorted
+        face_ids_sort_indices = torch.argsort(face_ids)
+        # get the ordering that sorts the face_ids
+        face_ids = face_ids[face_ids_sort_indices]
+        face_vertices = face_vertices[face_ids_sort_indices]
+        # reorder the faces so that their corresponding face_ids are sorted
+        face_vertices_idx = face_vertices_idx[face_ids_sort_indices]
+
+        # get the ordering that sorts the face_ids
+        interior_face_mask = face_ids[:-1] == face_ids[1:]
 
         # Find the indices of face_ids of all interior faces, i.e., that are shared by two elements
         # i.e., faces that appear twice (one time for each element)
@@ -435,7 +449,7 @@ class Mesh:
         # We wrap numpy.where with numpy.array to get and numpy.array instead of a tuple, we do this because later we
         # need to use these indices and these indices +1, with tuple is not possible. The flatten in the end is to avoid
         # having [[]], which means an extra (unused) dimension in the array.
-        interior_face_id_idx = numpy.array(numpy.where(face_ids[0:-1] == face_ids[1:])).flatten()
+        interior_face_id_idx = torch.nonzero(interior_face_mask).flatten()
 
         # With the indices of face_ids we can compute the indices of the faces associated to the face definition on an
         # element (L) and the neighboring element (R). The interior_faces_face_id_idx corresponds to the indices on the
@@ -449,40 +463,41 @@ class Mesh:
         # As can be seen in the figure above, the shared face will appear twice: once for the Left element and another
         # for the Right element. We need to associate the element numbers to each other (EToE) and we need to
         # associate the element number of the element on the left to the face number of the element on the right, and
-        # vice versa.
+        # vice versa
         interior_L_face_vertices_idx = face_vertices_idx[interior_face_id_idx]
         interior_R_face_vertices_idx = face_vertices_idx[interior_face_id_idx + 1]
+
+        # 构建 EToE 连接关系
+        idx_pairs = torch.cat(
+            [interior_L_face_vertices_idx, interior_R_face_vertices_idx]
+        )
+        row_idx = torch.div(idx_pairs, N_tets, rounding_mode="floor")
+        col_idx = idx_pairs % N_tets
 
         # Construct EToE
         # Here we simply associate the R element index to the L element, and then associate the L element index to the
         # R element. Note that here the initialization of EToE plays an important role. We initialized EToE to have
         # the value of the current element for all faces of the element. In this way we can use it on the right-hand
         # side.
-        EToE[
-            numpy.unravel_index(
-                numpy.hstack([interior_L_face_vertices_idx, interior_R_face_vertices_idx]),
-                EToE.shape,
-            )
-        ] = EToE[
-            numpy.unravel_index(
-                numpy.hstack([interior_R_face_vertices_idx, interior_L_face_vertices_idx]),
-                EToE.shape,
-            )
+        EToE[row_idx, col_idx] = EToE[
+            torch.div(
+                torch.cat([interior_R_face_vertices_idx, interior_L_face_vertices_idx]),
+                N_tets,
+                rounding_mode="floor",
+            ),
+            torch.cat([interior_R_face_vertices_idx, interior_L_face_vertices_idx])
+            % N_tets,
         ]
 
-        # Construct EToF
-        # The logic is the same as for EToE, the difference is that we now use the initialized EToF on the right-hand
-        # side.
-        EToF[
-            numpy.unravel_index(
-                numpy.vstack([interior_L_face_vertices_idx, interior_R_face_vertices_idx]),
-                EToF.shape,
-            )
-        ] = EToF[
-            numpy.unravel_index(
-                numpy.vstack([interior_R_face_vertices_idx, interior_L_face_vertices_idx]),
-                EToF.shape,
-            )
+        # 构建 EToF 连接关系
+        EToF[row_idx, col_idx] = EToF[
+            torch.div(
+                torch.cat([interior_R_face_vertices_idx, interior_L_face_vertices_idx]),
+                N_tets,
+                rounding_mode="floor",
+            ),
+            torch.cat([interior_R_face_vertices_idx, interior_L_face_vertices_idx])
+            % N_tets,
         ]
 
         return EToE, EToF

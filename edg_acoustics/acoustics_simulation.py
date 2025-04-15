@@ -648,8 +648,8 @@ class AcousticsSimulation:
     @staticmethod
     def build_maps_3d(
         xyz: numpy.ndarray,
-        EToE: numpy.ndarray,
-        EToF: numpy.ndarray,
+        EToE: torch.tensor,
+        EToF: torch.tensor,
         Fmask: numpy.ndarray,
         node_tol: float,
     ):
