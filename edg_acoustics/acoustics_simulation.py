@@ -639,7 +639,7 @@ class AcousticsSimulation:
         # Compute the face Jacobians
         sJ = norm_n * J[Fmask.reshape(-1)]
 
-        return n_xyz, sJ
+        return torch.from_numpy(n_xyz), sJ
 
     @staticmethod
     def build_maps_3d(
@@ -1044,11 +1044,11 @@ class AcousticsSimulation:
             #     'CP' refers to complex pole pairs, i.e., :math:`B` (stored in 1st row), :math:`C` (stored in 2nd row),
             #          :math:`\\alpha` (stored in 3rd row), :math:`\\beta`(stored in 4th row).
             BCvar[index]["vn"] = (
-                torch.from_numpy(self.n_xyz[0]).reshape(-1)[self.BCnode[index]["map"]]
+                (self.n_xyz[0]).reshape(-1)[self.BCnode[index]["map"]]
                 * Vx.reshape(-1)[self.BCnode[index]["vmap"]]
-                + torch.from_numpy(self.n_xyz[1]).reshape(-1)[self.BCnode[index]["map"]]
+                + (self.n_xyz[1]).reshape(-1)[self.BCnode[index]["map"]]
                 * Vy.reshape(-1)[self.BCnode[index]["vmap"]]
-                + torch.from_numpy(self.n_xyz[2]).reshape(-1)[self.BCnode[index]["map"]]
+                + (self.n_xyz[2]).reshape(-1)[self.BCnode[index]["map"]]
                 * Vz.reshape(-1)[self.BCnode[index]["vmap"]]
             )
             BCvar[index]["ou"] = (
@@ -1082,33 +1082,39 @@ class AcousticsSimulation:
                             -paras["CP"][2, i] * BCvar[index]["kexi2"][i]
                             + paras["CP"][3, i] * kexi1temp
                         )  # RHS for BCvar[index]['kexi2']
-            fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (
-                torch.from_numpy(self.n_xyz[0]).reshape(-1)[self.BCnode[index]["map"]]
-                * P.reshape(-1)[self.BCnode[index]["vmap"]]
-                / self.rho0
-                - torch.from_numpy(self.n_xyz[0]).reshape(-1)[self.BCnode[index]["map"]]
-                * self.c0
-                * (BCvar[index]["ou"] + BCvar[index]["in"])
-                / 2
-            )
-            fluxVy.reshape(-1)[self.BCnode[index]["map"]] = (
-                torch.from_numpy(self.n_xyz[1]).reshape(-1)[self.BCnode[index]["map"]]
-                * P.reshape(-1)[self.BCnode[index]["vmap"]]
-                / self.rho0
-                - torch.from_numpy(self.n_xyz[1]).reshape(-1)[self.BCnode[index]["map"]]
-                * self.c0
-                * (BCvar[index]["ou"] + BCvar[index]["in"])
-                / 2
-            )
-            fluxVz.reshape(-1)[self.BCnode[index]["map"]] = (
-                torch.from_numpy(self.n_xyz[2]).reshape(-1)[self.BCnode[index]["map"]]
-                * P.reshape(-1)[self.BCnode[index]["vmap"]]
-                / self.rho0
-                - torch.from_numpy(self.n_xyz[2]).reshape(-1)[self.BCnode[index]["map"]]
-                * self.c0
-                * (BCvar[index]["ou"] + BCvar[index]["in"])
-                / 2
-            )
+            fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[0]).reshape(-1)[
+                self.BCnode[index]["map"]
+            ] * P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 - (
+                self.n_xyz[0]
+            ).reshape(
+                -1
+            )[
+                self.BCnode[index]["map"]
+            ] * self.c0 * (
+                BCvar[index]["ou"] + BCvar[index]["in"]
+            ) / 2
+            fluxVy.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[1]).reshape(-1)[
+                self.BCnode[index]["map"]
+            ] * P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 - (
+                self.n_xyz[1]
+            ).reshape(
+                -1
+            )[
+                self.BCnode[index]["map"]
+            ] * self.c0 * (
+                BCvar[index]["ou"] + BCvar[index]["in"]
+            ) / 2
+            fluxVz.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[2]).reshape(-1)[
+                self.BCnode[index]["map"]
+            ] * P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 - (
+                self.n_xyz[2]
+            ).reshape(
+                -1
+            )[
+                self.BCnode[index]["map"]
+            ] * self.c0 * (
+                BCvar[index]["ou"] + BCvar[index]["in"]
+            ) / 2
             fluxP.reshape(-1)[self.BCnode[index]["map"]] = (
                 self.c0**2
                 * self.rho0
