@@ -223,7 +223,11 @@ class AcousticsSimulation:
 
         # Build specialized nodal maps for various types of boundary conditions,specified in BC_list
         self.BCnode = AcousticsSimulation.build_BCmaps_3d(
-            self.BC_list, self.mesh.EToV, self.vmapM, self.mesh.BC_triangles, self.Nx
+            self.BC_list,
+            self.mesh.EToV,
+            torch.Tensor.numpy(self.vmapM),
+            self.mesh.BC_triangles,
+            self.Nx,
         )
 
         self.dtscale = (
@@ -713,7 +717,7 @@ class AcousticsSimulation:
 
                 vmapP[face, idM, ke] = vmapM[face2, idP, ke2]
 
-        return vmapM.reshape(-1), vmapP.reshape(-1)
+        return torch.from_numpy(vmapM.reshape(-1)), torch.from_numpy(vmapP.reshape(-1))
 
     @staticmethod
     def ismember_col(a: numpy.ndarray, b: numpy.ndarray):
@@ -1013,21 +1017,17 @@ class AcousticsSimulation:
 
         # calculate jump values across the faces of neighboring elements
         dVx.reshape(-1)[:] = (
-            Vx.reshape(-1)[torch.from_numpy(self.vmapM).long()]
-            - Vx.reshape(-1)[torch.from_numpy(self.vmapP).long()]
+            Vx.reshape(-1)[(self.vmapM).long()] - Vx.reshape(-1)[(self.vmapP).long()]
         )
         # print(f"dVx ID {id(dVx)}, sim.dVx ID {id(self.sim.dVx)}")
         dVy.reshape(-1)[:] = (
-            Vy.reshape(-1)[torch.from_numpy(self.vmapM).long()]
-            - Vy.reshape(-1)[torch.from_numpy(self.vmapP).long()]
+            Vy.reshape(-1)[(self.vmapM).long()] - Vy.reshape(-1)[(self.vmapP).long()]
         )
         dVz.reshape(-1)[:] = (
-            Vz.reshape(-1)[torch.from_numpy(self.vmapM).long()]
-            - Vz.reshape(-1)[torch.from_numpy(self.vmapP).long()]
+            Vz.reshape(-1)[(self.vmapM).long()] - Vz.reshape(-1)[(self.vmapP).long()]
         )
         dP.reshape(-1)[:] = (
-            P.reshape(-1)[torch.from_numpy(self.vmapM).long()]
-            - P.reshape(-1)[torch.from_numpy(self.vmapP).long()]
+            P.reshape(-1)[(self.vmapM).long()] - P.reshape(-1)[(self.vmapP).long()]
         )
 
         # Compute the inter-element fluxes
