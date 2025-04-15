@@ -214,7 +214,7 @@ class AcousticsSimulation:
         )
 
         # Compute ratio of surface to volume Jacobian of facial node
-        self.Fscale = self.sJ / self.J[self.Fmask.reshape(-1), :]
+        self.Fscale = torch.from_numpy(self.sJ / self.J[self.Fmask.reshape(-1), :])
 
         # Find connectivity for nodes given per surface in all elements
         self.vmapM, self.vmapP = AcousticsSimulation.build_maps_3d(
@@ -227,7 +227,9 @@ class AcousticsSimulation:
         )
 
         self.dtscale = (
-            AcousticsSimulation.diameter_3d(self.Fscale) / self.c0 / (2 * self.Nx + 1)
+            AcousticsSimulation.diameter_3d(torch.Tensor.numpy(self.Fscale))
+            / self.c0
+            / (2 * self.Nx + 1)
         )
 
     # Static methods ---------------------------------------------------------------------------------------------------
@@ -1004,7 +1006,7 @@ class AcousticsSimulation:
         # Vz = torch.from_numpy(Vz)
 
         # Initialize jump variables
-        dVx = torch.zeros_like(torch.from_numpy(self.Fscale))
+        dVx = torch.zeros_like(self.Fscale)
         dVy = torch.zeros_like(dVx)
         dVz = torch.zeros_like(dVx)
         dP = torch.zeros_like(dVx)
@@ -1116,15 +1118,15 @@ class AcousticsSimulation:
         dPdx, dPdy, dPdz = self.grad_3d(P, "xyz")
         RHS_P = -self.c0**2 * self.rho0 * (
             self.grad_3d(Vx, "x") + self.grad_3d(Vy, "y") + self.grad_3d(Vz, "z")  # type: ignore
-        ) + torch.from_numpy(self.lift) @ (torch.from_numpy(self.Fscale) * fluxP)
+        ) + torch.from_numpy(self.lift) @ (self.Fscale * fluxP)
         RHS_Vx = -dPdx / self.rho0 + torch.from_numpy(self.lift) @ (
-            torch.from_numpy(self.Fscale) * fluxVx
+            self.Fscale * fluxVx
         )
         RHS_Vy = -dPdy / self.rho0 + torch.from_numpy(self.lift) @ (
-            torch.from_numpy(self.Fscale) * fluxVy
+            self.Fscale * fluxVy
         )
         RHS_Vz = -dPdz / self.rho0 + torch.from_numpy(self.lift) @ (
-            torch.from_numpy(self.Fscale) * fluxVz
+            self.Fscale * fluxVz
         )
 
         # return (
