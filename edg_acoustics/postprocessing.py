@@ -1,5 +1,4 @@
-"""This module provides postprocessing functionalities for the edg_acoustics package.
-"""
+"""This module provides postprocessing functionalities for the edg_acoustics package."""
 
 import numpy
 import scipy
@@ -28,12 +27,12 @@ class Monopole_postprocessor:
         fs_old (float): The sampling frequency of the simulation results.
         sampling_freq (float): The desired sampling frequency. Default is set to Sampling_Freq = 44100 Hz.
         dt_new (float): The time step size of the desired sampling frequency.
-        IRold (numpy.ndarray): The impulse response at the receiver locations.
-        IRnew (numpy.ndarray): The resampled impulse response at the receiver locations.
-        TR_original (numpy.ndarray): The original transfer function at the receiver locations.
-        TR_free (numpy.ndarray): The free transfer function at the receiver locations.
-        TR (numpy.ndarray): The corrected transfer function at the receiver locations.
-        freqs (numpy.ndarray): The frequency vector.
+        IRold (torch.tensor): The impulse response at the receiver locations.
+        IRnew (torch.tensor): The resampled impulse response at the receiver locations.
+        TR_original (torch.tensor): The original transfer function at the receiver locations.
+        TR_free (torch.tensor): The free transfer function at the receiver locations.
+        TR (torch.tensor): The corrected transfer function at the receiver locations.
+        freqs (torch.tensor): The frequency vector.
     """
 
     def __init__(self, sim, delta_step, sampling_freq=Sampling_Freq):
@@ -53,10 +52,12 @@ class Monopole_postprocessor:
         """Resamples the impulse response to the desired sampling frequency.
 
         Returns:
-            IRnew (numpy.ndarray): see :attr:`IRnew`.
+            IRnew (torch.tensor): see :attr:`IRnew`.
         """
         self.IRnew = scipy.signal.resample(
-            self.IRold, int(self.IRold.shape[1] * self.sampling_freq / self.fs_old), axis=1
+            self.IRold,
+            int(self.IRold.shape[1] * self.sampling_freq / self.fs_old),
+            axis=1,
         )
         return self.IRnew
 
@@ -67,27 +68,31 @@ class Monopole_postprocessor:
             next_fast_len (bool): If True, the next fast length of input data is used for fft, for zero-padding, etc. Consequently, the singal length is prolonged. Default is False.
 
         Returns:
-            IRnew (numpy.ndarray): see :attr:`IRnew`.
-            TR (numpy.ndarray): see :attr:`TR`.
-            freqs (numpy.ndarray): see :attr:`freqs`.
+            IRnew (torch.tensor): see :attr:`IRnew`.
+            TR (torch.tensor): see :attr:`TR`.
+            freqs (torch.tensor): see :attr:`freqs`.
         """
 
         time_vector = numpy.arange(0, self.IRnew.shape[1] * self.dt_new, self.dt_new)
-        R = numpy.sqrt(sum((self.sim.IC.source_xyz[:, numpy.newaxis] - self.sim.rec) ** 2))[
-            :, numpy.newaxis
-        ]
+        R = numpy.sqrt(
+            sum((self.sim.IC.source_xyz[:, numpy.newaxis] - self.sim.rec) ** 2)
+        )[:, numpy.newaxis]
         pout = (
             (R - self.sim.c0 * time_vector)
             / (2 * R)
             * numpy.exp(
-                -numpy.log(2) * ((R - self.sim.c0 * time_vector) ** 2) / self.sim.IC.halfwidth**2
+                -numpy.log(2)
+                * ((R - self.sim.c0 * time_vector) ** 2)
+                / self.sim.IC.halfwidth**2
             )
         )
         pin = (
             (R + self.sim.c0 * time_vector)
             / (2 * R)
             * numpy.exp(
-                -numpy.log(2) * ((R + self.sim.c0 * time_vector) ** 2) / self.sim.IC.halfwidth**2
+                -numpy.log(2)
+                * ((R + self.sim.c0 * time_vector) ** 2)
+                / self.sim.IC.halfwidth**2
             )
         )
         p_free = pout + pin

@@ -101,7 +101,7 @@ class BoundaryCondition(abc.ABC):
             AssertionError: If the number of BC types is not the same in the BC_labels and BC_para, an error is raised.
             AssertionError: If the causality and reality conditions are not met, an error is raised.
         """
-        omega = numpy.arange(1.0, freq_max)
+        omega = torch.arange(1.0, freq_max)
 
         assert len(BCpara) == len(BCnode), (
             "[edg_acoustics.BoundaryCondition] The number of BC types must be the same "
@@ -118,7 +118,7 @@ class BoundaryCondition(abc.ABC):
                 "and all labels in the BCnode must have boundary parameters input."
             )
             assert (
-                numpy.abs(AbsorbBC.compute_Re(omega, paras)) <= 1.0
+                torch.abs(AbsorbBC.compute_Re(omega, paras)) <= 1.0
             ).all(), "[edg_acoustics.BoundaryCondition] All reflection coefficient must be smaller than 1"
 
             for polekey in paras:
@@ -145,17 +145,17 @@ class BoundaryCondition(abc.ABC):
             )
 
     @staticmethod
-    def compute_Re(omega: numpy.ndarray, paras: dict):
+    def compute_Re(omega: torch.tensor, paras: dict):
         """Computes the reflection coefficient given the passed parameter of the multi-pole model at the frequencies of omega.
 
         Args:
-            omega (numpy.ndarray): angular frequency.
+            omega (torch.tensor): angular frequency.
             paras (dict): see :attr:`edg_acoustics.boundary_condition.AbsorbBC.BCpara`.
 
         Returns:
-            Re (numpy.ndarray): reflection coefficient at the frequencies of omega.
+            Re (torch.tensor): reflection coefficient at the frequencies of omega.
         """
-        Re = numpy.ones(omega.shape)
+        Re = torch.ones(omega.shape)
 
         for polekey in paras:
             if polekey == "RI":
@@ -193,7 +193,7 @@ class AbsorbBC(BoundaryCondition):
 
     Attributes:
         BCpara (list [dict]): a list of boundary conditon parameters from the multi-pole model. Each element is a dictionary
-            with keys (values) ['label'(int),'RI'(float),'RP'(numpy.ndarray),'CP'(numpy.ndarray)].
+            with keys (values) ['label'(int),'RI'(float),'RP'(torch.tensor),'CP'(torch.tensor)].
             'RI' refers to the limit value of the reflection coefficient as the frequency approaches infinity, i.e., :math:`R_\\infty`.
             'RP' refers to real pole pairs, i.e., :math:`A` (stored in 1st row), :math:`\\zeta` (stored in 2nd row).
             'CP' refers to complex pole pairs, i.e., :math:`B` (stored in 1st row), :math:`C` (stored in 2nd row), :math:`\\alpha` (stored in 3rd row), :math:`\\beta` (stored in 4th row).
