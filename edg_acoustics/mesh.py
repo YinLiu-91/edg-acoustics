@@ -317,12 +317,10 @@ class Mesh:
 
         # Read the number of tetrahedra (computational elements) and their definitions
         self.N_tets = mesh_data.cells_dict["tetra"].shape[0]
-        self.EToV = mesh_data.cells_dict["tetra"].transpose()
+        self.EToV = torch.from_numpy(mesh_data.cells_dict["tetra"].transpose())
 
         # Compute the mesh connectivity
-        self.EToE, self.EToF = self.compute_element_connectivity(
-            torch.from_numpy(self.EToV)
-        )
+        self.EToE, self.EToF = self.compute_element_connectivity(self.EToV)
 
     # Operators --------------------------------------------------------------------------------------------------------
     def __eq__(self, other: edg_acoustics.Mesh):
@@ -341,7 +339,7 @@ class Mesh:
                 and self.N_tets == other.N_tets
                 and self.N_BC_triangles == other.N_BC_triangles
                 and numpy.array_equal(self.vertices, other.vertices)
-                and numpy.array_equal(self.EToV, other.EToV)
+                and numpy.array_equal(torch.Tensor.numpy(self.EToV), other.EToV)
                 and all(
                     numpy.array_equal(item, other.BC_triangles[key])
                     for key, item in self.BC_triangles.items()

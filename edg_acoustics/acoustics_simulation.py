@@ -224,7 +224,7 @@ class AcousticsSimulation:
         # Build specialized nodal maps for various types of boundary conditions,specified in BC_list
         self.BCnode = AcousticsSimulation.build_BCmaps_3d(
             self.BC_list,
-            self.mesh.EToV,
+            torch.Tensor.numpy(self.mesh.EToV),
             torch.Tensor.numpy(self.vmapM),
             self.mesh.BC_triangles,
             self.Nx,
@@ -305,7 +305,7 @@ class AcousticsSimulation:
 
     @staticmethod
     def compute_collocation_nodes(
-        EToV: numpy.ndarray, vertices: numpy.ndarray, Nx: int, dim: int = 3
+        EToV: torch.tensor, vertices: numpy.ndarray, Nx: int, dim: int = 3
     ):
         """Compute reference element :math:`(r, s, t)` coordinates of collocation points :attr:`rst` and the physical domain :attr:`xyz` coordinates
         for each element.
@@ -921,7 +921,10 @@ class AcousticsSimulation:
             nodeindex (torch.tensor): ``[N_rec, ]`` index of simplices that contatin the sample (microphone) points.
         """
         nodeindex = AcousticsSimulation.locate_simplex(
-            self.mesh.vertices, self.mesh.EToV, self.rec, methodLocate
+            self.mesh.vertices,
+            torch.Tensor.numpy(self.mesh.EToV),
+            self.rec,
+            methodLocate,
         )
 
         old_nodes = self.xyz[
