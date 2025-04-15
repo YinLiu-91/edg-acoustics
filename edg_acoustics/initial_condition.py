@@ -46,16 +46,16 @@ class Monopole_IC(InitialCondition):
     :class:`.Monopole_IC` is used to setup monopple source initial condition.
 
     Args:
-        xyz (numpy.ndarray): see :attr:`edg_acoustics.AcousticsSimulation.xyz`.
-        source_xyz (numpy.ndarray): an (3,) array containing the physical coordinates of the monopole source.
+        xyz (torch.tensor): see :attr:`edg_acoustics.AcousticsSimulation.xyz`.
+        source_xyz (torch.tensor): an (3,) array containing the physical coordinates of the monopole source.
         halfwidth (float): half-bandwidth of the initial Gaussian pulse.
 
     Attributes:
-        source_xyz (numpy.ndarray): an (3,) array containing the physical coordinates of the monopole source.
+        source_xyz (torch.tensor): an (3,) array containing the physical coordinates of the monopole source.
         halfwidth (float): half-bandwidth of the initial Gaussian pulse.
     """
 
-    def __init__(self, source_xyz: numpy.ndarray, frequency: float):
+    def __init__(self, source_xyz: torch.tensor, frequency: float):
         self.source_xyz = source_xyz
         self.halfwidth = Monopole_IC.solve_halfwidth(frequency)
 
@@ -70,8 +70,8 @@ class Monopole_IC(InitialCondition):
             halfwidth (float): halfwidth of the initial Gaussian pulse.
         """
         # Given data points
-        x_points = numpy.array([20, 300, 500, 800, 1000, 2000, 4000, 8000])
-        y_points = numpy.array([0.6, 0.4, 0.33, 0.23, 0.17, 0.09, 0.05, 0.015])
+        x_points = torch.tensor([20, 300, 500, 800, 1000, 2000, 4000, 8000])
+        y_points = torch.tensor([0.6, 0.4, 0.33, 0.23, 0.17, 0.09, 0.05, 0.015])
 
         linear_interp = interp1d(x_points, y_points, kind="linear")
 
