@@ -1,4 +1,4 @@
-""" This module provides initial condition functionalities for the edg_acoustics package.
+"""This module provides initial condition functionalities for the edg_acoustics package.
 
 The current version of edg_acoustics.initial_condition provides monopole source initial condition.
 """
@@ -7,6 +7,7 @@ from __future__ import annotations
 import abc
 import numpy
 from scipy.interpolate import interp1d
+import torch
 
 __all__ = ["InitialCondition", "Monopole_IC"]
 
@@ -86,16 +87,16 @@ class Monopole_IC(InitialCondition):
             )
             / self.halfwidth**2
         )
-        return pressure
+        return torch.from_numpy(pressure)
 
     def VXinit(self, xyz: numpy.ndarray):
         """Setup initial condition for velocity in x-direction."""
-        return numpy.zeros([xyz.shape[1], xyz.shape[2]])
+        return torch.from_numpy(numpy.zeros([xyz.shape[1], xyz.shape[2]]))
 
     def VYinit(self, xyz: numpy.ndarray):
         """Setup initial condition for velocity in y-direction."""
-        return numpy.zeros([xyz.shape[1], xyz.shape[2]])
+        return torch.from_numpy(numpy.zeros([xyz.shape[1], xyz.shape[2]]))
 
     def VZinit(self, xyz: numpy.ndarray):
         """Setup initial condition for velocity in z-direction."""
-        return numpy.zeros([xyz.shape[1], xyz.shape[2]])
+        return torch.from_numpy(numpy.zeros([xyz.shape[1], xyz.shape[2]]))

@@ -1187,13 +1187,13 @@ class AcousticsSimulation:
         for StepIndex in range(self.Ntimesteps):
 
             self.time_integrator.step_dt(
-                torch.from_numpy(self.P),
-                torch.from_numpy(self.Vx),
-                torch.from_numpy(self.Vy),
-                torch.from_numpy(self.Vz),
+                (self.P),
+                (self.Vx),
+                (self.Vy),
+                (self.Vz),
                 self.BC,
             )  # by changing the value in place, the ID of the object is not changed (no new object is created), but the previous value is lost, which is not important here, because the previous value is not used anymore``
-            self.prec[:, StepIndex] = numpy.diag(self.sampleWeight @ self.P[:, self.nodeindex])  # type: ignore
+            self.prec[:, StepIndex] = numpy.diag(self.sampleWeight @ torch.Tensor.numpy(self.P[:, self.nodeindex]))  # type: ignore
             if "delta_step" in kwargs and StepIndex % kwargs["delta_step"] == 0:
                 newTime = time.time()
                 elapsed = newTime - curTime

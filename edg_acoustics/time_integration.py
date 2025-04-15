@@ -119,11 +119,6 @@ class TSI_TI(TimeIntegrator):
         Vy0 = Vy.clone()
         Vz0 = Vz.clone()
 
-        # P0 = torch.from_numpy(P0)
-        # Vx0 = torch.from_numpy(Vx0)
-        # Vy0 = torch.from_numpy(Vy0)
-        # Vz0 = torch.from_numpy(Vz0)
-
         for index, paras in enumerate(BC.BCpara):
             for polekey in paras:
                 if polekey == "RP":
