@@ -51,28 +51,28 @@ class AcousticsSimulation:
             definition.
 
         BCnode (list[dict]): List of boundary map nodes, each element being a dictionary
-                with keys (values) ['label' (int), 'map' (numpy.ndarray), 'vmap' (numpy.ndarray)].
+                with keys (values) ['label' (int), 'map' (torch.tensor), 'vmap' (torch.tensor)].
 
         c0 (float): the speed of sound in the medium in which the acoustic wave propagates.
 
-        Dr (numpy.ndarray): the reference element differentiation matrices containing the discrete representation
+        Dr (torch.tensor): the reference element differentiation matrices containing the discrete representation
             of :math:`\\frac{\\partial}{\\partial r}`, in the rst reference element coordinate system.
-        Ds (numpy.ndarray): the reference element differentiation matrices containing the discrete representation
+        Ds (torch.tensor): the reference element differentiation matrices containing the discrete representation
             of :math:`\\frac{\\partial}{\\partial s}`, in the rst reference element coordinate system.
-        Dt (numpy.ndarray): the reference element differentiation matrices containing the discrete representation
+        Dt (torch.tensor): the reference element differentiation matrices containing the discrete representation
             of :math:`\\frac{\\partial}{\\partial t}`, in the rst reference element coordinate system.
 
         dim (int): the geometric dimension of the space where the acoustic problem is solved. Always set to 3.
 
         dtscale (float): the time step scale based on the mesh size measure, is set to the minimum diameter of the inscribed spheres in all elements.
 
-        Fmask (numpy.ndarray): ``[4, Nfp]`` array containing indices of nodes per surface of the tetrahedron.
+        Fmask (torch.tensor): ``[4, Nfp]`` array containing indices of nodes per surface of the tetrahedron.
 
-        Fscale (numpy.ndarray): ``[4*Nfp, N_tets]`` ratio of surface to volume Jacobian of facial node.
+        Fscale (torch.tensor): ``[4*Nfp, N_tets]`` ratio of surface to volume Jacobian of facial node.
 
-        J (numpy.ndarray): ``[Np, N_tets]`` The determinant of the Jacobian matrix for the coordinate transformation, at the collocation nodes. 
+        J (torch.tensor): ``[Np, N_tets]`` The determinant of the Jacobian matrix for the coordinate transformation, at the collocation nodes. 
 
-        lift (numpy.ndarray): ``[Np, 4*Nfp]`` an array containing the product of inverse of the mass matrix (3D) with the face-mass matrices (2D).
+        lift (torch.tensor): ``[Np, 4*Nfp]`` an array containing the product of inverse of the mass matrix (3D) with the face-mass matrices (2D).
         
         mesh (edg_acoustics.Mesh): the mesh object containing the mesh information for the domain discretisation.
 
@@ -90,58 +90,58 @@ class AcousticsSimulation:
 
         rho0 (float): the density of the medium in which the acoustic wave propagates.
 
-        rst (numpy.ndarray): the reference element coordinates :math:`(r, s, t)` of the collocation points.
+        rst (torch.tensor): the reference element coordinates :math:`(r, s, t)` of the collocation points.
             Physical coordinates :attr:`xyz` are obtained by mapping for each element the :attr:`rst` coordinates of the reference element into
             the physical domain. `rst[0]` contains the r-coordinates, `rst[1]` contains the s-coordinates, `rst[2]`
             contains the t-coordinates.
 
-        rst_xyz (numpy.ndarray): ``[3, 3, Np, N_tets]`` The derivative of the local coordinates :math:`R = (r, s, t)` with 
+        rst_xyz (torch.tensor): ``[3, 3, Np, N_tets]`` The derivative of the local coordinates :math:`R = (r, s, t)` with 
             respect to the physical coordinates :math:`X = (x, y, z)`, i.e., :math:`\\frac{\\partial R}{\\partial X}`, at the collocation nodes. Specifically:
 
-            - rst_xyz[0, 0]: rx (numpy.ndarray): ``[Np, N_tets]`` The derivative of the local coordinates
+            - rst_xyz[0, 0]: rx (torch.tensor): ``[Np, N_tets]`` The derivative of the local coordinates
               :math:`r` with respect to the physical coordinates :math:`x`, i.e., :math:`\\frac{\\partial r}{\\partial x}`, at the collocation nodes.
-            - rst_xyz[1, 0]: sx (numpy.ndarray): ``[Np, N_tets]`` The derivative of the local coordinates
+            - rst_xyz[1, 0]: sx (torch.tensor): ``[Np, N_tets]`` The derivative of the local coordinates
               :math:`s` with respect to the physical coordinates :math:`x`, i.e., :math:`\\frac{\\partial s}{\\partial x}`, at the collocation nodes.
-            - rst_xyz[2, 0]: tx (numpy.ndarray): ``[Np, N_tets]`` The derivative of the local coordinates
+            - rst_xyz[2, 0]: tx (torch.tensor): ``[Np, N_tets]`` The derivative of the local coordinates
               :math:`t` with respect to the physical coordinates :math:`x`, i.e., :math:`\\frac{\\partial t}{\\partial x}`, at the collocation nodes.
-            - rst_xyz[0, 1]: ry (numpy.ndarray): ``[Np, N_tets]`` The derivative of the local coordinates
+            - rst_xyz[0, 1]: ry (torch.tensor): ``[Np, N_tets]`` The derivative of the local coordinates
               :math:`r` with respect to the physical coordinates :math:`y`, i.e., :math:`\\frac{\\partial r}{\\partial y}`, at the collocation nodes.
-            - rst_xyz[1, 1]: sy (numpy.ndarray): ``[Np, N_tets]`` The derivative of the local coordinates
+            - rst_xyz[1, 1]: sy (torch.tensor): ``[Np, N_tets]`` The derivative of the local coordinates
               :math:`s` with respect to the physical coordinates :math:`y`, i.e., :math:`\\frac{\\partial s}{\\partial y}`, at the collocation nodes.
-            - rst_xyz[2, 1]: ty (numpy.ndarray): ``[Np, N_tets]`` The derivative of the local coordinates
+            - rst_xyz[2, 1]: ty (torch.tensor): ``[Np, N_tets]`` The derivative of the local coordinates
               :math:`t` with respect to the physical coordinates :math:`y`, i.e., :math:`\\frac{\\partial t}{\\partial y}`, at the collocation nodes.
-            - rst_xyz[0, 2]: rz (numpy.ndarray): ``[Np, N_tets]`` The derivative of the local coordinates
+            - rst_xyz[0, 2]: rz (torch.tensor): ``[Np, N_tets]`` The derivative of the local coordinates
               :math:`r` with respect to the physical coordinates :math:`z`, i.e., :math:`\\frac{\\partial r}{\\partial z}`, at the collocation nodes.
-            - rst_xyz[1, 2]: sz (numpy.ndarray): ``[Np, N_tets]`` The derivative of the local coordinates
+            - rst_xyz[1, 2]: sz (torch.tensor): ``[Np, N_tets]`` The derivative of the local coordinates
               :math:`s` with respect to the physical coordinates :math:`z`, i.e., :math:`\\frac{\\partial s}{\\partial z}`, at the collocation nodes.
-            - rst_xyz[2, 2]: tz (numpy.ndarray): ``[Np, N_tets]`` The derivative of the local coordinates
+            - rst_xyz[2, 2]: tz (torch.tensor): ``[Np, N_tets]`` The derivative of the local coordinates
               :math:`t` with respect to the physical coordinates :math:`z`, i.e., :math:`\\frac{\\partial t}{\\partial z}`, at the collocation nodes.
 
-        sJ (numpy.ndarray): ``[4*Nfp, N_tets]`` The determinant of the surface Jacobian matrix at each of the
+        sJ (torch.tensor): ``[4*Nfp, N_tets]`` The determinant of the surface Jacobian matrix at each of the
             collocation nodes, for each of the 4 faces of the :attr:`N_tets` elements. 
 
-        V (numpy.ndarray): ``[Np, Np]`` vandermonde matrix of the orthonormal basis functions on the reference simplex element. Polynomial basis 
+        V (torch.tensor): ``[Np, Np]`` vandermonde matrix of the orthonormal basis functions on the reference simplex element. Polynomial basis 
             can exactly represent polynomials up to degree :attr:`Nx`. Consider the set of :attr:`~.AcousticsSimulation.Np` 3D nodes, with the coordinates of each node :math:`i` equal to
             :math:`(r_{i}, s_{i}, t_{i})`, in :attr:`.rst`, and the set of :math:`m` orthonormal basis functions, 
             the vandermonde matrix will be :math:`V_{i,j} = f_{j}(r_{i}, s_{i}, t_{i})`. 
 
-        xyz (numpy.ndarray): ``[3, Np, N_tets]`` the physical space coordinates :math:`(x, y, z)` of the collocation points of each element of the\
+        xyz (torch.tensor): ``[3, Np, N_tets]`` the physical space coordinates :math:`(x, y, z)` of the collocation points of each element of the\
             mesh. `xyz[0]` contains the x-coordinates, `xyz[1]` contains the y-coordinates, `xyz[2]`
             contains the z-coordinates.
 
-        n_xyz (numpy.ndarray): ``[3, 4*Np, N_tets]`` the outwards normals :math:`\\vec{n}= (n_x, n_y, n_z)` at each collocation
+        n_xyz (torch.tensor): ``[3, 4*Np, N_tets]`` the outwards normals :math:`\\vec{n}= (n_x, n_y, n_z)` at each collocation
             point on the element faces. Specifically:
                 
-            - n_xyz[0, :] (numpy.ndarray): nx ``[4*Nfp, N_tets]`` The :math:`x`-component of the outward normal :math:`\\vec{n}`
+            - n_xyz[0, :] (torch.tensor): nx ``[4*Nfp, N_tets]`` The :math:`x`-component of the outward normal :math:`\\vec{n}`
               at each of the :attr:`Nfp` nodes on each of the 4 facets of each of the :attr:`N_tets` elements.
-            - n_xyz[1, :] (numpy.ndarray): ny ``[4*Nfp, N_tets]`` The :math:`y`-component of the outward normal :math:`\\vec{n}`
+            - n_xyz[1, :] (torch.tensor): ny ``[4*Nfp, N_tets]`` The :math:`y`-component of the outward normal :math:`\\vec{n}`
               at each of the :attr:`Nfp` nodes on each of the 4 facets of each of the :attr:`N_tets` elements.
-            - n_xyz[2, :] (numpy.ndarray): nz ``[4*Nfp, N_tets]`` The :math:`z`-component of the outward normal :math:`\\vec{n}`
+            - n_xyz[2, :] (torch.tensor): nz ``[4*Nfp, N_tets]`` The :math:`z`-component of the outward normal :math:`\\vec{n}`
               at each of the :attr:`Nfp` nodes on each of the 4 facets of each of the :attr:`N_tets` elements.
 
-        vmapM (numpy.ndarray): ``[4*Nfp*N_tets, 1]`` an array containing the global indices for interior values.
+        vmapM (torch.tensor): ``[4*Nfp*N_tets, 1]`` an array containing the global indices for interior values.
 
-        vmapP (numpy.ndarray): ``[4*Nfp*N_tets, 1]`` an array containing the global indices for exterior values.
+        vmapP (torch.tensor): ``[4*Nfp*N_tets, 1]`` an array containing the global indices for exterior values.
 
     """
 
@@ -311,15 +311,15 @@ class AcousticsSimulation:
         for each element.
 
         Args:
-            EToV (numpy.ndarray): See :any:`edg_acoustics.Mesh.EToV`.
-            vertices (numpy.ndarray): see :any:`edg_acoustics.Mesh.vertices`.
+            EToV (torch.tensor): See :any:`edg_acoustics.Mesh.EToV`.
+            vertices (torch.tensor): see :any:`edg_acoustics.Mesh.vertices`.
             Nx (int): see :attr:`Nx`.
             dim (int): see :attr:`dim`.
 
         Returns:
-            rst (numpy.ndarray): see :attr:`rst`.
+            rst (torch.tensor): see :attr:`rst`.
 
-            xyz (numpy.ndarray): see :attr:`xyz`.
+            xyz (torch.tensor): see :attr:`xyz`.
         """
 
         # These are so called Fekete points (low, close to optimal, Lebesgue constant) on simplices of dimension
@@ -381,11 +381,11 @@ class AcousticsSimulation:
 
         Args:
             Nx (int): see :attr:`Nx`.
-            rst (numpy.ndarray): see :attr:`rst`.
+            rst (torch.tensor): see :attr:`rst`.
             dim (int): see :attr:`dim`.
 
         Returns:
-            V (numpy.ndarray): see :attr:`V`.
+            V (torch.tensor): see :attr:`V`.
         """
         # Compute the orthonormal polynomial basis of degree Nx and geometric dimension dim
         simplex_basis = modepy.simplex_onb(dim, Nx)
@@ -399,12 +399,12 @@ class AcousticsSimulation:
 
         Args:
             Nx (int): see :attr:`Nx`.
-            rst (numpy.ndarray): see :attr:`rst`.
+            rst (torch.tensor): see :attr:`rst`.
             dim (int): see :attr:`dim`.
         Returns:
-            Dr (numpy.ndarray): see :attr:`Dr`.
-            Ds (numpy.ndarray): see :attr:`Ds`.
-            Dt (numpy.ndarray): see :attr:`Dt`.
+            Dr (torch.tensor): see :attr:`Dr`.
+            Ds (torch.tensor): see :attr:`Ds`.
+            Dt (torch.tensor): see :attr:`Dt`.
         """
 
         # Compute the orthonormal polynomial basis of degree Nx and geometric dimension dim
@@ -425,11 +425,11 @@ class AcousticsSimulation:
         """Find all the :attr:``Nfp`` face nodes that lie on each surface.
 
         Args:
-            rst (numpy.ndarray): see :attr:`rst`.
+            rst (torch.tensor): see :attr:`rst`.
             node_tol (float): see :attr:`node_tolerance`.
 
         Returns:
-            Fmask (numpy.ndarray): see :attr:`Fmask`.
+            Fmask (torch.tensor): see :attr:`Fmask`.
         """
         Np = rst.shape[1]
         Nx = AcousticsSimulation.compute_Nx_from_Np(
@@ -454,11 +454,11 @@ class AcousticsSimulation:
         """Compute the lift matrix.
 
         Args:
-            V (numpy.ndarray): see :attr:`V`.
-            rst (numpy.ndarray): see :attr:`rst`.
-            Fmask (numpy.ndarray): see :attr:`Fmask`.
+            V (torch.tensor): see :attr:`V`.
+            rst (torch.tensor): see :attr:`rst`.
+            Fmask (torch.tensor): see :attr:`Fmask`.
         Returns:
-            lift (numpy.ndarray): see :attr:`lift`.
+            lift (torch.tensor): see :attr:`lift`.
         """
         Np = V.shape[1]  # get the number of collocation points
         Nx = AcousticsSimulation.compute_Nx_from_Np(
@@ -509,14 +509,14 @@ class AcousticsSimulation:
         """Compute the metric elements for the local mappings of the elements.
 
         Args:
-            xyz (numpy.ndarray): see :attr:`xyz`.
-            Dr (numpy.ndarray): see :attr:`Dr`.
-            Ds (numpy.ndarray): see :attr:`Ds`.
-            Dt (numpy.ndarray): see :attr:`Dt`.
+            xyz (torch.tensor): see :attr:`xyz`.
+            Dr (torch.tensor): see :attr:`Dr`.
+            Ds (torch.tensor): see :attr:`Ds`.
+            Dt (torch.tensor): see :attr:`Dt`.
 
         Returns:
-            rst_xyz (numpy.ndarray): see :attr:`rst_xyz`.
-            J (numpy.ndarray): see :attr:`J`.
+            rst_xyz (torch.tensor): see :attr:`rst_xyz`.
+            J (torch.tensor): see :attr:`J`.
         """
         Np = xyz.shape[1]  # the number of collocation points
         N_tets = xyz.shape[2]  # the number of elements
@@ -570,14 +570,14 @@ class AcousticsSimulation:
         """Compute outward pointing normals at element's faces as well as surface Jacobians.
 
         Args:
-            xyz (numpy.ndarray): see :attr:`xyz`.
-            rst_xyz (numpy.ndarray): see :attr:`rst_xyz`.
-            J (numpy.ndarray): see :attr:`J`.
-            Fmask (numpy.ndarray): see :attr:`Fmask`.
+            xyz (torch.tensor): see :attr:`xyz`.
+            rst_xyz (torch.tensor): see :attr:`rst_xyz`.
+            J (torch.tensor): see :attr:`J`.
+            Fmask (torch.tensor): see :attr:`Fmask`.
 
         Returns:
-            n_xyz (numpy.ndarray): see :attr:`n_xyz`.
-            sJ (numpy.ndarray): see :attr:`sJ`.
+            n_xyz (torch.tensor): see :attr:`n_xyz`.
+            sJ (torch.tensor): see :attr:`sJ`.
         """
         N_tets = xyz.shape[2]  # number of elements
         Np = xyz.shape[1]  # number of collocation points
@@ -656,14 +656,14 @@ class AcousticsSimulation:
         """Find connectivity for nodes given per surface in all elements
 
         Args:
-            xyz (numpy.ndarray): see :attr:`xyz`.
-            EToE (numpy.ndarray): see :any:`edg_acoustics.Mesh.EToE`.
-            EToF (numpy.ndarray): see :any:`edg_acoustics.Mesh.EToF`.
-            Fmask (numpy.ndarray): see :attr:`Fmask`.
+            xyz (torch.tensor): see :attr:`xyz`.
+            EToE (torch.tensor): see :any:`edg_acoustics.Mesh.EToE`.
+            EToF (torch.tensor): see :any:`edg_acoustics.Mesh.EToF`.
+            Fmask (torch.tensor): see :attr:`Fmask`.
             node_tol (float): see :attr:`node_tolerance`.
         Returns:
-            vmapM (numpy.ndarray): see :attr:`vmapM`.
-            vmapP (numpy.ndarray): see :attr:`vmapP`.
+            vmapM (torch.tensor): see :attr:`vmapM`.
+            vmapP (torch.tensor): see :attr:`vmapP`.
         """
 
         N_tets = xyz.shape[2]  # number of elements
@@ -724,11 +724,11 @@ class AcousticsSimulation:
         """find the indices of the columns of a that are in b
 
         Args:
-            a (numpy.ndarray): matrix a to be checked
-            b (numpy.ndarray): matrix b to be checked against
+            a (torch.tensor): matrix a to be checked
+            b (torch.tensor): matrix b to be checked against
 
         Returns:
-            indices (numpy.ndarray): boolean indices of the columns of a that are in b
+            indices (torch.tensor): boolean indices of the columns of a that are in b
         """
         _, rev = numpy.unique(
             numpy.concatenate((a, b), axis=1), axis=1, return_inverse=True
@@ -752,9 +752,9 @@ class AcousticsSimulation:
 
         Args:
             BC_list (dict[str, int]): see :attr:`BC_list`.
-            EToV (numpy.ndarray): see :any:`edg_acoustics.Mesh.EToV`.
-            vmapM (numpy.ndarray): see :attr:`vmapM`.
-            BC_triangles (dict[str, numpy.ndarray]): see :attr:`edg_acoustics.mesh.Mesh.BC_triangles`.
+            EToV (torch.tensor): see :any:`edg_acoustics.Mesh.EToV`.
+            vmapM (torch.tensor): see :attr:`vmapM`.
+            BC_triangles (dict[str, torch.tensor]): see :attr:`edg_acoustics.mesh.Mesh.BC_triangles`.
             Nx (int): see :attr:`Nx`.
         Returns:
             BCnode (list[dict]): see :attr:`BCnode`.
@@ -790,7 +790,7 @@ class AcousticsSimulation:
         """Compute the minimum diameter of the inscribed spheres in all elements.
 
         Args:
-            Fscale (numpy.ndarray): see :attr:`Fscale`.
+            Fscale (torch.tensor): see :attr:`Fscale`.
         Returns:
             diameter (float): minimum diameter of the inscribed spheres in all elements.
         """
@@ -803,14 +803,14 @@ class AcousticsSimulation:
         """Compute partial derivative dU/dx, dU/dy, dU/dz, or gradient dU/dx + dU/dy + dU/dz
 
         Args:
-            U (numpy.ndarray): ``[Np, N_tets]`` the acoustic variables that needs to be differentiated.
+            U (torch.tensor): ``[Np, N_tets]`` the acoustic variables that needs to be differentiated.
             axis (str): the axis to be differentiated w.r.t, e.g. 'x', 'y', 'z', 'xyz'
 
         Returns:
-            dUdx (numpy.ndarray): ``[Np, N_tets]`` derivatives :math:`\\frac{\\partial U}{\\partial x}` at every nodal point, if axis is 'x'.
-            dUdy (numpy.ndarray): ``[Np, N_tets]`` derivatives :math:`\\frac{\\partial U}{\\partial y}` at every nodal point, if axis is 'y'.
-            dUdz (numpy.ndarray): ``[Np, N_tets]`` derivatives :math:`\\frac{\\partial U}{\\partial z}` at every nodal point, if axis is 'z'.
-            Tuple of gradient (numpy.ndarray): ``[Np, N_tets]`` gradient (:math:`\\frac{\\partial U}{\\partial x}, \\frac{\\partial U}{\\partial y}, \\frac{\\partial U}{\\partial z}`), if axis is 'xyz'.
+            dUdx (torch.tensor): ``[Np, N_tets]`` derivatives :math:`\\frac{\\partial U}{\\partial x}` at every nodal point, if axis is 'x'.
+            dUdy (torch.tensor): ``[Np, N_tets]`` derivatives :math:`\\frac{\\partial U}{\\partial y}` at every nodal point, if axis is 'y'.
+            dUdz (torch.tensor): ``[Np, N_tets]`` derivatives :math:`\\frac{\\partial U}{\\partial z}` at every nodal point, if axis is 'z'.
+            Tuple of gradient (torch.tensor): ``[Np, N_tets]`` gradient (:math:`\\frac{\\partial U}{\\partial x}, \\frac{\\partial U}{\\partial y}, \\frac{\\partial U}{\\partial z}`), if axis is 'xyz'.
         """
         dUdr = torch.from_numpy(self.Dr) @ U.to(torch.float64)
         dUds = torch.from_numpy(self.Ds) @ U.to(torch.float64)
@@ -859,14 +859,14 @@ class AcousticsSimulation:
 
         Args:
             node_coordinates (numpy.ndarray): see :attr:`edg_acoustics.Mesh.vertices`.
-            EToV (numpy.ndarray): see :attr:`edg_acoustics.Mesh.EToV`.
-            rec (numpy.ndarray): An (N_rec x 3) array containing the (x, y, z) coordinates of N_rec microphone locations.
+            EToV (torch.tensor): see :attr:`edg_acoustics.Mesh.EToV`.
+            rec (torch.tensor): An (N_rec x 3) array containing the (x, y, z) coordinates of N_rec microphone locations.
             methodLocate (str): search method to locate the simplices containing the sample points. Available methods are 'scipy' and 'brute_force'.
                 brutal force approach, adopted from https://stackoverflow.com/questions/25179693/how-to-check-whether-the-point-is-in-the-tetrahedron-or-not/60745339#60745339
 
 
         Returns:
-            nodeindex (numpy.ndarray): indices of simplices containing the N_rec microphone points
+            nodeindex (torch.tensor): indices of simplices containing the N_rec microphone points
         """
         if methodLocate == "scipy":
             tri = Delaunay(node_coordinates.T, qhull_options="QJ")
@@ -917,8 +917,8 @@ class AcousticsSimulation:
                 brutal force approach, adopted from https://stackoverflow.com/questions/25179693/how-to-check-whether-the-point-is-in-the-tetrahedron-or-not/60745339#60745339
 
         Returns:
-            sampleWeight (numpy.ndarray): ``[N_rec, Np]`` interpolation weights required to interpolate the nodal data to the sample (i.e., microphone location).
-            nodeindex (numpy.ndarray): ``[N_rec, ]`` index of simplices that contatin the sample (microphone) points.
+            sampleWeight (torch.tensor): ``[N_rec, Np]`` interpolation weights required to interpolate the nodal data to the sample (i.e., microphone location).
+            nodeindex (torch.tensor): ``[N_rec, ]`` index of simplices that contatin the sample (microphone) points.
         """
         nodeindex = AcousticsSimulation.locate_simplex(
             self.mesh.vertices, self.mesh.EToV, self.rec, methodLocate
@@ -962,7 +962,7 @@ class AcousticsSimulation:
         Then compute the interpolation weights required to interpolate the nodal data to the sample (i.e., microphone location).
 
         Args:
-            rec (numpy.ndarray): An ``[3, N_rec]`` array containing the (x, y, z) coordinates of N_rec microphone locations.
+            rec (torch.tensor): An ``[3, N_rec]`` array containing the (x, y, z) coordinates of N_rec microphone locations.
             methodLocate (str): search method to locate the simplices containing the sample points. Available methods are 'scipy' and 'brute_force'.
                 brutal force approach, adopted from https://stackoverflow.com/questions/25179693/how-to-check-whether-the-point-is-in-the-tetrahedron-or-not/60745339
         """
@@ -991,17 +991,17 @@ class AcousticsSimulation:
         """Compute the right-hand side of the linear acoustic equations with the DG discretization.
 
         Args:
-            P (numpy.ndarray): Pressure field.
-            Vx (numpy.ndarray): Velocity field in the x-direction.
-            Vy (numpy.ndarray): Velocity field in the y-direction.
-            Vz (numpy.ndarray): Velocity field in the z-direction.
+            P (torch.tensor): Pressure field.
+            Vx (torch.tensor): Velocity field in the x-direction.
+            Vy (torch.tensor): Velocity field in the y-direction.
+            Vz (torch.tensor): Velocity field in the z-direction.
             BCvar (list[dict]): see :data:`edg_acoustics.AbsorbBC.BCvar`.
 
         Returns:
-            RHS_P (numpy.ndarray): Right-hand side values for pressure.
-            RHS_Vx (numpy.ndarray): Right-hand side values for velocity in the x-direction.
-            RHS_Vy (numpy.ndarray): Right-hand side values for velocity in the y-direction.
-            RHS_Vz (numpy.ndarray): Right-hand side values for velocity in the z-direction.
+            RHS_P (torch.tensor): Right-hand side values for pressure.
+            RHS_Vx (torch.tensor): Right-hand side values for velocity in the x-direction.
+            RHS_Vy (torch.tensor): Right-hand side values for velocity in the y-direction.
+            RHS_Vz (torch.tensor): Right-hand side values for velocity in the z-direction.
             BCvar (list[dict]): updated boundary condition variables.
         """
         # P = torch.from_numpy(P)
@@ -1156,7 +1156,7 @@ class AcousticsSimulation:
             format (str): the format of the file to save the results. Can be either 'mat' or 'npy'. The default format is 'mat'.
 
         Returns:
-            prec (numpy.ndarray): Pressure field at the microphone locations.
+            prec (torch.tensor): Pressure field at the microphone locations.
         """
 
         # Process optional input arguments
