@@ -935,7 +935,7 @@ class AcousticsSimulation:
             v_old = modepy.vandermonde(simplex_basis, old_nodes[:, :, i])
             sampleWeight[i] = v_new[i] @ numpy.linalg.inv(v_old)  # type: ignore
 
-        return sampleWeight, nodeindex
+        return torch.from_numpy(sampleWeight), nodeindex
 
     def init_IC(self, IC: edg_acoustics.InitialCondition):
         """setup the initial condition and save it to the :class:`AcousticsSimulation` class.
@@ -1193,7 +1193,7 @@ class AcousticsSimulation:
                 (self.Vz),
                 self.BC,
             )  # by changing the value in place, the ID of the object is not changed (no new object is created), but the previous value is lost, which is not important here, because the previous value is not used anymore``
-            self.prec[:, StepIndex] = numpy.diag(self.sampleWeight @ torch.Tensor.numpy(self.P[:, self.nodeindex]))  # type: ignore
+            self.prec[:, StepIndex] = numpy.diag(torch.Tensor.numpy(self.sampleWeight) @ torch.Tensor.numpy(self.P[:, self.nodeindex]))  # type: ignore
             if "delta_step" in kwargs and StepIndex % kwargs["delta_step"] == 0:
                 newTime = time.time()
                 elapsed = newTime - curTime
