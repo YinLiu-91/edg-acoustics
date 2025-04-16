@@ -305,7 +305,7 @@ class AcousticsSimulation:
 
     @staticmethod
     def compute_collocation_nodes(
-        EToV: torch.tensor, vertices: numpy.ndarray, Nx: int, dim: int = 3
+        EToV: torch.tensor, vertices: torch.tensor, Nx: int, dim: int = 3
     ):
         """Compute reference element :math:`(r, s, t)` coordinates of collocation points :attr:`rst` and the physical domain :attr:`xyz` coordinates
         for each element.
@@ -391,7 +391,7 @@ class AcousticsSimulation:
         simplex_basis = modepy.simplex_onb(dim, Nx)
 
         # Compute van der Monde matrix of simplex_basis over the nodes in rst
-        return modepy.vandermonde(simplex_basis, rst)  # type: ignore
+        return torch.from_numpy(modepy.vandermonde(simplex_basis, rst))  # type: ignore
 
     @staticmethod
     def compute_derivative_matrix(Nx: int, rst: numpy.ndarray, dim: int = 3):
@@ -450,7 +450,7 @@ class AcousticsSimulation:
         return Fmask
 
     @staticmethod
-    def compute_lift(V: numpy.ndarray, rst: numpy.ndarray, Fmask: numpy.ndarray):
+    def compute_lift(V: torch.tensor, rst: numpy.ndarray, Fmask: numpy.ndarray):
         """Compute the lift matrix.
 
         Args:
@@ -500,7 +500,7 @@ class AcousticsSimulation:
 
             Emat[Fmask[face], face * Nfp : (face + 1) * Nfp] += massFace
 
-        return torch.from_numpy(V @ (V.transpose() @ Emat))
+        return V @ (V.t() @ Emat)
 
     @staticmethod
     def geometric_factors_3d(
