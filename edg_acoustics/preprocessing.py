@@ -37,24 +37,24 @@ class UpwindFlux(Flux):
     Args:
         rho0 (float): The reference density.
         c0 (float): The reference speed of sound.
-        n_xyz (numpy.ndarray): The array representing the normal vector of the face.
+        n_xyz (torch.tensor): The array representing the normal vector of the face.
 
     Attributes:
         rho0 (float): see :attr:`edg_acoustics.AcousticsSimulation.rho0`.
         c0 (float): see :attr:`edg_acoustics.AcousticsSimulation.c0`.
-        n_xyz (numpy.ndarray): see :attr:`edg_acoustics.AcousticsSimulation.n_xyz`.
-        cn1s (numpy.ndarray): precalculated constant for the calculation of the flux of velocity in x-direction.
-        cn2s (numpy.ndarray): precalculated constant for the calculation of the flux of velocity in y-direction.
-        cn3s (numpy.ndarray): precalculated constant for the calculation of the flux of velocity in z-direction.
-        cn1n2 (numpy.ndarray): precalculated constant for the calculation of the flux of velocity.
-        cn1n3 (numpy.ndarray): precalculated constant for the calculation of the flux of velocity.
-        cn2n3 (numpy.ndarray): precalculated constant for the calculation of the flux of velocity.
-        n1rho (numpy.ndarray): precalculated constant for the calculation of the flux of velocity in x-direction.
-        n2rho (numpy.ndarray): precalculated constant for the calculation of the flux of velocity in y-direction.
-        n3rho (numpy.ndarray): precalculated constant for the calculation of the flux of velocity in z-direction.
-        csn1rho (numpy.ndarray): precalculated constant for the calculation of the pressure flux.
-        csn2rho (numpy.ndarray): precalculated constant for the calculation of the pressure flux.
-        csn3rho (numpy.ndarray): precalculated constant for the calculation of the pressure flux.
+        n_xyz (torch.tensor): see :attr:`edg_acoustics.AcousticsSimulation.n_xyz`.
+        cn1s (torch.tensor): precalculated constant for the calculation of the flux of velocity in x-direction.
+        cn2s (torch.tensor): precalculated constant for the calculation of the flux of velocity in y-direction.
+        cn3s (torch.tensor): precalculated constant for the calculation of the flux of velocity in z-direction.
+        cn1n2 (torch.tensor): precalculated constant for the calculation of the flux of velocity.
+        cn1n3 (torch.tensor): precalculated constant for the calculation of the flux of velocity.
+        cn2n3 (torch.tensor): precalculated constant for the calculation of the flux of velocity.
+        n1rho (torch.tensor): precalculated constant for the calculation of the flux of velocity in x-direction.
+        n2rho (torch.tensor): precalculated constant for the calculation of the flux of velocity in y-direction.
+        n3rho (torch.tensor): precalculated constant for the calculation of the flux of velocity in z-direction.
+        csn1rho (torch.tensor): precalculated constant for the calculation of the pressure flux.
+        csn2rho (torch.tensor): precalculated constant for the calculation of the pressure flux.
+        csn3rho (torch.tensor): precalculated constant for the calculation of the pressure flux.
 
 
     """
@@ -86,13 +86,13 @@ class UpwindFlux(Flux):
         """This method calculates the pressure flux using the given input arrays.
 
         Args:
-            dvx (numpy.ndarray): The array representing jump values across the faces of neighboring elements in velocity in the x-direction.
-            dvy (numpy.ndarray): The array representing jump values across the faces of neighboring elements in velocity in the y-direction.
-            dvz (numpy.ndarray): The array representing jump values across the faces of neighboring elements in velocity in the z-direction.
-            dp (numpy.ndarray): The array representing jump values across the faces of neighboring elements in pressure.
+            dvx (torch.tensor): The array representing jump values across the faces of neighboring elements in velocity in the x-direction.
+            dvy (torch.tensor): The array representing jump values across the faces of neighboring elements in velocity in the y-direction.
+            dvz (torch.tensor): The array representing jump values across the faces of neighboring elements in velocity in the z-direction.
+            dp (torch.tensor): The array representing jump values across the faces of neighboring elements in pressure.
 
         Returns:
-            numpy.ndarray: The calculated pressure flux.
+            torch.tensor: The calculated pressure flux.
 
         """
         return (
@@ -112,13 +112,13 @@ class UpwindFlux(Flux):
         """This method calculates the flux of velocity in x-direction using the given input arrays.
 
         Args:
-            dvx (numpy.ndarray): The array representing jump values across the faces of neighboring elements in velocity in the x-direction.
-            dvy (numpy.ndarray): The array representing jump values across the faces of neighboring elements in velocity in the y-direction.
-            dvz (numpy.ndarray): The array representing jump values across the faces of neighboring elements in velocity in the z-direction.
-            dp (numpy.ndarray): The array representing jump values across the faces of neighboring elements in pressure.
+            dvx (torch.tensor): The array representing jump values across the faces of neighboring elements in velocity in the x-direction.
+            dvy (torch.tensor): The array representing jump values across the faces of neighboring elements in velocity in the y-direction.
+            dvz (torch.tensor): The array representing jump values across the faces of neighboring elements in velocity in the z-direction.
+            dp (torch.tensor): The array representing jump values across the faces of neighboring elements in pressure.
 
         Returns:
-            numpy.ndarray: The calculated flux of velocity in x-direction.
+            torch.tensor: The calculated flux of velocity in x-direction.
         """
         return (
             (self.cn1s) * dvx
@@ -137,13 +137,13 @@ class UpwindFlux(Flux):
         """This method calculates the flux of velocity in y-direction using the given input arrays.
 
         Args:
-            dvx (numpy.ndarray): The array representing jump values across the faces of neighboring elements in velocity in the x-direction.
-            dvy (numpy.ndarray): The array representing jump values across the faces of neighboring elements in velocity in the y-direction.
-            dvz (numpy.ndarray): The array representing jump values across the faces of neighboring elements in velocity in the z-direction.
-            dp (numpy.ndarray): The array representing jump values across the faces of neighboring elements in pressure.
+            dvx (torch.tensor): The array representing jump values across the faces of neighboring elements in velocity in the x-direction.
+            dvy (torch.tensor): The array representing jump values across the faces of neighboring elements in velocity in the y-direction.
+            dvz (torch.tensor): The array representing jump values across the faces of neighboring elements in velocity in the z-direction.
+            dp (torch.tensor): The array representing jump values across the faces of neighboring elements in pressure.
 
         Returns:
-            numpy.ndarray: The calculated flux of velocity in y-direction.
+            torch.tensor: The calculated flux of velocity in y-direction.
         """
         return (
             (self.cn1n2) * dvx
@@ -162,13 +162,13 @@ class UpwindFlux(Flux):
         """This method calculates the flux of velocity in z-direction using the given input arrays.
 
         Args:
-            dvx (numpy.ndarray): The array representing jump values across the faces of neighboring elements in velocity in the x-direction.
-            dvy (numpy.ndarray): The array representing jump values across the faces of neighboring elements in velocity in the y-direction.
-            dvz (numpy.ndarray): The array representing jump values across the faces of neighboring elements in velocity in the z-direction.
-            dp (numpy.ndarray): The array representing jump values across the faces of neighboring elements in pressure.
+            dvx (torch.tensor): The array representing jump values across the faces of neighboring elements in velocity in the x-direction.
+            dvy (torch.tensor): The array representing jump values across the faces of neighboring elements in velocity in the y-direction.
+            dvz (torch.tensor): The array representing jump values across the faces of neighboring elements in velocity in the z-direction.
+            dp (torch.tensor): The array representing jump values across the faces of neighboring elements in pressure.
 
         Returns:
-            numpy.ndarray: The calculated flux of velocity in z-direction.
+            torch.tensor: The calculated flux of velocity in z-direction.
         """
         return (
             (self.cn1n3) * dvx
