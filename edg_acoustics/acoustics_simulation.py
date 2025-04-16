@@ -154,6 +154,7 @@ class AcousticsSimulation:
         BC_list: dict[str, int],
         node_tolerance: float = NODETOL,
     ):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         # Check if BC_list and mesh are compatible
         if not AcousticsSimulation.check_BC_list(BC_list, mesh):
             raise ValueError(
@@ -203,27 +204,39 @@ class AcousticsSimulation:
         )
 
         # Compute the product of inverse of the mass matrix (3D) with the face-mass matrices (2D)
-        self.lift = AcousticsSimulation.compute_lift(self.V, self.rst, self.Fmask)
+        self.lift = AcousticsSimulation.compute_lift(
+            self.V, self.rst, torch.Tensor.numpy(self.Fmask.cpu())
+        )
+        self.lift = self.lift.to(self.device)
 
         # Compute the metric terms for the mesh
         self.rst_xyz, self.J = AcousticsSimulation.geometric_factors_3d(
-            torch.from_numpy(self.xyz),
-            torch.from_numpy(self.Dr),
-            torch.from_numpy(self.Ds),
-            torch.from_numpy(self.Dt),
+            self.xyz,
+            self.Dr,
+            self.Ds,
+            self.Dt,
         )
 
         # Compute the face normals at the collocation points and the surface Jacobians
         self.n_xyz, self.sJ = AcousticsSimulation.normals_3d(
-            self.xyz, self.rst_xyz, self.J, self.Fmask
+            torch.Tensor.numpy(self.xyz.cpu()),
+            torch.Tensor.numpy(self.rst_xyz.cpu()),
+            torch.Tensor.numpy(self.J.cpu()),
+            torch.Tensor.numpy(self.Fmask.cpu()),
         )
+        self.n_xyz = self.n_xyz.to(self.device)
+        self.sJ = self.sJ.to(self.device)
 
         # Compute ratio of surface to volume Jacobian of facial node
-        self.Fscale = torch.from_numpy(self.sJ / self.J[self.Fmask.reshape(-1), :])
+        self.Fscale = self.sJ / self.J[self.Fmask.reshape(-1), :]
 
         # Find connectivity for nodes given per surface in all elements
         self.vmapM, self.vmapP = AcousticsSimulation.build_maps_3d(
-            self.xyz, self.mesh.EToE, self.mesh.EToF, self.Fmask, self.node_tolerance
+            torch.Tensor.numpy(self.xyz.cpu()),
+            self.mesh.EToE,
+            self.mesh.EToF,
+            self.Fmask.cpu(),
+            self.node_tolerance,
         )
 
         # Build specialized nodal maps for various types of boundary conditions,specified in BC_list
@@ -236,7 +249,7 @@ class AcousticsSimulation:
         )
 
         self.dtscale = (
-            AcousticsSimulation.diameter_3d(torch.Tensor.numpy(self.Fscale))
+            AcousticsSimulation.diameter_3d(torch.Tensor.numpy(self.Fscale.cpu()))
             / self.c0
             / (2 * self.Nx + 1)
         )
@@ -326,7 +339,7 @@ class AcousticsSimulation:
 
             xyz (torch.tensor): see :attr:`xyz`.
         """
-
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         # These are so called Fekete points (low, close to optimal, Lebesgue constant) on simplices of dimension
         # self.dim and maximum polynomial degree to interpolate over these nodes (determines the number of nodes).
         rst = modepy.warp_and_blend_nodes(dim, Nx)
@@ -373,7 +386,7 @@ class AcousticsSimulation:
         )
 
         # Return the computed coordinates
-        return rst, xyz
+        return rst, torch.from_numpy(xyz).to(device)
 
     @staticmethod
     def compute_van_der_monde_matrix(
@@ -411,7 +424,7 @@ class AcousticsSimulation:
             Ds (torch.tensor): see :attr:`Ds`.
             Dt (torch.tensor): see :attr:`Dt`.
         """
-
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         # Compute the orthonormal polynomial basis of degree Nx and geometric dimension dim
         simplex_basis = modepy.simplex_onb(dim, Nx)
 
@@ -422,7 +435,11 @@ class AcousticsSimulation:
         D = modepy.differentiation_matrices(simplex_basis, grad_simplex_basis, rst)
 
         # Return d/dr, d/ds and d/dt matrices
-        return D[0], D[1], D[2]
+        return (
+            torch.from_numpy(D[0]).to(device),
+            torch.from_numpy(D[1]).to(device),
+            torch.from_numpy(D[2]).to(device),
+        )
 
     # ------------------------------------------------------------------------------------------------------------------
     @staticmethod
@@ -436,6 +453,7 @@ class AcousticsSimulation:
         Returns:
             Fmask (torch.tensor): see :attr:`Fmask`.
         """
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         Np = rst.shape[1]
         Nx = AcousticsSimulation.compute_Nx_from_Np(
             Np
@@ -444,7 +462,7 @@ class AcousticsSimulation:
             Nx
         )  # get the number of collocation points per face
 
-        Fmask = torch.zeros([4, Nfp], dtype=torch.uint8)
+        Fmask = torch.zeros([4, Nfp], dtype=torch.int).to(device)
 
         # Find all the nodes that lie on each surface
         Fmask[0] = torch.nonzero(torch.abs(1 + rst[2]) < node_tol).flatten()
@@ -523,6 +541,7 @@ class AcousticsSimulation:
             rst_xyz (torch.tensor): see :attr:`rst_xyz`.
             J (torch.tensor): see :attr:`J`.
         """
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         Np = xyz.shape[1]  # the number of collocation points
         N_tets = xyz.shape[2]  # the number of elements
 
@@ -548,7 +567,9 @@ class AcousticsSimulation:
         )
 
         # Compute the derivates of the local coordinates at the nodal points
-        rst_xyz = numpy.zeros([3, 3, Np, N_tets])  # pre-allocate memory space
+        rst_xyz = torch.zeros([3, 3, Np, N_tets]).to(
+            device
+        )  # pre-allocate memory space
 
         # r
         rst_xyz[0, 0] = (ys * zt - zs * yt) / J
@@ -563,7 +584,7 @@ class AcousticsSimulation:
         rst_xyz[2, 1] = -(xr * zs - zr * xs) / J
         rst_xyz[2, 2] = (xr * ys - yr * xs) / J
 
-        return rst_xyz, torch.Tensor.numpy(J)
+        return rst_xyz, J
 
     @staticmethod
     def normals_3d(
@@ -648,7 +669,7 @@ class AcousticsSimulation:
         # Compute the face Jacobians
         sJ = norm_n * J[Fmask.reshape(-1)]
 
-        return torch.from_numpy(n_xyz), sJ
+        return torch.from_numpy(n_xyz), torch.from_numpy(sJ)
 
     @staticmethod
     def build_maps_3d(
@@ -817,38 +838,38 @@ class AcousticsSimulation:
             dUdz (torch.tensor): ``[Np, N_tets]`` derivatives :math:`\\frac{\\partial U}{\\partial z}` at every nodal point, if axis is 'z'.
             Tuple of gradient (torch.tensor): ``[Np, N_tets]`` gradient (:math:`\\frac{\\partial U}{\\partial x}, \\frac{\\partial U}{\\partial y}, \\frac{\\partial U}{\\partial z}`), if axis is 'xyz'.
         """
-        dUdr = torch.from_numpy(self.Dr) @ U.to(torch.float64)
-        dUds = torch.from_numpy(self.Ds) @ U.to(torch.float64)
-        dUdt = torch.from_numpy(self.Dt) @ U.to(torch.float64)
+        dUdr = self.Dr @ U.to(torch.float64)
+        dUds = self.Ds @ U.to(torch.float64)
+        dUdt = self.Dt @ U.to(torch.float64)
         if axis == "x":
             return (
-                torch.from_numpy(self.rst_xyz[0, 0]) * dUdr
-                + torch.from_numpy(self.rst_xyz[1, 0]) * dUds
-                + torch.from_numpy(self.rst_xyz[2, 0]) * dUdt
+                self.rst_xyz[0, 0] * dUdr
+                + self.rst_xyz[1, 0] * dUds
+                + self.rst_xyz[2, 0] * dUdt
             )
         elif axis == "y":
             return (
-                torch.from_numpy(self.rst_xyz[0, 1]) * dUdr
-                + torch.from_numpy(self.rst_xyz[1, 1]) * dUds
-                + torch.from_numpy(self.rst_xyz[2, 1]) * dUdt
+                self.rst_xyz[0, 1] * dUdr
+                + self.rst_xyz[1, 1] * dUds
+                + self.rst_xyz[2, 1] * dUdt
             )
         elif axis == "z":
             return (
-                torch.from_numpy(self.rst_xyz[0, 2]) * dUdr
-                + torch.from_numpy(self.rst_xyz[1, 2]) * dUds
-                + torch.from_numpy(self.rst_xyz[2, 2]) * dUdt
+                self.rst_xyz[0, 2] * dUdr
+                + self.rst_xyz[1, 2] * dUds
+                + self.rst_xyz[2, 2] * dUdt
             )
         elif axis == "xyz":
             return (
-                torch.from_numpy(self.rst_xyz[0, 0]) * dUdr
-                + torch.from_numpy(self.rst_xyz[1, 0]) * dUds
-                + torch.from_numpy(self.rst_xyz[2, 0]) * dUdt,
-                torch.from_numpy(self.rst_xyz[0, 1]) * dUdr
-                + torch.from_numpy(self.rst_xyz[1, 1]) * dUds
-                + torch.from_numpy(self.rst_xyz[2, 1]) * dUdt,
-                torch.from_numpy(self.rst_xyz[0, 2]) * dUdr
-                + torch.from_numpy(self.rst_xyz[1, 2]) * dUds
-                + torch.from_numpy(self.rst_xyz[2, 2]) * dUdt,
+                self.rst_xyz[0, 0] * dUdr
+                + self.rst_xyz[1, 0] * dUds
+                + self.rst_xyz[2, 0] * dUdt,
+                self.rst_xyz[0, 1] * dUdr
+                + self.rst_xyz[1, 1] * dUds
+                + self.rst_xyz[2, 1] * dUdt,
+                self.rst_xyz[0, 2] * dUdr
+                + self.rst_xyz[1, 2] * dUds
+                + self.rst_xyz[2, 2] * dUdt,
             )
         else:
             raise ValueError(f"Invalid axis: {axis}")
@@ -940,10 +961,12 @@ class AcousticsSimulation:
         sampleWeight = numpy.zeros([self.rec.shape[1], len(simplex_basis)])
 
         for i in range(old_nodes.shape[2]):
-            v_old = modepy.vandermonde(simplex_basis, old_nodes[:, :, i])
+            v_old = modepy.vandermonde(
+                simplex_basis, torch.Tensor.numpy(old_nodes[:, :, i].cpu())
+            )
             sampleWeight[i] = v_new[i] @ numpy.linalg.inv(v_old)  # type: ignore
 
-        return torch.from_numpy(sampleWeight), nodeindex
+        return torch.from_numpy(sampleWeight).to(self.device), nodeindex
 
     def init_IC(self, IC: edg_acoustics.InitialCondition):
         """setup the initial condition and save it to the :class:`AcousticsSimulation` class.
@@ -952,10 +975,10 @@ class AcousticsSimulation:
             IC (edg_acoustics.InitialCondition): the initial condition object.
         """
         self.IC = IC
-        self.P = self.IC.Pinit(torch.from_numpy(self.xyz).to(torch.float32))
-        self.Vx = self.IC.VXinit(torch.from_numpy(self.xyz).to(torch.float32))
-        self.Vy = self.IC.VYinit(torch.from_numpy(self.xyz).to(torch.float32))
-        self.Vz = self.IC.VZinit(torch.from_numpy(self.xyz).to(torch.float32))
+        self.P = self.IC.Pinit(self.xyz.to(torch.float32)).to(self.device)
+        self.Vx = self.IC.VXinit(self.xyz.to(torch.float32)).to(self.device)
+        self.Vy = self.IC.VYinit(self.xyz.to(torch.float32)).to(self.device)
+        self.Vz = self.IC.VZinit(self.xyz.to(torch.float32)).to(self.device)
 
     def init_BC(self, BC):
         """load the boundary condition and save it to the :class:`AcousticsSimulation` class.
@@ -1018,10 +1041,10 @@ class AcousticsSimulation:
         # Vz = torch.from_numpy(Vz)
 
         # Initialize jump variables
-        dVx = torch.zeros_like(self.Fscale)
-        dVy = torch.zeros_like(dVx)
-        dVz = torch.zeros_like(dVx)
-        dP = torch.zeros_like(dVx)
+        dVx = torch.zeros_like(self.Fscale).to(self.device)
+        dVy = torch.zeros_like(dVx).to(self.device)
+        dVz = torch.zeros_like(dVx).to(self.device)
+        dP = torch.zeros_like(dVx).to(self.device)
 
         # calculate jump values across the faces of neighboring elements
         dVx.reshape(-1)[:] = (
@@ -1198,13 +1221,12 @@ class AcousticsSimulation:
         for StepIndex in range(self.Ntimesteps):
 
             self.time_integrator.step_dt(
-                (self.P),
-                (self.Vx),
-                (self.Vy),
-                (self.Vz),
+                self.P,
+                self.Vx,
+                self.Vy,
+                self.Vz,
                 self.BC,
             )  # by changing the value in place, the ID of the object is not changed (no new object is created), but the previous value is lost, which is not important here, because the previous value is not used anymore``
-            # self.prec[:, StepIndex] = torch.from_numpy(numpy.diag(torch.Tensor.numpy(self.sampleWeight) @ torch.Tensor.numpy(self.P[:, self.nodeindex])))  # type: ignore
             self.prec[:, StepIndex] = torch.diag(self.sampleWeight @ self.P[:, self.nodeindex])  # type: ignore
 
             if "delta_step" in kwargs and StepIndex % kwargs["delta_step"] == 0:
