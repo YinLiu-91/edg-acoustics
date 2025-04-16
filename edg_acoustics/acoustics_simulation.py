@@ -20,6 +20,8 @@ __all__ = ["AcousticsSimulation", "NODETOL"]
 NODETOL = 1.0e-7
 """float: Tolerance used to determine if a node lies on a facet."""
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 class AcousticsSimulation:
     """Acoustics simulation data structure for running a DG acoustics simulation.
@@ -154,7 +156,7 @@ class AcousticsSimulation:
         BC_list: dict[str, int],
         node_tolerance: float = NODETOL,
     ):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
         # Check if BC_list and mesh are compatible
         if not AcousticsSimulation.check_BC_list(BC_list, mesh):
             raise ValueError(
@@ -339,7 +341,6 @@ class AcousticsSimulation:
 
             xyz (torch.tensor): see :attr:`xyz`.
         """
-        device = "cuda" if torch.cuda.is_available() else "cpu"
         # These are so called Fekete points (low, close to optimal, Lebesgue constant) on simplices of dimension
         # self.dim and maximum polynomial degree to interpolate over these nodes (determines the number of nodes).
         rst = modepy.warp_and_blend_nodes(dim, Nx)
@@ -424,7 +425,6 @@ class AcousticsSimulation:
             Ds (torch.tensor): see :attr:`Ds`.
             Dt (torch.tensor): see :attr:`Dt`.
         """
-        device = "cuda" if torch.cuda.is_available() else "cpu"
         # Compute the orthonormal polynomial basis of degree Nx and geometric dimension dim
         simplex_basis = modepy.simplex_onb(dim, Nx)
 
@@ -453,7 +453,6 @@ class AcousticsSimulation:
         Returns:
             Fmask (torch.tensor): see :attr:`Fmask`.
         """
-        device = "cuda" if torch.cuda.is_available() else "cpu"
         Np = rst.shape[1]
         Nx = AcousticsSimulation.compute_Nx_from_Np(
             Np
@@ -541,7 +540,6 @@ class AcousticsSimulation:
             rst_xyz (torch.tensor): see :attr:`rst_xyz`.
             J (torch.tensor): see :attr:`J`.
         """
-        device = "cuda" if torch.cuda.is_available() else "cpu"
         Np = xyz.shape[1]  # the number of collocation points
         N_tets = xyz.shape[2]  # the number of elements
 
