@@ -207,7 +207,10 @@ class AcousticsSimulation:
 
         # Compute the metric terms for the mesh
         self.rst_xyz, self.J = AcousticsSimulation.geometric_factors_3d(
-            self.xyz, self.Dr, self.Ds, self.Dt
+            torch.from_numpy(self.xyz),
+            torch.from_numpy(self.Dr),
+            torch.from_numpy(self.Ds),
+            torch.from_numpy(self.Dt),
         )
 
         # Compute the face normals at the collocation points and the surface Jacobians
@@ -506,7 +509,7 @@ class AcousticsSimulation:
 
     @staticmethod
     def geometric_factors_3d(
-        xyz: numpy.ndarray, Dr: numpy.ndarray, Ds: numpy.ndarray, Dt: numpy.ndarray
+        xyz: torch.tensor, Dr: torch.tensor, Ds: torch.tensor, Dt: torch.tensor
     ):
         """Compute the metric elements for the local mappings of the elements.
 
@@ -560,7 +563,7 @@ class AcousticsSimulation:
         rst_xyz[2, 1] = -(xr * zs - zr * xs) / J
         rst_xyz[2, 2] = (xr * ys - yr * xs) / J
 
-        return rst_xyz, J
+        return rst_xyz, torch.Tensor.numpy(J)
 
     @staticmethod
     def normals_3d(
