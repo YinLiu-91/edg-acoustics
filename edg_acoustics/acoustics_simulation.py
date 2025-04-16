@@ -373,7 +373,7 @@ class AcousticsSimulation:
     @staticmethod
     def compute_van_der_monde_matrix(
         Nx: int, rst: numpy.ndarray, dim: int = 3
-    ) -> numpy.ndarray:
+    ) -> torch.tensor:
         """Compute vandermonde matrix of the orthonormal basis functions on the reference simplex element. Polynomial basis
             can exactly represent polynomials up to degree :attr:`Nx`. Consider the set of :attr:`~.AcousticsSimulation.Np` 3D nodes, with the coordinates of each node :math:`i` equal to
             :math:`(r_{i}, s_{i}, t_{i})`, in :attr:`.rst`, and the set of :math:`m` orthonormal basis functions,
@@ -447,10 +447,10 @@ class AcousticsSimulation:
         Fmask[2] = numpy.flatnonzero(numpy.abs(1 + rst.sum(axis=0)) < node_tol)
         Fmask[3] = numpy.flatnonzero(numpy.abs(1 + rst[0]) < node_tol)
 
-        return Fmask
+        return torch.from_numpy(Fmask)
 
     @staticmethod
-    def compute_lift(V: torch.tensor, rst: numpy.ndarray, Fmask: numpy.ndarray):
+    def compute_lift(V: torch.tensor, rst: torch.tensor, Fmask: torch.tensor):
         """Compute the lift matrix.
 
         Args:
@@ -565,7 +565,7 @@ class AcousticsSimulation:
         xyz: numpy.ndarray,
         rst_xyz: numpy.ndarray,
         J: numpy.ndarray,
-        Fmask: numpy.ndarray,
+        Fmask: torch.tensor,
     ):
         """Compute outward pointing normals at element's faces as well as surface Jacobians.
 
@@ -650,7 +650,7 @@ class AcousticsSimulation:
         xyz: numpy.ndarray,
         EToE: torch.tensor,
         EToF: torch.tensor,
-        Fmask: numpy.ndarray,
+        Fmask: torch.tensor,
         node_tol: float,
     ):
         """Find connectivity for nodes given per surface in all elements
