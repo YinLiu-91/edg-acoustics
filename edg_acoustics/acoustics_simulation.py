@@ -1187,7 +1187,10 @@ class AcousticsSimulation:
         print(f"Total simulation time is {total_time}")
         print(f"Total number of simulation steps is {self.Ntimesteps}")
 
-        self.prec = numpy.zeros([self.rec.shape[1], self.Ntimesteps])
+        # self.prec = numpy.zeros([self.rec.shape[1], self.Ntimesteps])
+        self.prec = torch.zeros(
+            [self.rec.shape[1], self.Ntimesteps], dtype=torch.float64
+        )
 
         curTime = time.time()
         prevEstimated = 0
@@ -1201,7 +1204,9 @@ class AcousticsSimulation:
                 (self.Vz),
                 self.BC,
             )  # by changing the value in place, the ID of the object is not changed (no new object is created), but the previous value is lost, which is not important here, because the previous value is not used anymore``
-            self.prec[:, StepIndex] = numpy.diag(torch.Tensor.numpy(self.sampleWeight) @ torch.Tensor.numpy(self.P[:, self.nodeindex]))  # type: ignore
+            # self.prec[:, StepIndex] = torch.from_numpy(numpy.diag(torch.Tensor.numpy(self.sampleWeight) @ torch.Tensor.numpy(self.P[:, self.nodeindex])))  # type: ignore
+            self.prec[:, StepIndex] = torch.diag(self.sampleWeight @ self.P[:, self.nodeindex])  # type: ignore
+
             if "delta_step" in kwargs and StepIndex % kwargs["delta_step"] == 0:
                 newTime = time.time()
                 elapsed = newTime - curTime
