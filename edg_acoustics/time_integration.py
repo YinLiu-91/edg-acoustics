@@ -23,12 +23,12 @@ class TimeIntegrator(abc.ABC):
     """Base class for time integrators.
 
     Args:
-        L_operator (typing.Callable[[numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray, list]]): the function in AcousticSimulation that enables the computation of Lq, given q = [P, Vx, Vy, Vz]
+        L_operator (typing.Callable[[torch.tensor, torch.tensor, torch.tensor, torch.tensor, list]]): the function in AcousticSimulation that enables the computation of Lq, given q = [P, Vx, Vy, Vz]
         dtscale (float): the time step scale based on the mesh size measure
         CFL (float): the CFL number
 
     Attributes:
-        L_operator (typing.Callable[[numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray, list]]): the function in AcousticSimulation that enables the computation of Lq, given q = [P, Vx, Vy, Vz]
+        L_operator (typing.Callable[[torch.tensor, torch.tensor, torch.tensor, torch.tensor, list]]): the function in AcousticSimulation that enables the computation of Lq, given q = [P, Vx, Vy, Vz]
         CFL (float): the CFL number
         dt (float): the time step size
     """
@@ -36,7 +36,7 @@ class TimeIntegrator(abc.ABC):
     def __init__(
         self,
         L_operator: typing.Callable[
-            [numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray, list]
+            [torch.tensor, torch.tensor, torch.tensor, torch.tensor, list]
         ],
         dtscale: float,
         CFL: float = CFL_Default,
@@ -66,13 +66,13 @@ class TSI_TI(TimeIntegrator):
     :class:`.TSI_TI` is used to evolve the pressure and velocity at the time T to time T + dt, based on the Taylor-series time integration scheme.
 
     Args:
-        L_operator (typing.Callable[[numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray, list]]): the function in AcousticSimulation that enables the computation of Lq, given q = [P, Vx, Vy, Vz]
+        L_operator (typing.Callable[[torch.tensor, torch.tensor, torch.tensor, torch.tensor, list]]): the function in AcousticSimulation that enables the computation of Lq, given q = [P, Vx, Vy, Vz]
         dtscale (float): the time step scale based on the mesh size measure
         CFL (float): the CFL number
         Nt (int): the order of the time integration scheme.
 
     Attributes:
-        L_operator (typing.Callable[[numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray, list]]): the function in AcousticSimulation that enables the computation of Lq, given q = [P, Vx, Vy, Vz]
+        L_operator (typing.Callable[[torch.tensor, torch.tensor, torch.tensor, torch.tensor, list]]): the function in AcousticSimulation that enables the computation of Lq, given q = [P, Vx, Vy, Vz]
         CFL (float): the CFL number
         dt (float): the time step size
         Nt (int): the order of the time integration scheme.
@@ -81,7 +81,7 @@ class TSI_TI(TimeIntegrator):
     def __init__(
         self,
         L_operator: typing.Callable[
-            [numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray, list]
+            [torch.tensor, torch.tensor, torch.tensor, torch.tensor, list]
         ],
         dtscale: float,
         CFL: float = CFL_Default,
@@ -102,10 +102,10 @@ class TSI_TI(TimeIntegrator):
         """Takes the pressure, velocity at the time T and evolves/updates them to time T + dt.
 
         Args:
-            P (numpy.ndarray): the pressure at the time T, will be updated to the pressure at the time T + dt
-            Vx (numpy.ndarray): the x-component of the velocity at the time T, will be updated to the x-component of the velocity at the time T + dt
-            Vy (numpy.ndarray): the y-component of the velocity at the time T, will be updated to the y-component of the velocity at the time T + dt
-            Vz (numpy.ndarray): the z-component of the velocity at the time T, will be updated to the z-component of the velocity at the time T + dt
+            P (torch.tensor): the pressure at the time T, will be updated to the pressure at the time T + dt
+            Vx (torch.tensor): the x-component of the velocity at the time T, will be updated to the x-component of the velocity at the time T + dt
+            Vy (torch.tensor): the y-component of the velocity at the time T, will be updated to the y-component of the velocity at the time T + dt
+            Vz (torch.tensor): the z-component of the velocity at the time T, will be updated to the z-component of the velocity at the time T + dt
             BC (edg_acoustics.AbsorbBC): the boundary condition object
         """
         # Takes the pressure, velocity, and BCvar at the time T and evolves it to time T + dt
