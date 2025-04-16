@@ -198,7 +198,9 @@ class AcousticsSimulation:
         )
 
         # Find all the ``Nfp`` face nodes that lie on each surface.
-        self.Fmask = AcousticsSimulation.compute_Fmask(self.rst, self.node_tolerance)
+        self.Fmask = AcousticsSimulation.compute_Fmask(
+            torch.from_numpy(self.rst), self.node_tolerance
+        )
 
         # Compute the product of inverse of the mass matrix (3D) with the face-mass matrices (2D)
         self.lift = AcousticsSimulation.compute_lift(self.V, self.rst, self.Fmask)
@@ -421,7 +423,7 @@ class AcousticsSimulation:
 
     # ------------------------------------------------------------------------------------------------------------------
     @staticmethod
-    def compute_Fmask(rst: numpy.ndarray, node_tol: float):
+    def compute_Fmask(rst: torch.tensor, node_tol: float):
         """Find all the :attr:``Nfp`` face nodes that lie on each surface.
 
         Args:
@@ -439,15 +441,15 @@ class AcousticsSimulation:
             Nx
         )  # get the number of collocation points per face
 
-        Fmask = numpy.zeros([4, Nfp], dtype=numpy.uint8)
+        Fmask = torch.zeros([4, Nfp], dtype=torch.uint8)
 
         # Find all the nodes that lie on each surface
-        Fmask[0] = numpy.flatnonzero(numpy.abs(1 + rst[2]) < node_tol)
-        Fmask[1] = numpy.flatnonzero(numpy.abs(1 + rst[1]) < node_tol)
-        Fmask[2] = numpy.flatnonzero(numpy.abs(1 + rst.sum(axis=0)) < node_tol)
-        Fmask[3] = numpy.flatnonzero(numpy.abs(1 + rst[0]) < node_tol)
+        Fmask[0] = torch.nonzero(torch.abs(1 + rst[2]) < node_tol).flatten()
+        Fmask[1] = torch.nonzero(torch.abs(1 + rst[1]) < node_tol).flatten()
+        Fmask[2] = torch.nonzero(torch.abs(1 + rst.sum(axis=0)) < node_tol).flatten()
+        Fmask[3] = torch.nonzero(torch.abs(1 + rst[0]) < node_tol).flatten()
 
-        return torch.from_numpy(Fmask)
+        return Fmask
 
     @staticmethod
     def compute_lift(V: torch.tensor, rst: torch.tensor, Fmask: torch.tensor):
