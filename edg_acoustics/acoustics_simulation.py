@@ -230,8 +230,8 @@ class AcousticsSimulation:
             torch.Tensor.numpy(self.J.cpu()),
             torch.Tensor.numpy(self.Fmask.cpu()),
         )
-        self.n_xyz = self.n_xyz.to(self.device)
-        self.sJ = self.sJ.to(self.device)
+        self.n_xyz = self.n_xyz.to(self.device).to(device_ini.dtype)
+        self.sJ = self.sJ.to(self.device).to(device_ini.dtype)
 
         # Compute ratio of surface to volume Jacobian of facial node
         self.Fscale = self.sJ / self.J[self.Fmask.reshape(-1), :]
@@ -968,7 +968,10 @@ class AcousticsSimulation:
             )
             sampleWeight[i] = v_new[i] @ numpy.linalg.inv(v_old)  # type: ignore
 
-        return torch.from_numpy(sampleWeight).to(self.device), nodeindex
+        return (
+            torch.from_numpy(sampleWeight).to(self.device).to(device_ini.dtype),
+            nodeindex,
+        )
 
     def init_IC(self, IC: edg_acoustics.InitialCondition):
         """setup the initial condition and save it to the :class:`AcousticsSimulation` class.
@@ -1043,10 +1046,10 @@ class AcousticsSimulation:
         # Vz = torch.from_numpy(Vz)
 
         # Initialize jump variables
-        dVx = torch.zeros_like(self.Fscale).to(self.device)
-        dVy = torch.zeros_like(dVx).to(self.device)
-        dVz = torch.zeros_like(dVx).to(self.device)
-        dP = torch.zeros_like(dVx).to(self.device)
+        dVx = torch.zeros_like(self.Fscale).to(self.device).to(device_ini.dtype)
+        dVy = torch.zeros_like(dVx).to(self.device).to(device_ini.dtype)
+        dVz = torch.zeros_like(dVx).to(self.device).to(device_ini.dtype)
+        dP = torch.zeros_like(dVx).to(self.device).to(device_ini.dtype)
 
         # calculate jump values across the faces of neighboring elements
         dVx.reshape(-1)[:] = (

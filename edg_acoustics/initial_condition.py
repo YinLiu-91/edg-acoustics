@@ -9,6 +9,7 @@ import numpy
 from scipy.interpolate import interp1d
 import torch
 import math
+import edg_acoustics.device_ini as device_ini
 
 __all__ = ["InitialCondition", "Monopole_IC"]
 
@@ -89,16 +90,16 @@ class Monopole_IC(InitialCondition):
             )
             / self.halfwidth**2
         )
-        return torch.from_numpy(pressure)
+        return torch.from_numpy(pressure).to(device_ini.dtype)
 
     def VXinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in x-direction."""
-        return torch.zeros([xyz.shape[1], xyz.shape[2]])
+        return torch.zeros([xyz.shape[1], xyz.shape[2]]).to(device_ini.dtype)
 
     def VYinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in y-direction."""
-        return torch.zeros([xyz.shape[1], xyz.shape[2]])
+        return torch.zeros([xyz.shape[1], xyz.shape[2]]).to(device_ini.dtype)
 
     def VZinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in z-direction."""
-        return torch.zeros([xyz.shape[1], xyz.shape[2]])
+        return torch.zeros([xyz.shape[1], xyz.shape[2]]).to(device_ini.dtype)
