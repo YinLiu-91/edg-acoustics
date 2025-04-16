@@ -15,6 +15,7 @@ from __future__ import annotations
 import abc
 import numpy
 import torch
+import edg_acoustics.device_ini as device_ini
 
 __all__ = ["BoundaryCondition", "AbsorbBC", "FREQ_MAX"]
 
@@ -32,7 +33,6 @@ class BoundaryCondition(abc.ABC):
     # can be used for other transmission BC in the future
     @staticmethod
     def init_ADEvariables(BCpara: list[dict], BCnode: list[dict]):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
         """Initiate ADE variables, normal velocity, characteristic waves (outgoing and incoming).
 
         Args:
@@ -47,7 +47,7 @@ class BoundaryCondition(abc.ABC):
             BCvar.append({"label": paras["label"]})
             BCvar[index].update(
                 {
-                    key: torch.zeros(BCnode[index]["map"].shape).to(device)
+                    key: torch.zeros(BCnode[index]["map"].shape).to(device_ini.device)
                     for key in ["vn", "ou", "in"]
                 }
             )
@@ -57,7 +57,7 @@ class BoundaryCondition(abc.ABC):
                         {
                             key: torch.zeros(
                                 [paras["RP"].shape[1], BCnode[index]["map"].shape[0]]
-                            ).to(device)
+                            ).to(device_ini.device)
                             for key in ["phi", "PHI"]
                         }
                     )
@@ -66,7 +66,7 @@ class BoundaryCondition(abc.ABC):
                         {
                             key: torch.zeros(
                                 [paras["CP"].shape[1], BCnode[index]["map"].shape[0]]
-                            ).to(device)
+                            ).to(device_ini.device)
                             for key in ["kexi1", "kexi2", "KEXI1", "KEXI2"]
                         }
                     )

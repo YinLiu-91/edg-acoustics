@@ -13,6 +13,9 @@ from scipy.spatial.qhull import Delaunay
 import edg_acoustics
 import time
 import torch
+import sys
+
+import edg_acoustics.device_ini as device_ini
 
 __all__ = ["AcousticsSimulation", "NODETOL"]
 
@@ -20,7 +23,8 @@ __all__ = ["AcousticsSimulation", "NODETOL"]
 NODETOL = 1.0e-7
 """float: Tolerance used to determine if a node lies on a facet."""
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# device = "cuda" if torch.cuda.is_available() else "cpu"
+device = device_ini.device
 
 
 class AcousticsSimulation:

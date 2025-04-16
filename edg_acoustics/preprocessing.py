@@ -4,6 +4,7 @@ from __future__ import annotations
 import abc
 import numpy
 import torch
+import edg_acoustics.device_ini as device_ini
 
 __all__ = ["Flux", "UpwindFlux"]
 
@@ -60,7 +61,7 @@ class UpwindFlux(Flux):
     """
 
     def __init__(self, rho0: float, c0: float, n_xyz: torch.tensor):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device_ini.device
         self.rho0 = rho0
         self.c0 = c0
         self.n_xyz = n_xyz
