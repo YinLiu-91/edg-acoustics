@@ -211,7 +211,7 @@ class AcousticsSimulation:
 
         # Compute the product of inverse of the mass matrix (3D) with the face-mass matrices (2D)
         self.lift = AcousticsSimulation.compute_lift(
-            self.V, self.rst, torch.Tensor.numpy(self.Fmask.cpu())
+            self.V, torch.from_numpy(self.rst).to(device_ini.device), self.Fmask
         )
         self.lift = self.lift.to(self.device)
 
@@ -414,7 +414,7 @@ class AcousticsSimulation:
         simplex_basis = modepy.simplex_onb(dim, Nx)
 
         # Compute van der Monde matrix of simplex_basis over the nodes in rst
-        return torch.from_numpy(modepy.vandermonde(simplex_basis, rst))  # type: ignore
+        return torch.from_numpy(modepy.vandermonde(simplex_basis, rst)).to(device_ini.device)  # type: ignore
 
     @staticmethod
     def compute_derivative_matrix(Nx: int, rst: numpy.ndarray, dim: int = 3):
@@ -476,7 +476,7 @@ class AcousticsSimulation:
         return Fmask
 
     @staticmethod
-    def compute_lift(V: torch.tensor, rst: torch.tensor, Fmask: torch.tensor):
+    def compute_lift(V: torch.tensor, rst: numpy.ndarray, Fmask: torch.tensor):
         """Compute the lift matrix.
 
         Args:
@@ -494,9 +494,9 @@ class AcousticsSimulation:
             Nx
         )  # the number of nodes per surface for basis of polynomial degree Nx
 
-        Emat = numpy.zeros([Np, Nfp * 4], dtype=numpy.float64)
-        faceR = numpy.zeros([1, Nfp])
-        faceS = numpy.zeros([1, Nfp])
+        Emat = torch.zeros([Np, Nfp * 4], dtype=device_ini.dtype).to(device_ini.device)
+        faceR = torch.zeros([1, Nfp]).to(device_ini.device)
+        faceS = torch.zeros([1, Nfp]).to(device_ini.device)
 
         for face in range(4):
             if face == 0:
@@ -517,14 +517,16 @@ class AcousticsSimulation:
 
             simplex_basis = modepy.simplex_onb(2, Nx)
             vandermondeFace = modepy.vandermonde(
-                simplex_basis, numpy.vstack((faceR, faceS))
+                simplex_basis, numpy.vstack((faceR.cpu().numpy(), faceS.cpu().numpy()))
             )
             vandermondeFace = numpy.asarray(
                 vandermondeFace
             )  # just to make sure it is a numpy array to avoid errors
             massFace = numpy.linalg.inv(vandermondeFace @ (vandermondeFace.transpose()))
 
-            Emat[Fmask[face], face * Nfp : (face + 1) * Nfp] += massFace
+            Emat[Fmask[face], face * Nfp : (face + 1) * Nfp] += (
+                torch.from_numpy(massFace).to(device_ini.dtype).to(device_ini.device)
+            )
 
         return V @ (V.t() @ Emat)
 
