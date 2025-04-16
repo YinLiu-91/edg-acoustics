@@ -59,7 +59,7 @@ class UpwindFlux(Flux):
 
     """
 
-    def __init__(self, rho0: float, c0: float, n_xyz: numpy.ndarray):
+    def __init__(self, rho0: float, c0: float, n_xyz: torch.tensor):
         self.rho0 = rho0
         self.c0 = c0
         self.n_xyz = n_xyz
@@ -78,10 +78,10 @@ class UpwindFlux(Flux):
 
     def FluxP(
         self,
-        dvx: numpy.ndarray,
-        dvy: numpy.ndarray,
-        dvz: numpy.ndarray,
-        dp: numpy.ndarray,
+        dvx: torch.tensor,
+        dvy: torch.tensor,
+        dvz: torch.tensor,
+        dp: torch.tensor,
     ):
         """This method calculates the pressure flux using the given input arrays.
 
@@ -104,10 +104,10 @@ class UpwindFlux(Flux):
 
     def FluxVx(
         self,
-        dvx: numpy.ndarray,
-        dvy: numpy.ndarray,
-        dvz: numpy.ndarray,
-        dp: numpy.ndarray,
+        dvx: torch.tensor,
+        dvy: torch.tensor,
+        dvz: torch.tensor,
+        dp: torch.tensor,
     ):
         """This method calculates the flux of velocity in x-direction using the given input arrays.
 
@@ -129,10 +129,10 @@ class UpwindFlux(Flux):
 
     def FluxVy(
         self,
-        dvx: numpy.ndarray,
-        dvy: numpy.ndarray,
-        dvz: numpy.ndarray,
-        dp: numpy.ndarray,
+        dvx: torch.tensor,
+        dvy: torch.tensor,
+        dvz: torch.tensor,
+        dp: torch.tensor,
     ):
         """This method calculates the flux of velocity in y-direction using the given input arrays.
 
@@ -154,10 +154,10 @@ class UpwindFlux(Flux):
 
     def FluxVz(
         self,
-        dvx: numpy.ndarray,
-        dvy: numpy.ndarray,
-        dvz: numpy.ndarray,
-        dp: numpy.ndarray,
+        dvx: torch.tensor,
+        dvy: torch.tensor,
+        dvz: torch.tensor,
+        dp: torch.tensor,
     ):
         """This method calculates the flux of velocity in z-direction using the given input arrays.
 
