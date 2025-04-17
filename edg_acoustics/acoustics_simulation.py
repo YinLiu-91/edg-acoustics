@@ -391,7 +391,7 @@ class AcousticsSimulation:
         )
 
         # Return the computed coordinates
-        return rst, torch.from_numpy(xyz).to(device)
+        return rst, torch.from_numpy(xyz).to(device).to(device_ini.dtype)
 
     @staticmethod
     def compute_van_der_monde_matrix(
@@ -414,7 +414,7 @@ class AcousticsSimulation:
         simplex_basis = modepy.simplex_onb(dim, Nx)
 
         # Compute van der Monde matrix of simplex_basis over the nodes in rst
-        return torch.from_numpy(modepy.vandermonde(simplex_basis, rst)).to(device_ini.device)  # type: ignore
+        return torch.from_numpy(modepy.vandermonde(simplex_basis, rst)).to(device_ini.device).to(device_ini.dtype)  # type: ignore
 
     @staticmethod
     def compute_derivative_matrix(Nx: int, rst: numpy.ndarray, dim: int = 3):
@@ -440,9 +440,9 @@ class AcousticsSimulation:
 
         # Return d/dr, d/ds and d/dt matrices
         return (
-            torch.from_numpy(D[0]).to(device),
-            torch.from_numpy(D[1]).to(device),
-            torch.from_numpy(D[2]).to(device),
+            torch.from_numpy(D[0]).to(device).to(device_ini.dtype),
+            torch.from_numpy(D[1]).to(device).to(device_ini.dtype),
+            torch.from_numpy(D[2]).to(device).to(device_ini.dtype),
         )
 
     # ------------------------------------------------------------------------------------------------------------------
@@ -858,9 +858,9 @@ class AcousticsSimulation:
             dUdz (torch.tensor): ``[Np, N_tets]`` derivatives :math:`\\frac{\\partial U}{\\partial z}` at every nodal point, if axis is 'z'.
             Tuple of gradient (torch.tensor): ``[Np, N_tets]`` gradient (:math:`\\frac{\\partial U}{\\partial x}, \\frac{\\partial U}{\\partial y}, \\frac{\\partial U}{\\partial z}`), if axis is 'xyz'.
         """
-        dUdr = self.Dr @ U.to(torch.float64)
-        dUds = self.Ds @ U.to(torch.float64)
-        dUdt = self.Dt @ U.to(torch.float64)
+        dUdr = self.Dr @ U
+        dUds = self.Ds @ U
+        dUdt = self.Dt @ U
         if axis == "x":
             return (
                 self.rst_xyz[0, 0] * dUdr
