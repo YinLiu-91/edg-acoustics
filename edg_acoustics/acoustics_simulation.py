@@ -238,10 +238,10 @@ class AcousticsSimulation:
 
         # Find connectivity for nodes given per surface in all elements
         self.vmapM, self.vmapP = AcousticsSimulation.build_maps_3d(
-            torch.Tensor.numpy(self.xyz.cpu()),
+            self.xyz,
             self.mesh.EToE,
             self.mesh.EToF,
-            self.Fmask.cpu(),
+            self.Fmask,
             self.node_tolerance,
         )
 
@@ -249,7 +249,7 @@ class AcousticsSimulation:
         self.BCnode = AcousticsSimulation.build_BCmaps_3d(
             self.BC_list,
             torch.Tensor.numpy(self.mesh.EToV),
-            torch.Tensor.numpy(self.vmapM),
+            torch.Tensor.numpy(self.vmapM.cpu()),
             self.mesh.BC_triangles,
             self.Nx,
         )
@@ -687,7 +687,7 @@ class AcousticsSimulation:
 
     @staticmethod
     def build_maps_3d(
-        xyz: numpy.ndarray,
+        xyz: torch.tensor,
         EToE: torch.tensor,
         EToF: torch.tensor,
         Fmask: torch.tensor,
@@ -714,13 +714,13 @@ class AcousticsSimulation:
         Nfp = AcousticsSimulation.compute_Nfp(
             Nx
         )  # the number of nodes per surface for basis of polynomial degree Nx
+        nodeids = torch.arange(N_tets * Np).reshape(Np, N_tets).to(device_ini.device)
 
-        nodeids = numpy.arange(N_tets * Np, dtype=numpy.uint64).reshape(Np, N_tets)
-        vmapM = numpy.zeros([4, Nfp, N_tets], dtype=numpy.uint64)
-        vmapP = numpy.zeros([4, Nfp, N_tets], dtype=numpy.uint64)
+        vmapM = torch.zeros([4, Nfp, N_tets], dtype=torch.int32).to(device_ini.device)
+        vmapP = torch.zeros([4, Nfp, N_tets], dtype=torch.int32).to(device_ini.device)
         # tmp=numpy.ones([1, Nfp], dtype=numpy.uint8)
-        tmp = numpy.ones(Nfp, dtype=numpy.uint8)
-        D = numpy.zeros([Nfp, Nfp])
+        tmp = torch.ones(Nfp, dtype=torch.int32).to(device_ini.device)
+        D = torch.zeros([Nfp, Nfp], dtype=device_ini.dtype).to(device_ini.device)
 
         xV = xyz[0].reshape(-1)  # flatten the x-coordinates
         yV = xyz[1].reshape(-1)
@@ -743,21 +743,23 @@ class AcousticsSimulation:
                 vidP = vmapM[face2, :, ke2]
 
                 # xM=numpy.outer(xyz[0].ravel(order='F')[vidM],tmp)  # returns a copy
-                xM = numpy.outer(xV[vidM], tmp)  # viewing
-                yM = numpy.outer(yV[vidM], tmp)  # viewing
-                zM = numpy.outer(zV[vidM], tmp)  # viewing
+                xM = torch.outer(xV[vidM], tmp)  # viewing
+                yM = torch.outer(yV[vidM], tmp)  # viewing
+                zM = torch.outer(zV[vidM], tmp)  # viewing
 
-                xP = numpy.outer(xV[vidP], tmp).transpose()  # viewing
-                yP = numpy.outer(yV[vidP], tmp).transpose()  # viewing
-                zP = numpy.outer(zV[vidP], tmp).transpose()  # viewing
+                xP = torch.outer(xV[vidP], tmp).t()  # viewing
+                yP = torch.outer(yV[vidP], tmp).t()  # viewing
+                zP = torch.outer(zV[vidP], tmp).t()  # viewing
 
                 D = (xM - xP) ** 2 + (yM - yP) ** 2 + (zM - zP) ** 2
 
-                (idM, idP) = numpy.nonzero(numpy.abs(D) < node_tol)
+                (idM, idP) = numpy.nonzero(numpy.abs(D.cpu().numpy()) < node_tol)
+                # here to torch is not correct
+                # idMP = torch.nonzero(torch.abs(D) < node_tol)
 
                 vmapP[face, idM, ke] = vmapM[face2, idP, ke2]
 
-        return torch.from_numpy(vmapM.reshape(-1)), torch.from_numpy(vmapP.reshape(-1))
+        return vmapM.reshape(-1), vmapP.reshape(-1)
 
     @staticmethod
     def ismember_col(a: numpy.ndarray, b: numpy.ndarray):
