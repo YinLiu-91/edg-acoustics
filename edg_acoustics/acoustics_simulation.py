@@ -1066,19 +1066,11 @@ class AcousticsSimulation:
         dP = torch.zeros_like(dVx).to(self.device).to(device_ini.dtype)
 
         # calculate jump values across the faces of neighboring elements
-        dVx.reshape(-1)[:] = (
-            Vx.reshape(-1)[(self.vmapM).long()] - Vx.reshape(-1)[(self.vmapP).long()]
-        )
+        dVx.reshape(-1)[:] = Vx.reshape(-1)[(self.vmapM)] - Vx.reshape(-1)[(self.vmapP)]
         # print(f"dVx ID {id(dVx)}, sim.dVx ID {id(self.sim.dVx)}")
-        dVy.reshape(-1)[:] = (
-            Vy.reshape(-1)[(self.vmapM).long()] - Vy.reshape(-1)[(self.vmapP).long()]
-        )
-        dVz.reshape(-1)[:] = (
-            Vz.reshape(-1)[(self.vmapM).long()] - Vz.reshape(-1)[(self.vmapP).long()]
-        )
-        dP.reshape(-1)[:] = (
-            P.reshape(-1)[(self.vmapM).long()] - P.reshape(-1)[(self.vmapP).long()]
-        )
+        dVy.reshape(-1)[:] = Vy.reshape(-1)[(self.vmapM)] - Vy.reshape(-1)[(self.vmapP)]
+        dVz.reshape(-1)[:] = Vz.reshape(-1)[(self.vmapM)] - Vz.reshape(-1)[(self.vmapP)]
+        dP.reshape(-1)[:] = P.reshape(-1)[(self.vmapM)] - P.reshape(-1)[(self.vmapP)]
 
         # Compute the inter-element fluxes
         fluxVx = self.flux.FluxVx(
