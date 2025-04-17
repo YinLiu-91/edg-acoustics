@@ -225,10 +225,10 @@ class AcousticsSimulation:
 
         # Compute the face normals at the collocation points and the surface Jacobians
         self.n_xyz, self.sJ = AcousticsSimulation.normals_3d(
-            torch.Tensor.numpy(self.xyz.cpu()),
-            torch.Tensor.numpy(self.rst_xyz.cpu()),
-            torch.Tensor.numpy(self.J.cpu()),
-            torch.Tensor.numpy(self.Fmask.cpu()),
+            self.xyz,
+            self.rst_xyz,
+            self.J,
+            self.Fmask,
         )
         self.n_xyz = self.n_xyz.to(self.device).to(device_ini.dtype)
         self.sJ = self.sJ.to(self.device).to(device_ini.dtype)
@@ -571,7 +571,7 @@ class AcousticsSimulation:
         )
 
         # Compute the derivates of the local coordinates at the nodal points
-        rst_xyz = torch.zeros([3, 3, Np, N_tets]).to(
+        rst_xyz = torch.zeros([3, 3, Np, N_tets], dtype=device_ini.dtype).to(
             device
         )  # pre-allocate memory space
 
@@ -592,9 +592,9 @@ class AcousticsSimulation:
 
     @staticmethod
     def normals_3d(
-        xyz: numpy.ndarray,
-        rst_xyz: numpy.ndarray,
-        J: numpy.ndarray,
+        xyz: torch.tensor,
+        rst_xyz: torch.tensor,
+        J: torch.tensor,
         Fmask: torch.tensor,
     ):
         """Compute outward pointing normals at element's faces as well as surface Jacobians.
@@ -623,12 +623,22 @@ class AcousticsSimulation:
         frst_xyz = rst_xyz[:, :, Fmask.reshape(-1), :]
 
         # Construct the normals
-        n_xyz = numpy.zeros([3, 4 * Nfp, N_tets])  # allocate memory space
+        n_xyz = (
+            torch.zeros([3, 4 * Nfp, N_tets]).to(device_ini.dtype).to(device_ini.device)
+        )  # allocate memory space
 
-        face_0_idx = numpy.arange(0, Nfp)  # indices of the nodes of face 0
-        face_1_idx = numpy.arange(Nfp, 2 * Nfp)  # indices of the nodes of face 1
-        face_2_idx = numpy.arange(2 * Nfp, 3 * Nfp)  # indices of the nodes of face 2
-        face_3_idx = numpy.arange(3 * Nfp, 4 * Nfp)  # indices of the nodes of face 3
+        face_0_idx = torch.arange(0, Nfp).to(
+            device_ini.device
+        )  # indices of the nodes of face 0
+        face_1_idx = torch.arange(Nfp, 2 * Nfp).to(
+            device_ini.device
+        )  # indices of the nodes of face 1
+        face_2_idx = torch.arange(2 * Nfp, 3 * Nfp).to(
+            device_ini.device
+        )  # indices of the nodes of face 2
+        face_3_idx = torch.arange(3 * Nfp, 4 * Nfp).to(
+            device_ini.device
+        )  # indices of the nodes of face 3
 
         # Face 0
         n_xyz[0, face_0_idx, :] = -frst_xyz[2, 0, face_0_idx, :]  # nx
@@ -663,7 +673,7 @@ class AcousticsSimulation:
         n_xyz[2, face_3_idx, :] = -frst_xyz[0, 2, face_3_idx, :]  # nz
 
         # Normalized the normal vectors
-        norm_n = numpy.sqrt(
+        norm_n = torch.sqrt(
             (n_xyz[0, :, :] ** 2) + (n_xyz[1, :, :] ** 2) + (n_xyz[2, :, :] ** 2)
         )  # vector norm of normal vectors
         n_xyz = (
@@ -673,7 +683,7 @@ class AcousticsSimulation:
         # Compute the face Jacobians
         sJ = norm_n * J[Fmask.reshape(-1)]
 
-        return torch.from_numpy(n_xyz), torch.from_numpy(sJ)
+        return n_xyz, sJ
 
     @staticmethod
     def build_maps_3d(
