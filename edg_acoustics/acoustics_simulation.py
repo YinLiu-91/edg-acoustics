@@ -249,7 +249,7 @@ class AcousticsSimulation:
         self.BCnode = AcousticsSimulation.build_BCmaps_3d(
             self.BC_list,
             torch.Tensor.numpy(self.mesh.EToV),
-            torch.Tensor.numpy(self.vmapM.cpu()),
+            self.vmapM,
             self.mesh.BC_triangles,
             self.Nx,
         )
@@ -820,9 +820,13 @@ class AcousticsSimulation:
         BCType = BCType.repeat(Nfp, axis=0)
 
         for i in range(len(BC_list)):
-            BCnode[i]["map"] = numpy.nonzero(BCType.reshape(-1) == BCnode[i]["label"])[
-                0
-            ]
+            BCnode[i]["map"] = (
+                torch.nonzero(
+                    torch.from_numpy(BCType.reshape(-1) == BCnode[i]["label"])
+                )
+                .t()[0]
+                .to(device_ini.device)
+            )
             BCnode[i]["vmap"] = vmapM[BCnode[i]["map"]]
 
         return BCnode
