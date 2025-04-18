@@ -37,7 +37,7 @@ class Monopole_postprocessor:
 
     def __init__(self, sim, delta_step, sampling_freq=Sampling_Freq):
         self.sim = sim
-        self.IRold = sim.prec
+        self.IRold = sim.prec.cpu().numpy()
         self.dt_old = sim.time_integrator.dt * delta_step
         self.fs_old = round(1 / self.dt_old)
         self.sampling_freq = sampling_freq
