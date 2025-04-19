@@ -832,8 +832,8 @@ class AcousticsSimulation:
     @staticmethod
     def build_BCmaps_3d(
         BC_list: dict[str, int],
-        EToV: numpy.ndarray,
-        vmapM: numpy.ndarray,
+        EToV: torch.tensor,
+        vmapM: torch.tensor,
         BC_triangles: dict[str, numpy.ndarray],
         Nx: int,
     ):
@@ -887,7 +887,7 @@ class AcousticsSimulation:
         return BCnode
 
     @staticmethod
-    def diameter_3d(Fscale: numpy.ndarray):
+    def diameter_3d(Fscale: torch.tensor):
         """Compute the minimum diameter of the inscribed spheres in all elements.
 
         Args:
