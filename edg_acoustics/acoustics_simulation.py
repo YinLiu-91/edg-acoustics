@@ -1280,33 +1280,33 @@ class AcousticsSimulation:
             )  # by changing the value in place, the ID of the object is not changed (no new object is created), but the previous value is lost, which is not important here, because the previous value is not used anymore``
             self.prec[:, StepIndex] = torch.diag(self.sampleWeight @ self.P[:, self.nodeindex])  # type: ignore
 
-            # if "delta_step" in kwargs and StepIndex % kwargs["delta_step"] == 0:
-            #     newTime = time.time()
-            #     elapsed = newTime - curTime
-            #     if prevEstimated == 0:
-            #         estimated = (self.Ntimesteps - (StepIndex + 1)) * elapsed / 10
-            #     else:
-            #         estimated = (
-            #             0.99 * prevEstimated
-            #             + 0.01 * (self.Ntimesteps - (StepIndex + 1)) * elapsed / 10
-            #         )
+            if "delta_step" in kwargs and StepIndex % kwargs["delta_step"] == 0:
+                newTime = time.time()
+                elapsed = newTime - curTime
+                if prevEstimated == 0:
+                    estimated = (self.Ntimesteps - (StepIndex + 1)) * elapsed / 10
+                else:
+                    estimated = (
+                        0.99 * prevEstimated
+                        + 0.01 * (self.Ntimesteps - (StepIndex + 1)) * elapsed / 10
+                    )
 
-            #     minutes = math.floor(estimated / 60)
-            #     seconds = math.floor(estimated - 60 * minutes)
-            #     print(f"Estimated time left: {minutes} minutes {seconds} seconds")
-            #     print(
-            #         f"Percentage done: {round(100*(StepIndex + 1)/self.Ntimesteps)} %"
-            #     )
-            #     curTime = newTime
-            #     prevEstimated = estimated
-            #     print(f"Current/Total step {StepIndex+1}/{self.Ntimesteps}")
-            #     print(
-            #         f"Current/Total time {self.time_integrator.dt * StepIndex}/{total_time}"
-            #     )
-            #     print(f"P at mic locations {self.prec[:,StepIndex]}")
+                minutes = math.floor(estimated / 60)
+                seconds = math.floor(estimated - 60 * minutes)
+                print(f"Estimated time left: {minutes} minutes {seconds} seconds")
+                print(
+                    f"Percentage done: {round(100*(StepIndex + 1)/self.Ntimesteps)} %"
+                )
+                curTime = newTime
+                prevEstimated = estimated
+                print(f"Current/Total step {StepIndex+1}/{self.Ntimesteps}")
+                print(
+                    f"Current/Total time {self.time_integrator.dt * StepIndex}/{total_time}"
+                )
+                print(f"P at mic locations {self.prec[:,StepIndex]}")
 
-            # if "save_step" in kwargs and StepIndex % kwargs["save_step"] == 0:
-            #     self.save_results_on_the_run(format=kwargs.get("format", "mat"))
+            if "save_step" in kwargs and StepIndex % kwargs["save_step"] == 0:
+                self.save_results_on_the_run(format=kwargs.get("format", "mat"))
         end_time = time.time()
         print(f"time: {end_time-curTime} s")
         return self.prec
@@ -1343,7 +1343,7 @@ class AcousticsSimulation:
             numpy.savez(
                 "results_on_the_run.npz",
                 BCpara=self.BC.BCpara,
-                prec=self.prec,
+                prec=self.prec.cpu().numpy(),
                 rec=self.rec,
                 dt=self.time_integrator.dt,
                 Ntimesteps=self.Ntimesteps,
