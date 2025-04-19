@@ -80,17 +80,16 @@ class Monopole_IC(InitialCondition):
 
     def Pinit(self, xyz: torch.tensor):
         """Setup initial condition for pressure."""
-        xyz = xyz.cpu().numpy()
-        pressure = numpy.exp(
-            -numpy.log(2)
+        pressure = torch.exp(
+            -math.log(2)
             * (
                 (xyz[0] - self.source_xyz[0]) ** 2
                 + (xyz[1] - self.source_xyz[1]) ** 2
                 + (xyz[2] - self.source_xyz[2]) ** 2
             )
-            / self.halfwidth**2
-        )
-        return torch.from_numpy(pressure).to(device_ini.dtype)
+            / self.halfwidth**2,
+        ).to(device_ini.dtype)
+        return pressure
 
     def VXinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in x-direction."""
