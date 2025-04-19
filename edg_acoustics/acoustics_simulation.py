@@ -281,7 +281,6 @@ class AcousticsSimulation:
         # Build specialized nodal maps for various types of boundary conditions,specified in BC_list
         self.BCnode = AcousticsSimulation.build_BCmaps_3d(
             self.BC_list,
-            # torch.Tensor.numpy(self.mesh.EToV),
             self.mesh.EToV,
             self.vmapM,
             self.mesh.BC_triangles,
@@ -754,7 +753,6 @@ class AcousticsSimulation:
 
         vmapM = torch.zeros([4, Nfp, N_tets], dtype=torch.int32).to(device_ini.device)
         vmapP = torch.zeros([4, Nfp, N_tets], dtype=torch.int32).to(device_ini.device)
-        # tmp=numpy.ones([1, Nfp], dtype=numpy.uint8)
         tmp = torch.ones(Nfp, dtype=torch.int32).to(device_ini.device)
         D = torch.zeros([Nfp, Nfp], dtype=device_ini.dtype).to(device_ini.device)
 
@@ -791,7 +789,6 @@ class AcousticsSimulation:
                 vidM = vmapM[face, :, ke]
                 vidP = vmapM[face2, :, ke2]
 
-                # xM=numpy.outer(xyz[0].ravel(order='F')[vidM],tmp)  # returns a copy
                 xM = torch.outer(xV[vidM], tmp)  # viewing
                 yM = torch.outer(yV[vidM], tmp)  # viewing
                 zM = torch.outer(zV[vidM], tmp)  # viewing
@@ -802,7 +799,6 @@ class AcousticsSimulation:
 
                 D = (xM - xP) ** 2 + (yM - yP) ** 2 + (zM - zP) ** 2
 
-                # (idM, idP) = numpy.nonzero(numpy.abs(D.cpu().numpy()) < node_tol)
                 idMP = torch.nonzero(torch.abs(D) < node_tol).t()
 
                 vmapP[face, idMP[0], ke] = vmapM[face2, idMP[1], ke2]
@@ -863,7 +859,6 @@ class AcousticsSimulation:
             for indexl in range(4):
                 Face, _ = torch.sort(EToV[VNUM[indexl]], axis=0)
                 K_ = AcousticsSimulation.ismember_col(Face, tri)
-                # K_ = numpy.all(numpy.isin(Face, tri), axis=0) #wont work for all cases
                 BCType[indexl, K_] = BClabel
         # BCType = BCType.repeat(Nfp)
         BCType = BCType.repeat_interleave(Nfp, dim=0)
@@ -1266,7 +1261,6 @@ class AcousticsSimulation:
         print(f"Total simulation time is {total_time}")
         print(f"Total number of simulation steps is {self.Ntimesteps}")
 
-        # self.prec = numpy.zeros([self.rec.shape[1], self.Ntimesteps])
         self.prec = torch.zeros(
             [self.rec.shape[1], self.Ntimesteps], dtype=device_ini.dtype
         ).to(device_ini.device)
