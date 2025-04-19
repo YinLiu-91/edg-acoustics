@@ -852,15 +852,14 @@ class AcousticsSimulation:
         for BCname, BClabel in BC_list.items():
             BCnode.append({"label": BClabel})
             # tri=BC_triangles[BCname].sort(axis=1)
-            tri = numpy.sort(BC_triangles[BCname], axis=1).T
+            tri, _ = torch.sort(
+                torch.from_numpy(BC_triangles[BCname]).to(device_ini.device), axis=1
+            )
             for indexl in range(4):
                 Face, _ = torch.sort(
                     torch.from_numpy(EToV[VNUM[indexl]]).to(device_ini.device), axis=0
                 )
-                K_ = AcousticsSimulation.ismember_col(
-                    Face, torch.from_numpy(tri).to(device_ini.device)
-                )
-                # K_ = numpy.all(numpy.isin(Face, tri), axis=0) #wont work for all cases
+                K_ = AcousticsSimulation.ismember_col(Face, tri.t())
                 BCType[indexl, K_.cpu()] = BClabel
         BCType = BCType.repeat(Nfp, axis=0)
 
