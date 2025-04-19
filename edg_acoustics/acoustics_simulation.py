@@ -223,7 +223,10 @@ class AcousticsSimulation:
         """Call the methods to initialise the local system and compute all the attributes of the AcousticsSimulation object."""
 
         self.rst, self.xyz = AcousticsSimulation.compute_collocation_nodes(
-            self.mesh.EToV, self.mesh.vertices, self.Nx, dim=self.dim
+            self.mesh.EToV,
+            torch.from_numpy(self.mesh.vertices).to(device_ini.device),
+            self.Nx,
+            dim=self.dim,
         )
 
         # Compute the van der Monde matrix for the basis functions
@@ -278,7 +281,8 @@ class AcousticsSimulation:
         # Build specialized nodal maps for various types of boundary conditions,specified in BC_list
         self.BCnode = AcousticsSimulation.build_BCmaps_3d(
             self.BC_list,
-            torch.Tensor.numpy(self.mesh.EToV),
+            # torch.Tensor.numpy(self.mesh.EToV),
+            self.mesh.EToV,
             self.vmapM,
             self.mesh.BC_triangles,
             self.Nx,
@@ -376,11 +380,14 @@ class AcousticsSimulation:
         # These are so called Fekete points (low, close to optimal, Lebesgue constant) on simplices of dimension
         # self.dim and maximum polynomial degree to interpolate over these nodes (determines the number of nodes).
         rst = modepy.warp_and_blend_nodes(dim, Nx)
+        rst = torch.from_numpy(rst).to(device_ini.device)
 
         # Compute the xyz coordinates for each element from the reference domain coordinates and the element's vertices
 
         # Start by allocating space for the xyz-coordinates for collocation points on each element
-        xyz = numpy.zeros([dim, rst.shape[1], EToV.shape[1]])
+        xyz = torch.zeros(
+            [dim, rst.shape[1], EToV.shape[1]], dtype=device_ini.dtype
+        ).to(device_ini.device)
 
         # Then get shorter references for the indices of the references for each of the nodes of the elements
         # get the indices of the first node of each element
@@ -419,7 +426,7 @@ class AcousticsSimulation:
         )
 
         # Return the computed coordinates
-        return rst, torch.from_numpy(xyz).to(device).to(device_ini.dtype)
+        return rst.cpu().numpy(), xyz
 
     @staticmethod
     def compute_van_der_monde_matrix(
@@ -493,7 +500,7 @@ class AcousticsSimulation:
             Nx
         )  # get the number of collocation points per face
 
-        Fmask = torch.zeros([4, Nfp], dtype=torch.int).to(device)
+        Fmask = torch.zeros([4, Nfp], dtype=torch.int32).to(device)
 
         # Find all the nodes that lie on each surface
         Fmask[0] = torch.nonzero(torch.abs(1 + rst[2]) < node_tol).flatten()
@@ -523,8 +530,8 @@ class AcousticsSimulation:
         )  # the number of nodes per surface for basis of polynomial degree Nx
 
         Emat = torch.zeros([Np, Nfp * 4], dtype=device_ini.dtype).to(device_ini.device)
-        faceR = torch.zeros([1, Nfp]).to(device_ini.device)
-        faceS = torch.zeros([1, Nfp]).to(device_ini.device)
+        faceR = torch.zeros([1, Nfp], dtype=device_ini.dtype).to(device_ini.device)
+        faceS = torch.zeros([1, Nfp], dtype=device_ini.dtype).to(device_ini.device)
 
         for face in range(4):
             if face == 0:
@@ -814,7 +821,7 @@ class AcousticsSimulation:
             indices (torch.tensor): boolean indices of the columns of a that are in b
         """
         _, rev = torch.unique(
-            torch.concatenate((a, b), dim=1), dim=1, return_inverse=True
+            torch.concatenate((a, b.t()), dim=1), dim=1, return_inverse=True
         )  # The indices to reconstruct the original array from the unique array
         # Split the index
         b_rev = rev[a.shape[1] :]
@@ -846,27 +853,33 @@ class AcousticsSimulation:
             Nx
         )  # the number of nodes per surface for basis of polynomial degree Nx
         N_tets = EToV.shape[1]
-        BCType = numpy.zeros([4, N_tets], dtype=numpy.uint8)
-        VNUM = numpy.array([[1, 2, 3], [1, 2, 4], [2, 3, 4], [1, 3, 4]]) - 1
+        BCType = torch.zeros([4, N_tets], dtype=torch.int32)
+        VNUM = torch.tensor([[1, 2, 3], [1, 2, 4], [2, 3, 4], [1, 3, 4]]) - 1
         BCnode = []
         for BCname, BClabel in BC_list.items():
             BCnode.append({"label": BClabel})
             # tri=BC_triangles[BCname].sort(axis=1)
-            tri = numpy.sort(BC_triangles[BCname], axis=1).T
+            # tri = torch.sort(
+            #     torch.from_numpy(BC_triangles[BCname]).to(device_ini.device), axis=1
+            # ).t()
+            tri, _ = (
+                torch.from_numpy(BC_triangles[BCname])
+                .to(device_ini.device)
+                .sort(axis=1)
+            )
+
             for indexl in range(4):
-                Face = numpy.sort(EToV[VNUM[indexl]], axis=0)
-                K_ = AcousticsSimulation.ismember_col(
-                    torch.from_numpy(Face), torch.from_numpy(tri)
-                )
+                Face, _ = torch.sort(EToV[VNUM[indexl]], axis=0)
+                K_ = AcousticsSimulation.ismember_col(Face, tri)
                 # K_ = numpy.all(numpy.isin(Face, tri), axis=0) #wont work for all cases
                 BCType[indexl, K_] = BClabel
-        BCType = BCType.repeat(Nfp, axis=0)
+        # BCType = BCType.repeat(Nfp)
+        # BCType = BCType.cpu().numpy().repeat(Nfp, axis=0)
+        BCType = BCType.repeat(Nfp, *(1,) * (BCType.dim() - 1))
 
         for i in range(len(BC_list)):
             BCnode[i]["map"] = (
-                torch.nonzero(
-                    torch.from_numpy(BCType.reshape(-1) == BCnode[i]["label"])
-                )
+                torch.nonzero(BCType.reshape(-1) == BCnode[i]["label"])
                 .t()[0]
                 .to(device_ini.device)
             )
@@ -1012,7 +1025,7 @@ class AcousticsSimulation:
         """
         nodeindex = AcousticsSimulation.locate_simplex(
             self.mesh.vertices,
-            torch.Tensor.numpy(self.mesh.EToV),
+            torch.Tensor.numpy(self.mesh.EToV.cpu()),
             self.rec,
             methodLocate,
         )

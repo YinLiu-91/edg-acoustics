@@ -12,6 +12,7 @@ import gmsh
 import numpy
 import edg_acoustics
 import torch
+import edg_acoustics.device_ini as device_ini
 
 __all__ = ["Mesh", "PPW_Default", "Nx_default"]
 
@@ -317,7 +318,9 @@ class Mesh:
 
         # Read the number of tetrahedra (computational elements) and their definitions
         self.N_tets = mesh_data.cells_dict["tetra"].shape[0]
-        self.EToV = torch.from_numpy(mesh_data.cells_dict["tetra"].transpose())
+        self.EToV = torch.from_numpy(mesh_data.cells_dict["tetra"].transpose()).to(
+            device_ini.device
+        )
 
         # Compute the mesh connectivity
         self.EToE, self.EToF = self.compute_element_connectivity(self.EToV)
@@ -396,28 +399,40 @@ class Mesh:
                 tets_t[:, [1, 2, 3]],
                 tets_t[:, [0, 2, 3]],
             ]
-        )
+        ).to(device_ini.device)
 
         # Then we sort the indices in each face, so that we can easily identify if two faces are the same by the ordered
         # sequence of nodes
         face_vertices, _ = torch.sort(face_vertices, dim=-1)
 
         # Construct and array with the index of each face in face_vertices
-        face_vertices_idx = torch.arange(0, N_tets * N_faces_per_tet)
+        face_vertices_idx = torch.arange(0, N_tets * N_faces_per_tet).to(
+            device_ini.device
+        )
 
         # EToE must be initialized with (the element index of the element)
         # EToE = [[ 0  1  2 ... (N_tets - 1)]
         #         [ 0  1  2 ... (N_tests - 1)]
         #         [ 0  1  2 ... (N_tests - 1)]
         #         [ 0  1  2 ... (N_tests - 1)]]
-        EToE = torch.arange(0, N_tets).reshape(1, -1).repeat(N_faces_per_tet, 1)
+        EToE = (
+            torch.arange(0, N_tets)
+            .reshape(1, -1)
+            .repeat(N_faces_per_tet, 1)
+            .to(device_ini.device)
+        )
 
         # EToF must be initialized with (the face index)
         # EToF = [[  0  0  0  ... 0]       |
         #         [  1  1  1  ... 1]       |> has N_tets columns
         #         [  2  2  2  ... 2]       |
         #         [  3  3  3  ... 3]]      |
-        EToF = torch.arange(0, 4).repeat_interleave(N_tets).reshape(-1, N_tets)
+        EToF = (
+            torch.arange(0, 4)
+            .repeat_interleave(N_tets)
+            .reshape(-1, N_tets)
+            .to(device_ini.device)
+        )
 
         # We now need to uniquely number each set of three faces by their node numbers
         # We could use the old algorithm (here in Matlab form)
@@ -426,7 +441,9 @@ class Mesh:
         # three indices that defines all faces into a unique number. Note that we apply the hash to each row
         # (hence the 1).
         face_ids = torch.sum(
-            face_vertices * torch.tensor([1, N_tets, N_tets * N_tets]), dim=1
+            face_vertices
+            * torch.tensor([1, N_tets, N_tets * N_tets]).to(device_ini.device),
+            dim=1,
         )
 
         # We now sort the face_ids so that we have the identical faces next to each other
