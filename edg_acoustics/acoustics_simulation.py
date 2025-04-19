@@ -820,7 +820,7 @@ class AcousticsSimulation:
         b_rev = rev[a.shape[1] :]
         a_rev = rev[: a.shape[1]]
         # Return the result:
-        return torch.from_numpy(numpy.isin(a_rev, b_rev))
+        return torch.isin(a_rev, b_rev)
 
     @staticmethod
     def build_BCmaps_3d(
