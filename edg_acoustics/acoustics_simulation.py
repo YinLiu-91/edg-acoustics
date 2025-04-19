@@ -504,7 +504,7 @@ class AcousticsSimulation:
         return Fmask
 
     @staticmethod
-    def compute_lift(V: torch.tensor, rst: numpy.ndarray, Fmask: torch.tensor):
+    def compute_lift(V: torch.tensor, rst: torch.tensor, Fmask: torch.tensor):
         """Compute the lift matrix.
 
         Args:
@@ -760,19 +760,19 @@ class AcousticsSimulation:
         grid = lambda meta: (triton.cdiv(N_tets, BLOCK_SIZE),)
 
         # 调用triton kernel
-        build_maps_kernel[grid](
-            nodeids.contiguous(),
-            Fmask.contiguous(),
-            vmapM.contiguous(),
-            N_tets,
-            Nfp,
-            BLOCK_SIZE,
-        )
-        # for ke in range(N_tets):
-        #     for face in range(4):
-        #         vmapM[face, :, ke] = nodeids[
-        #             Fmask[face], ke
-        #         ]  # find index of face nodes with respect to volume node ordering
+        # build_maps_kernel[grid](
+        #     nodeids.contiguous(),
+        #     Fmask.contiguous(),
+        #     vmapM.contiguous(),
+        #     N_tets,
+        #     Nfp,
+        #     BLOCK_SIZE,
+        # )
+        for ke in range(N_tets):
+            for face in range(4):
+                vmapM[face, :, ke] = nodeids[
+                    Fmask[face], ke
+                ]  # find index of face nodes with respect to volume node ordering
 
         for ke in range(N_tets):
             for face in range(4):
@@ -803,7 +803,7 @@ class AcousticsSimulation:
         return vmapM.reshape(-1), vmapP.reshape(-1)
 
     @staticmethod
-    def ismember_col(a: numpy.ndarray, b: numpy.ndarray):
+    def ismember_col(a: torch.tensor, b: torch.tensor):
         """find the indices of the columns of a that are in b
 
         Args:
@@ -813,14 +813,14 @@ class AcousticsSimulation:
         Returns:
             indices (torch.tensor): boolean indices of the columns of a that are in b
         """
-        _, rev = numpy.unique(
-            numpy.concatenate((a, b), axis=1), axis=1, return_inverse=True
+        _, rev = torch.unique(
+            torch.concatenate((a, b), dim=1), dim=1, return_inverse=True
         )  # The indices to reconstruct the original array from the unique array
         # Split the index
         b_rev = rev[a.shape[1] :]
         a_rev = rev[: a.shape[1]]
         # Return the result:
-        return numpy.isin(a_rev, b_rev)
+        return torch.from_numpy(numpy.isin(a_rev, b_rev))
 
     @staticmethod
     def build_BCmaps_3d(
@@ -855,7 +855,9 @@ class AcousticsSimulation:
             tri = numpy.sort(BC_triangles[BCname], axis=1).T
             for indexl in range(4):
                 Face = numpy.sort(EToV[VNUM[indexl]], axis=0)
-                K_ = AcousticsSimulation.ismember_col(Face, tri)
+                K_ = AcousticsSimulation.ismember_col(
+                    torch.from_numpy(Face), torch.from_numpy(tri)
+                )
                 # K_ = numpy.all(numpy.isin(Face, tri), axis=0) #wont work for all cases
                 BCType[indexl, K_] = BClabel
         BCType = BCType.repeat(Nfp, axis=0)
@@ -1218,14 +1220,6 @@ class AcousticsSimulation:
         RHS_Vy = -dPdy / self.rho0 + (self.lift) @ (self.Fscale * fluxVy)
         RHS_Vz = -dPdz / self.rho0 + (self.lift) @ (self.Fscale * fluxVz)
 
-        # return (
-        #     torch.Tensor.numpy(RHS_P),
-        #     torch.Tensor.numpy(RHS_Vx),
-        #     torch.Tensor.numpy(RHS_Vy),
-        #     torch.Tensor.numpy(RHS_Vz),
-        #     BCvar,
-        # )
-
         return (
             RHS_P,
             RHS_Vx,
@@ -1288,33 +1282,33 @@ class AcousticsSimulation:
             )  # by changing the value in place, the ID of the object is not changed (no new object is created), but the previous value is lost, which is not important here, because the previous value is not used anymore``
             self.prec[:, StepIndex] = torch.diag(self.sampleWeight @ self.P[:, self.nodeindex])  # type: ignore
 
-            if "delta_step" in kwargs and StepIndex % kwargs["delta_step"] == 0:
-                newTime = time.time()
-                elapsed = newTime - curTime
-                if prevEstimated == 0:
-                    estimated = (self.Ntimesteps - (StepIndex + 1)) * elapsed / 10
-                else:
-                    estimated = (
-                        0.99 * prevEstimated
-                        + 0.01 * (self.Ntimesteps - (StepIndex + 1)) * elapsed / 10
-                    )
+            # if "delta_step" in kwargs and StepIndex % kwargs["delta_step"] == 0:
+            #     newTime = time.time()
+            #     elapsed = newTime - curTime
+            #     if prevEstimated == 0:
+            #         estimated = (self.Ntimesteps - (StepIndex + 1)) * elapsed / 10
+            #     else:
+            #         estimated = (
+            #             0.99 * prevEstimated
+            #             + 0.01 * (self.Ntimesteps - (StepIndex + 1)) * elapsed / 10
+            #         )
 
-                minutes = math.floor(estimated / 60)
-                seconds = math.floor(estimated - 60 * minutes)
-                print(f"Estimated time left: {minutes} minutes {seconds} seconds")
-                print(
-                    f"Percentage done: {round(100*(StepIndex + 1)/self.Ntimesteps)} %"
-                )
-                curTime = newTime
-                prevEstimated = estimated
-                print(f"Current/Total step {StepIndex+1}/{self.Ntimesteps}")
-                print(
-                    f"Current/Total time {self.time_integrator.dt * StepIndex}/{total_time}"
-                )
-                print(f"P at mic locations {self.prec[:,StepIndex]}")
+            #     minutes = math.floor(estimated / 60)
+            #     seconds = math.floor(estimated - 60 * minutes)
+            #     print(f"Estimated time left: {minutes} minutes {seconds} seconds")
+            #     print(
+            #         f"Percentage done: {round(100*(StepIndex + 1)/self.Ntimesteps)} %"
+            #     )
+            #     curTime = newTime
+            #     prevEstimated = estimated
+            #     print(f"Current/Total step {StepIndex+1}/{self.Ntimesteps}")
+            #     print(
+            #         f"Current/Total time {self.time_integrator.dt * StepIndex}/{total_time}"
+            #     )
+            #     print(f"P at mic locations {self.prec[:,StepIndex]}")
 
-            if "save_step" in kwargs and StepIndex % kwargs["save_step"] == 0:
-                self.save_results_on_the_run(format=kwargs.get("format", "mat"))
+            # if "save_step" in kwargs and StepIndex % kwargs["save_step"] == 0:
+            #     self.save_results_on_the_run(format=kwargs.get("format", "mat"))
         end_time = time.time()
         print(f"time: {end_time-curTime} s")
         return self.prec
