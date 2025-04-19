@@ -285,9 +285,7 @@ class AcousticsSimulation:
         )
 
         self.dtscale = (
-            AcousticsSimulation.diameter_3d(torch.Tensor.numpy(self.Fscale.cpu()))
-            / self.c0
-            / (2 * self.Nx + 1)
+            AcousticsSimulation.diameter_3d(self.Fscale) / self.c0 / (2 * self.Nx + 1)
         )
 
     # Static methods ---------------------------------------------------------------------------------------------------
@@ -886,7 +884,7 @@ class AcousticsSimulation:
         Nfp = int(Fscale.shape[0] / 4)
         AtoV = 3 / 2 * Fscale[[0, Nfp, 2 * Nfp, 3 * Nfp]].sum(axis=0)
         diameter = 6 / AtoV
-        return diameter.min()
+        return diameter.min().item()
 
     @profile
     def grad_3d(self, U: torch.tensor, axis: str):
@@ -1103,10 +1101,6 @@ class AcousticsSimulation:
             RHS_Vz (torch.tensor): Right-hand side values for velocity in the z-direction.
             BCvar (list[dict]): updated boundary condition variables.
         """
-        # P = torch.from_numpy(P)
-        # Vx = torch.from_numpy(Vx)
-        # Vy = torch.from_numpy(Vy)
-        # Vz = torch.from_numpy(Vz)
 
         # Initialize jump variables
         dVx = torch.zeros_like(self.Fscale).to(self.device).to(device_ini.dtype)
