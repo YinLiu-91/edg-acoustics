@@ -874,8 +874,7 @@ class AcousticsSimulation:
                 # K_ = numpy.all(numpy.isin(Face, tri), axis=0) #wont work for all cases
                 BCType[indexl, K_] = BClabel
         # BCType = BCType.repeat(Nfp)
-        # BCType = BCType.cpu().numpy().repeat(Nfp, axis=0)
-        BCType = BCType.repeat(Nfp, *(1,) * (BCType.dim() - 1))
+        BCType = BCType.repeat_interleave(Nfp, dim=0)
 
         for i in range(len(BC_list)):
             BCnode[i]["map"] = (
