@@ -834,7 +834,7 @@ class AcousticsSimulation:
         BC_list: dict[str, int],
         EToV: torch.tensor,
         vmapM: torch.tensor,
-        BC_triangles: dict[str, numpy.ndarray],
+        BC_triangles: dict[str, torch.tensor],
         Nx: int,
     ):
         """Build specialized nodal maps for various types of boundary conditions,specified in BC_list
@@ -858,15 +858,7 @@ class AcousticsSimulation:
         BCnode = []
         for BCname, BClabel in BC_list.items():
             BCnode.append({"label": BClabel})
-            # tri=BC_triangles[BCname].sort(axis=1)
-            # tri = torch.sort(
-            #     torch.from_numpy(BC_triangles[BCname]).to(device_ini.device), axis=1
-            # ).t()
-            tri, _ = (
-                torch.from_numpy(BC_triangles[BCname])
-                .to(device_ini.device)
-                .sort(axis=1)
-            )
+            tri, _ = BC_triangles[BCname].sort(axis=1)
 
             for indexl in range(4):
                 Face, _ = torch.sort(EToV[VNUM[indexl]], axis=0)

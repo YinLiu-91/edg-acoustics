@@ -312,9 +312,11 @@ class Mesh:
             self.N_BC_triangles[BC_label] = (
                 triangles_have_label.sum()
             )  # number of triangles with label BC_label
-            self.BC_triangles[BC_label] = mesh_data.cells_dict["triangle"][
-                triangles_have_label
-            ]  # get the triangles with BC_label
+            self.BC_triangles[BC_label] = torch.from_numpy(
+                mesh_data.cells_dict["triangle"][triangles_have_label]
+            ).to(
+                device_ini.device
+            )  # get the triangles with BC_label
 
         # Read the number of tetrahedra (computational elements) and their definitions
         self.N_tets = mesh_data.cells_dict["tetra"].shape[0]
