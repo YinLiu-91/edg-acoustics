@@ -854,12 +854,14 @@ class AcousticsSimulation:
             # tri=BC_triangles[BCname].sort(axis=1)
             tri = numpy.sort(BC_triangles[BCname], axis=1).T
             for indexl in range(4):
-                Face = numpy.sort(EToV[VNUM[indexl]], axis=0)
+                Face, _ = torch.sort(
+                    torch.from_numpy(EToV[VNUM[indexl]]).to(device_ini.device), axis=0
+                )
                 K_ = AcousticsSimulation.ismember_col(
-                    torch.from_numpy(Face), torch.from_numpy(tri)
+                    Face, torch.from_numpy(tri).to(device_ini.device)
                 )
                 # K_ = numpy.all(numpy.isin(Face, tri), axis=0) #wont work for all cases
-                BCType[indexl, K_] = BClabel
+                BCType[indexl, K_.cpu()] = BClabel
         BCType = BCType.repeat(Nfp, axis=0)
 
         for i in range(len(BC_list)):
