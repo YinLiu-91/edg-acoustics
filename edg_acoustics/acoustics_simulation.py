@@ -14,6 +14,10 @@ import edg_acoustics
 import time
 import torch
 import sys
+import triton
+from line_profiler import profile
+import triton
+import triton.language as tl
 
 import edg_acoustics.device_ini as device_ini
 
@@ -25,6 +29,32 @@ NODETOL = 1.0e-7
 
 # device = "cuda" if torch.cuda.is_available() else "cpu"
 device = device_ini.device
+
+
+@triton.jit
+def build_maps_kernel(
+    nodeids_ptr,  # 节点ID数组 [Np, N_tets]
+    fmask_ptr,  # 面掩码 [4, Nfp]
+    vmapM_ptr,  # 输出缓冲区 [4, Nfp, N_tets]
+    N_tets,  # 总四面体数量
+    Nfp,  # 每个面的节点数
+    BLOCK_SIZE: tl.constexpr,  # 每个块处理的四面体数量
+):
+    # 计算程序ID和偏移量
+    pid = tl.program_id(0)
+    tet_start = pid * BLOCK_SIZE
+    # 每个block处理BLOCK_SIZE个四面体
+    for tet_idx in range(tet_start, tl.minimum(tet_start + BLOCK_SIZE, N_tets)):
+        # 处理四个面
+        for face in range(4):
+            # 处理每个面上的节点
+            for node in range(Nfp):
+                # 获取Fmask中的索引
+                fmask_idx = tl.load(fmask_ptr + face * Nfp + node)
+                # 获取nodeids中的值
+                nodeid = tl.load(nodeids_ptr + fmask_idx * N_tets + tet_idx)
+                # 存储到vmapM
+                tl.store(vmapM_ptr + (face * Nfp + node) * N_tets + tet_idx, nodeid)
 
 
 class AcousticsSimulation:
@@ -686,6 +716,7 @@ class AcousticsSimulation:
         return n_xyz, sJ
 
     @staticmethod
+    @profile
     def build_maps_3d(
         xyz: torch.tensor,
         EToE: torch.tensor,
@@ -726,11 +757,24 @@ class AcousticsSimulation:
         yV = xyz[1].reshape(-1)
         zV = xyz[2].reshape(-1)
 
-        for ke in range(N_tets):
-            for face in range(4):
-                vmapM[face, :, ke] = nodeids[
-                    Fmask[face], ke
-                ]  # find index of face nodes with respect to volume node ordering
+        # 配置grid和block大小
+        BLOCK_SIZE = 32
+        grid = lambda meta: (triton.cdiv(N_tets, BLOCK_SIZE),)
+
+        # 调用triton kernel
+        build_maps_kernel[grid](
+            nodeids.contiguous(),
+            Fmask.contiguous(),
+            vmapM.contiguous(),
+            N_tets,
+            Nfp,
+            BLOCK_SIZE,
+        )
+        # for ke in range(N_tets):
+        #     for face in range(4):
+        #         vmapM[face, :, ke] = nodeids[
+        #             Fmask[face], ke
+        #         ]  # find index of face nodes with respect to volume node ordering
 
         for ke in range(N_tets):
             for face in range(4):
@@ -753,11 +797,10 @@ class AcousticsSimulation:
 
                 D = (xM - xP) ** 2 + (yM - yP) ** 2 + (zM - zP) ** 2
 
-                (idM, idP) = numpy.nonzero(numpy.abs(D.cpu().numpy()) < node_tol)
-                # here to torch is not correct
-                # idMP = torch.nonzero(torch.abs(D) < node_tol)
+                # (idM, idP) = numpy.nonzero(numpy.abs(D.cpu().numpy()) < node_tol)
+                idMP = torch.nonzero(torch.abs(D) < node_tol).t()
 
-                vmapP[face, idM, ke] = vmapM[face2, idP, ke2]
+                vmapP[face, idMP[0], ke] = vmapM[face2, idMP[1], ke2]
 
         return vmapM.reshape(-1), vmapP.reshape(-1)
 
@@ -845,6 +888,7 @@ class AcousticsSimulation:
         diameter = 6 / AtoV
         return diameter.min()
 
+    @profile
     def grad_3d(self, U: torch.tensor, axis: str):
         """Compute partial derivative dU/dx, dU/dy, dU/dz, or gradient dU/dx + dU/dy + dU/dz
 
@@ -1034,6 +1078,7 @@ class AcousticsSimulation:
         """load the time integrator to be used to and save it to the :class:`AcousticsSimulation` class."""
         self.time_integrator = time_integrator
 
+    @profile
     def RHS_operator(
         self,
         P: torch.tensor,
@@ -1128,6 +1173,7 @@ class AcousticsSimulation:
                             -paras["CP"][2, i] * BCvar[index]["kexi2"][i]
                             + paras["CP"][3, i] * kexi1temp
                         )  # RHS for BCvar[index]['kexi2']
+
             fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[0]).reshape(-1)[
                 self.BCnode[index]["map"]
             ] * P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 - (
@@ -1139,6 +1185,7 @@ class AcousticsSimulation:
             ] * self.c0 * (
                 BCvar[index]["ou"] + BCvar[index]["in"]
             ) / 2
+
             fluxVy.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[1]).reshape(-1)[
                 self.BCnode[index]["map"]
             ] * P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 - (
@@ -1150,6 +1197,7 @@ class AcousticsSimulation:
             ] * self.c0 * (
                 BCvar[index]["ou"] + BCvar[index]["in"]
             ) / 2
+
             fluxVz.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[2]).reshape(-1)[
                 self.BCnode[index]["map"]
             ] * P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 - (
@@ -1161,6 +1209,7 @@ class AcousticsSimulation:
             ] * self.c0 * (
                 BCvar[index]["ou"] + BCvar[index]["in"]
             ) / 2
+
             fluxP.reshape(-1)[self.BCnode[index]["map"]] = (
                 self.c0**2
                 * self.rho0
@@ -1227,13 +1276,14 @@ class AcousticsSimulation:
 
         # self.prec = numpy.zeros([self.rec.shape[1], self.Ntimesteps])
         self.prec = torch.zeros(
-            [self.rec.shape[1], self.Ntimesteps], dtype=torch.float64
-        )
+            [self.rec.shape[1], self.Ntimesteps], dtype=device_ini.dtype
+        ).to(device_ini.device)
 
         curTime = time.time()
         prevEstimated = 0
         # Step the solution
         for StepIndex in range(self.Ntimesteps):
+            # for StepIndex in range(1):
 
             self.time_integrator.step_dt(
                 self.P,
@@ -1271,6 +1321,8 @@ class AcousticsSimulation:
 
             if "save_step" in kwargs and StepIndex % kwargs["save_step"] == 0:
                 self.save_results_on_the_run(format=kwargs.get("format", "mat"))
+        end_time = time.time()
+        print(f"time: {end_time-curTime} s")
         return self.prec
 
     def save_results_on_the_run(self, format: str = "mat"):
