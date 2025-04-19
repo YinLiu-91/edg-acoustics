@@ -1336,7 +1336,7 @@ class AcousticsSimulation:
                 "results_on_the_run.mat",
                 {
                     "BCpara": self.BC.BCpara,
-                    "prec": self.prec,
+                    "prec": self.prec.cpu().numpy(),
                     "rec": self.rec,
                     "dt": self.time_integrator.dt,
                     "Ntimesteps": self.Ntimesteps,
