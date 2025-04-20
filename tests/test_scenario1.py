@@ -37,8 +37,8 @@ def simulation_parameters():
             (numpy.array([4.26]), numpy.array([1.76]), numpy.array([1.62]))
         ),
         "impulse_length": 0.005,
-        "save_every_Nstep": 10,
-        "temporary_save_Nstep": 500,
+        # "save_every_Nstep": 10,
+        # "temporary_save_Nstep": 500,
         "result_filename": "test_result",
     }
 
@@ -122,9 +122,6 @@ def test_scenario1_simulation(simulation_parameters):
     # Run time integration
     sim.time_integration(
         total_time=params["impulse_length"],
-        delta_step=params["save_every_Nstep"],
-        save_step=params["temporary_save_Nstep"],
-        format="mat",
     )
 
     # Post-processing
