@@ -6,10 +6,6 @@ import glob
 import numpy
 import scipy.io
 import pytest
-import sys
-
-# Add path to edg-acoustics
-sys.path.insert(0, "/media/liu/trHollow/linux/decimer/edg-acoustics")
 import edg_acoustics
 
 # endregion

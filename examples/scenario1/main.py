@@ -5,9 +5,6 @@ import os
 import glob
 import numpy
 import scipy.io
-import sys
-
-sys.path.insert(0, "/media/liu/trHollow/linux/decimer/edg-acoustics")
 import edg_acoustics
 
 # endregion
@@ -42,7 +39,7 @@ recy = numpy.array([1.76])
 recz = numpy.array([1.62])
 rec = numpy.vstack((recx, recy, recz))  # dim:[3,n_rec]
 
-impulse_length = 0.005  # total simulation time in seconds
+impulse_length = 2  # total simulation time in seconds
 save_every_Nstep = 10  # save the results every N steps
 temporary_save_Nstep = 500  # save the results every N steps temporarily during the simulation. The temporary results will be saved in the root directory of this repo.
 
@@ -133,13 +130,7 @@ results.apply_correction()
 result_filename = os.path.join(
     os.path.split(os.path.abspath(__file__))[0], result_filename
 )
-# results.write_results(result_filename, "mat")
-
-mat_data = scipy.io.loadmat(f"{result_filename}.mat")
-tr = mat_data["TR"]
-ir = mat_data["IR"]
-assert numpy.allclose(tr, results.TR)
-assert numpy.allclose(ir, results.IRnew)
+results.write_results(result_filename, "mat")
 # load newresult.npy
 # data = numpy.load("./examples/newresult.npz", allow_pickle=True)
 # tempdata = numpy.load("./results_on_the_run.npz", allow_pickle=True)
