@@ -6,6 +6,7 @@ import glob
 import numpy
 import scipy.io
 import edg_acoustics
+import time
 
 # endregion
 
@@ -39,7 +40,7 @@ recy = numpy.array([1.76])
 recz = numpy.array([1.62])
 rec = numpy.vstack((recx, recy, recz))  # dim:[3,n_rec]
 
-impulse_length = 2  # total simulation time in seconds
+impulse_length = 0.005  # total simulation time in seconds
 save_every_Nstep = 10  # save the results every N steps
 temporary_save_Nstep = 500  # save the results every N steps temporarily during the simulation. The temporary results will be saved in the root directory of this repo.
 
@@ -116,22 +117,31 @@ sim.init_rec(
 
 tsi_time_integrator = edg_acoustics.TSI_TI(sim.RHS_operator, sim.dtscale, CFL, Nt=3)
 sim.init_TimeIntegrator(tsi_time_integrator)
+
+time_start = time.time()
 sim.time_integration(
     total_time=impulse_length,
     delta_step=save_every_Nstep,
     save_step=temporary_save_Nstep,
     format="mat",
 )
+time_end = time.time()
+
+print(f"Time taken for simulation: {time_end - time_start:.2f} seconds")
 
 results = edg_acoustics.Monopole_postprocessor(sim, 1)
 results.apply_correction()
 
 
-result_filename = os.path.join(
-    os.path.split(os.path.abspath(__file__))[0], result_filename
-)
-results.write_results(result_filename, "mat")
+# result_filename = os.path.join(
+#     os.path.split(os.path.abspath(__file__))[0], result_filename
+# )
+# results.write_results(result_filename, "mat")
 # load newresult.npy
-# data = numpy.load("./examples/newresult.npz", allow_pickle=True)
+mat_data = scipy.io.loadmat(f"./golden/result-t0-005.mat")
+tr = mat_data["TR"]
+ir = mat_data["IR"]
+assert numpy.allclose(tr, results.TR)
+assert numpy.allclose(ir, results.IRnew)
 # tempdata = numpy.load("./results_on_the_run.npz", allow_pickle=True)
 print("Finished!")
