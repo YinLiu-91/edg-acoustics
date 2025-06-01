@@ -57,6 +57,28 @@ def build_maps_kernel(
                 tl.store(vmapM_ptr + (face * Nfp + node) * N_tets + tet_idx, nodeid)
 
 
+@triton.jit
+def compute_flux_kernel(
+    vmapM_ptr,
+    vmapP_ptr,
+    U_ptr,
+    dU_ptr,
+    n_elements: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Triton Kernel: 计算跳跃值 dU"""
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    # 加载数据
+    uM = tl.load(U_ptr + tl.load(vmapM_ptr + offsets, mask=mask), mask=mask)
+    uP = tl.load(U_ptr + tl.load(vmapP_ptr + offsets, mask=mask), mask=mask)
+    # 计算跳跃值
+    dU = uM - uP
+    tl.store(dU_ptr + offsets, dU, mask=mask)
+
+
 class AcousticsSimulation:
     """Acoustics simulation data structure for running a DG acoustics simulation.
 
@@ -1076,6 +1098,167 @@ class AcousticsSimulation:
     def init_TimeIntegrator(self, time_integrator: edg_acoustics.TimeIntegrator):
         """load the time integrator to be used to and save it to the :class:`AcousticsSimulation` class."""
         self.time_integrator = time_integrator
+
+    def RHS_operator_triton_kernel(
+        self,
+        P: torch.tensor,
+        Vx: torch.tensor,
+        Vy: torch.tensor,
+        Vz: torch.tensor,
+        BCvar: list[dict],
+    ):
+        """优化后的 RHS_operator 函数"""
+        # 初始化跳跃变量
+        dVx = torch.zeros_like(self.Fscale, device=self.device, dtype=device_ini.dtype)
+        dVy = torch.zeros_like(dVx, device=self.device, dtype=device_ini.dtype)
+        dVz = torch.zeros_like(dVx, device=self.device, dtype=device_ini.dtype)
+        dP = torch.zeros_like(dVx, device=self.device, dtype=device_ini.dtype)
+
+        # 配置 Triton Kernel
+        BLOCK_SIZE = 1024
+        n_elements = self.vmapM.numel()
+        grid = lambda meta: (triton.cdiv(n_elements, BLOCK_SIZE),)
+
+        # 使用 Triton Kernel 计算跳跃值
+        compute_flux_kernel[grid](
+            self.vmapM,
+            self.vmapP,
+            Vx,
+            dVx,
+            n_elements,
+            BLOCK_SIZE,
+        )
+        compute_flux_kernel[grid](
+            self.vmapM,
+            self.vmapP,
+            Vy,
+            dVy,
+            n_elements,
+            BLOCK_SIZE,
+        )
+        compute_flux_kernel[grid](
+            self.vmapM,
+            self.vmapP,
+            Vz,
+            dVz,
+            n_elements,
+            BLOCK_SIZE,
+        )
+        compute_flux_kernel[grid](
+            self.vmapM,
+            self.vmapP,
+            P,
+            dP,
+            n_elements,
+            BLOCK_SIZE,
+        )
+
+        # 计算通量
+        fluxVx = self.flux.FluxVx(dVx, dVy, dVz, dP)
+        fluxVy = self.flux.FluxVy(dVx, dVy, dVz, dP)
+        fluxVz = self.flux.FluxVz(dVx, dVy, dVz, dP)
+        fluxP = self.flux.FluxP(dVx, dVy, dVz, dP)
+
+        for index, paras in enumerate(self.BC.BCpara):
+            # 'RI' refers to the limit value of the reflection coefficient as the frequency approaches infinity, i.e., :math:`R_\\inf`.
+            # 'RP' refers to real pole pairs, i.e., :math:`A` (stored in 1st row), :math:`\\zeta` (stored in 2nd row).
+            #     'CP' refers to complex pole pairs, i.e., :math:`B` (stored in 1st row), :math:`C` (stored in 2nd row),
+            #          :math:`\\alpha` (stored in 3rd row), :math:`\\beta`(stored in 4th row).
+            BCvar[index]["vn"] = (
+                (self.n_xyz[0]).reshape(-1)[self.BCnode[index]["map"]]
+                * Vx.reshape(-1)[self.BCnode[index]["vmap"]]
+                + (self.n_xyz[1]).reshape(-1)[self.BCnode[index]["map"]]
+                * Vy.reshape(-1)[self.BCnode[index]["vmap"]]
+                + (self.n_xyz[2]).reshape(-1)[self.BCnode[index]["map"]]
+                * Vz.reshape(-1)[self.BCnode[index]["vmap"]]
+            )
+            BCvar[index]["ou"] = (
+                BCvar[index]["vn"]
+                + P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 / self.c0
+            )
+            BCvar[index]["in"] = BCvar[index]["ou"] * paras["RI"]
+
+            for polekey in paras:
+                if polekey == "RP":
+                    for i in range(paras["RP"].shape[1]):
+                        BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i]
+                        BCvar[index]["phi"][i] = (
+                            BCvar[index]["ou"]
+                            - paras["RP"][1, i] * BCvar[index]["phi"][i]
+                        )  # RHS for BCvar[index]['phi']
+
+                elif polekey == "CP":
+                    for i in range(paras["CP"].shape[1]):
+                        BCvar[index]["in"] += (
+                            paras["CP"][0, i] * BCvar[index]["kexi1"][i]
+                            + paras["CP"][1, i] * BCvar[index]["kexi2"][i]
+                        )
+                        kexi1temp = BCvar[index]["kexi1"][i].clone()
+                        BCvar[index]["kexi1"][i] = (
+                            BCvar[index]["ou"]
+                            - paras["CP"][2, i] * BCvar[index]["kexi1"][i]
+                            - paras["CP"][3, i] * BCvar[index]["kexi2"][i]
+                        )  # RHS for BCvar[index]['kexi1']
+                        BCvar[index]["kexi2"][i] = (
+                            -paras["CP"][2, i] * BCvar[index]["kexi2"][i]
+                            + paras["CP"][3, i] * kexi1temp
+                        )  # RHS for BCvar[index]['kexi2']
+
+            fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[0]).reshape(-1)[
+                self.BCnode[index]["map"]
+            ] * P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 - (
+                self.n_xyz[0]
+            ).reshape(
+                -1
+            )[
+                self.BCnode[index]["map"]
+            ] * self.c0 * (
+                BCvar[index]["ou"] + BCvar[index]["in"]
+            ) / 2
+
+            fluxVy.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[1]).reshape(-1)[
+                self.BCnode[index]["map"]
+            ] * P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 - (
+                self.n_xyz[1]
+            ).reshape(
+                -1
+            )[
+                self.BCnode[index]["map"]
+            ] * self.c0 * (
+                BCvar[index]["ou"] + BCvar[index]["in"]
+            ) / 2
+
+            fluxVz.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[2]).reshape(-1)[
+                self.BCnode[index]["map"]
+            ] * P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 - (
+                self.n_xyz[2]
+            ).reshape(
+                -1
+            )[
+                self.BCnode[index]["map"]
+            ] * self.c0 * (
+                BCvar[index]["ou"] + BCvar[index]["in"]
+            ) / 2
+
+            fluxP.reshape(-1)[self.BCnode[index]["map"]] = (
+                self.c0**2
+                * self.rho0
+                * (BCvar[index]["vn"] - 0.5 * (BCvar[index]["ou"] - BCvar[index]["in"]))
+            )
+
+        # 计算梯度
+        dPdx, dPdy, dPdz = self.grad_3d(P, "xyz")
+
+        # 计算右端项
+        RHS_P = -self.c0**2 * self.rho0 * (
+            self.grad_3d(Vx, "x") + self.grad_3d(Vy, "y") + self.grad_3d(Vz, "z")
+        ) + (self.lift @ (self.Fscale * fluxP))
+
+        RHS_Vx = -dPdx / self.rho0 + (self.lift @ (self.Fscale * fluxVx))
+        RHS_Vy = -dPdy / self.rho0 + (self.lift @ (self.Fscale * fluxVy))
+        RHS_Vz = -dPdz / self.rho0 + (self.lift @ (self.Fscale * fluxVz))
+
+        return RHS_P, RHS_Vx, RHS_Vy, RHS_Vz, BCvar
 
     @profile
     def RHS_operator(

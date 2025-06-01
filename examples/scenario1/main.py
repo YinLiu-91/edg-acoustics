@@ -115,7 +115,12 @@ sim.init_rec(
     rec, "scipy"
 )  # brute_force or scipy(default) approach to locate the receiver points in the mesh
 
-tsi_time_integrator = edg_acoustics.TSI_TI(sim.RHS_operator, sim.dtscale, CFL, Nt=3)
+use_triton = True
+if use_triton:
+    operator = sim.RHS_operator_triton_kernel
+else:
+    operator = sim.RHS_operator
+tsi_time_integrator = edg_acoustics.TSI_TI(operator, sim.dtscale, CFL, Nt=3)
 sim.init_TimeIntegrator(tsi_time_integrator)
 
 time_start = time.time()
