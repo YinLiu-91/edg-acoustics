@@ -12,6 +12,8 @@ import math
 import numpy
 import edg_acoustics
 import torch
+from line_profiler import profile
+from triton.profiler import proton
 
 __all__ = ["TimeIntegrator", "TSI_TI", "CFL_Default"]
 
@@ -91,6 +93,7 @@ class TSI_TI(TimeIntegrator):
         self.Nt = kwargs["Nt"]
         print("TSI_TI initialized.")
 
+    @profile
     def step_dt(
         self,
         P: torch.tensor,
@@ -130,14 +133,17 @@ class TSI_TI(TimeIntegrator):
         ##########################
         for Tind in range(1, self.Nt + 1):
             # Compute L (L^{Tind-1} q)
-            P0, Vx0, Vy0, Vz0, BC.BCvar = self.L_operator(P0, Vx0, Vy0, Vz0, BC.BCvar)
-
+            P0, Vx0, Vy0, Vz0, BC.BCvar = self.L_operator(
+                P0, Vx0, Vy0, Vz0, BC.BCvar
+            )  # 对应acoustic_simulation.py中的RHS_operator函数
             # Add the Taylor term \frac{dt^{Tind}}{Tind!}L^{Tind}q
+            # 公式 https://github.com/YinLiu-91/edg-acoustics/issues/2#issuecomment-3015003741
             Vx += self.dt**Tind / math.factorial(Tind) * (Vx0)
             Vy += self.dt**Tind / math.factorial(Tind) * (Vy0)
             Vz += self.dt**Tind / math.factorial(Tind) * (Vz0)
             P += self.dt**Tind / math.factorial(Tind) * (P0)
 
+            # 公式计算 https://github.com/YinLiu-91/edg-acoustics/issues/2#issuecomment-3015005985
             for index, paras in enumerate(BC.BCpara):
                 for polekey in paras:
                     if polekey == "RP":
