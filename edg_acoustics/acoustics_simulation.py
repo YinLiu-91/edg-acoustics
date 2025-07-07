@@ -313,9 +313,9 @@ class AcousticsSimulation:
         self.c0 = c0
         self.mesh = mesh
         self.Nx = Nx
-        self.N_tets = mesh.EToV.shape[1]
+        self.N_lines = mesh.EToV.shape[1]
         self.BC_list = BC_list
-        self.dim = 3  # we are always in 3D, just added for external reference
+        self.dim = 2  # we are always in 3D, just added for external reference
         self.node_tolerance = node_tolerance  # define a tolerance value for determining if a node belongs to a facet or not
 
         # Compute attributes
@@ -339,13 +339,11 @@ class AcousticsSimulation:
             dim=self.dim,
         )
 
-        # Compute the van der Monde matrix for the basis functions
-        self.V = AcousticsSimulation.compute_van_der_monde_matrix(self.Nx, self.rst)
+        # Compute the van der Monde matrix for the basis functions 计算的是参考单元的
+        self.V = AcousticsSimulation.compute_van_der_monde_matrix(self.Nx, self.rst, dim=2)
 
         # Compute the derivative matrices
-        self.Dr, self.Ds, self.Dt = AcousticsSimulation.compute_derivative_matrix(
-            self.Nx, self.rst
-        )
+        self.Dr, self.Ds = AcousticsSimulation.compute_derivative_matrix(self.Nx, self.rst, dim=2)
 
         # Find all the ``Nfp`` face nodes that lie on each surface.
         self.Fmask = AcousticsSimulation.compute_Fmask(
@@ -393,7 +391,7 @@ class AcousticsSimulation:
             self.BC_list,
             self.mesh.EToV,
             self.vmapM,
-            self.mesh.BC_triangles,
+            self.mesh.BC_lines,
             self.Nx,
         )
 
@@ -466,7 +464,7 @@ class AcousticsSimulation:
         Returns:
             is_compatible (bool): a flag specifying if BC_list is compatible with the mesh or not.
         """
-        return BC_list.keys() == mesh.BC_triangles.keys()
+        return BC_list.keys() == mesh.BC_lines.keys()
 
     @staticmethod
     def compute_collocation_nodes(
@@ -505,33 +503,34 @@ class AcousticsSimulation:
         vertex_1_idx = EToV[1, :]
         # get the indices of the third node of each element
         vertex_2_idx = EToV[2, :]
-        # get the indices of the fourth node of each element
-        vertex_3_idx = EToV[3, :]
+        # # get the indices of the fourth node of each element
+        # vertex_3_idx = EToV[3, :]
 
         # Get shorter references for the r, s, and t coordinates, and the sum r + s + t
         rst_sum = rst.sum(axis=0).reshape([-1, 1])
         r = rst[0, :].reshape([-1, 1])
         s = rst[1, :].reshape([-1, 1])
-        t = rst[2, :].reshape([-1, 1])
+        # t = rst[2, :].reshape([-1, 1])
 
         # Compute the xyz coordinates
+        """
+        对于(-1,-1),(1,-1),(-1,1)为参考单元的型函数为：
+        N1=1/2(-x-y)
+        N2=1/2(1+x)
+        N3=1/2(1+y)
+        而物理坐标则可以通过以下计算：
+        x=N1*x1+N2*x2+N3*x3
+        y=N1*y1+N2*y2+N3*y3
+        """
         xyz[0] = 0.5 * (
-            -(1.0 + rst_sum) * vertices[0, vertex_0_idx]
+            -(rst_sum) * vertices[0, vertex_0_idx]
             + (1.0 + r) * vertices[0, vertex_1_idx]
             + (1.0 + s) * vertices[0, vertex_2_idx]
-            + (1.0 + t) * vertices[0, vertex_3_idx]
         )
         xyz[1] = 0.5 * (
-            -(1.0 + rst_sum) * vertices[1, vertex_0_idx]
+            -(rst_sum) * vertices[1, vertex_0_idx]
             + (1.0 + r) * vertices[1, vertex_1_idx]
             + (1.0 + s) * vertices[1, vertex_2_idx]
-            + (1.0 + t) * vertices[1, vertex_3_idx]
-        )
-        xyz[2] = 0.5 * (
-            -(1.0 + rst_sum) * vertices[2, vertex_0_idx]
-            + (1.0 + r) * vertices[2, vertex_1_idx]
-            + (1.0 + s) * vertices[2, vertex_2_idx]
-            + (1.0 + t) * vertices[2, vertex_3_idx]
         )
 
         # Return the computed coordinates
@@ -586,7 +585,7 @@ class AcousticsSimulation:
         return (
             torch.from_numpy(D[0]).to(device).to(device_ini.dtype),
             torch.from_numpy(D[1]).to(device).to(device_ini.dtype),
-            torch.from_numpy(D[2]).to(device).to(device_ini.dtype),
+            # torch.from_numpy(D[2]).to(device).to(device_ini.dtype),
         )
 
     # ------------------------------------------------------------------------------------------------------------------
@@ -608,14 +607,15 @@ class AcousticsSimulation:
         Nfp = AcousticsSimulation.compute_Nfp(
             Nx
         )  # get the number of collocation points per face
-
-        Fmask = torch.zeros([4, Nfp], dtype=torch.int32).to(device)
+        # TODO 这里hardcode
+        Nfp = 5
+        Fmask = torch.zeros([3, Nfp], dtype=torch.int32).to(device)
 
         # Find all the nodes that lie on each surface
-        Fmask[0] = torch.nonzero(torch.abs(1 + rst[2]) < node_tol).flatten()
-        Fmask[1] = torch.nonzero(torch.abs(1 + rst[1]) < node_tol).flatten()
-        Fmask[2] = torch.nonzero(torch.abs(1 + rst.sum(axis=0)) < node_tol).flatten()
-        Fmask[3] = torch.nonzero(torch.abs(1 + rst[0]) < node_tol).flatten()
+        #
+        Fmask[0] = torch.nonzero(torch.abs(1 + rst[1]) < node_tol).flatten()  # y=-1
+        Fmask[1] = torch.nonzero(torch.abs(1 + rst[0]) < node_tol).flatten()  # x=-1
+        Fmask[2] = torch.nonzero(torch.abs(rst.sum(axis=0)) < node_tol).flatten()  # x+y=0
 
         return Fmask
 
@@ -629,6 +629,8 @@ class AcousticsSimulation:
             Fmask (torch.tensor): see :attr:`Fmask`.
         Returns:
             lift (torch.tensor): see :attr:`lift`.
+        原理在 https://github.com/YinLiu-91/edg-acoustics/issues/2#issuecomment-3014993376
+        提升矩阵就是单元质量矩阵的逆与面单元质量矩阵的乘积
         """
         Np = V.shape[1]  # get the number of collocation points
         Nx = AcousticsSimulation.compute_Nx_from_Np(
@@ -637,7 +639,7 @@ class AcousticsSimulation:
         Nfp = AcousticsSimulation.compute_Nfp(
             Nx
         )  # the number of nodes per surface for basis of polynomial degree Nx
-
+        # Np为单元所有点(包含面上与内部的),Nfp为每个面上节点数
         Emat = torch.zeros([Np, Nfp * 4], dtype=device_ini.dtype).to(device_ini.device)
         faceR = torch.zeros([1, Nfp], dtype=device_ini.dtype).to(device_ini.device)
         faceS = torch.zeros([1, Nfp], dtype=device_ini.dtype).to(device_ini.device)
@@ -1481,31 +1483,29 @@ class AcousticsSimulation:
             )
             BCvar[index]["in"] = BCvar[index]["ou"] * paras["RI"]
 
+            # 这里结合time_integration.py对 phi,kexi1,kexi2积分来看
             for polekey in paras:
                 if polekey == "RP":
                     for i in range(paras["RP"].shape[1]):
-                        BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i]
+                        BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i]  # ref1[18] 第二项
                         BCvar[index]["phi"][i] = (
-                            BCvar[index]["ou"]
-                            - paras["RP"][1, i] * BCvar[index]["phi"][i]
-                        )  # RHS for BCvar[index]['phi']
+                            BCvar[index]["ou"] - paras["RP"][1, i] * BCvar[index]["phi"][i]
+                        )  # RHS for BCvar[index]['phi'] # ref1[20a]
 
                 elif polekey == "CP":
                     for i in range(paras["CP"].shape[1]):
                         BCvar[index]["in"] += (
-                            paras["CP"][0, i] * BCvar[index]["kexi1"][i]
-                            + paras["CP"][1, i] * BCvar[index]["kexi2"][i]
-                        )
+                            paras["CP"][0, i] * BCvar[index]["kexi1"][i] + paras["CP"][1, i] * BCvar[index]["kexi2"][i]
+                        )  # ref1[18]第三项
                         kexi1temp = BCvar[index]["kexi1"][i].clone()
                         BCvar[index]["kexi1"][i] = (
                             BCvar[index]["ou"]
                             - paras["CP"][2, i] * BCvar[index]["kexi1"][i]
                             - paras["CP"][3, i] * BCvar[index]["kexi2"][i]
-                        )  # RHS for BCvar[index]['kexi1']
+                        )  # RHS for BCvar[index]['kexi1'] ref1[20b]
                         BCvar[index]["kexi2"][i] = (
-                            -paras["CP"][2, i] * BCvar[index]["kexi2"][i]
-                            + paras["CP"][3, i] * kexi1temp
-                        )  # RHS for BCvar[index]['kexi2']
+                            -paras["CP"][2, i] * BCvar[index]["kexi2"][i] + paras["CP"][3, i] * kexi1temp
+                        )  # RHS for BCvar[index]['kexi2'] # ref1[20c]
 
             fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[0]).reshape(-1)[
                 self.BCnode[index]["map"]
@@ -1670,7 +1670,7 @@ class AcousticsSimulation:
                     "Ntimesteps": self.Ntimesteps,
                     "total_time": self.Ntimesteps * self.time_integrator.dt,
                     "Np": self.Np,
-                    "N_tets": self.N_tets,
+                    "N_tets": self.N_lines,
                     "rho0": self.rho0,
                     "c0": self.c0,
                     "mesh_filename": self.mesh.filename,
@@ -1691,7 +1691,7 @@ class AcousticsSimulation:
                 Ntimesteps=self.Ntimesteps,
                 total_time=self.Ntimesteps * self.time_integrator.dt,
                 Np=self.Np,
-                N_tets=self.mesh.N_tets,
+                N_tets=self.mesh.N_tris,
                 rho0=self.rho0,
                 c0=self.c0,
                 mesh_filename=self.mesh.filename,
