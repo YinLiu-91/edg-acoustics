@@ -418,7 +418,7 @@ def lift_surface_kernel(
 @triton.jit
 def interior_flux_kernel(
     q_ptr,
-    vmapM_q_ptr,
+    face_node_ids_ptr,
     vmapP_q_ptr,
     cn1s_ptr,
     cn2s_ptr,
@@ -446,14 +446,18 @@ def interior_flux_kernel(
     tet = offsets % n_tets
     face = offsets // n_tets
 
-    pM = tl.load(q_ptr + tl.load(vmapM_q_ptr + offsets, mask=mask), mask=mask)
-    pP = tl.load(q_ptr + tl.load(vmapP_q_ptr + offsets, mask=mask), mask=mask)
-    vxM = tl.load(q_ptr + tl.load(vmapM_q_ptr + total_faces + offsets, mask=mask), mask=mask)
-    vxP = tl.load(q_ptr + tl.load(vmapP_q_ptr + total_faces + offsets, mask=mask), mask=mask)
-    vyM = tl.load(q_ptr + tl.load(vmapM_q_ptr + 2 * total_faces + offsets, mask=mask), mask=mask)
-    vyP = tl.load(q_ptr + tl.load(vmapP_q_ptr + 2 * total_faces + offsets, mask=mask), mask=mask)
-    vzM = tl.load(q_ptr + tl.load(vmapM_q_ptr + 3 * total_faces + offsets, mask=mask), mask=mask)
-    vzP = tl.load(q_ptr + tl.load(vmapP_q_ptr + 3 * total_faces + offsets, mask=mask), mask=mask)
+    node_m = tl.load(face_node_ids_ptr + face, mask=mask)
+    base_m = node_m * n_var_tets + tet
+    base_p = tl.load(vmapP_q_ptr + offsets, mask=mask)
+
+    pM = tl.load(q_ptr + base_m, mask=mask)
+    pP = tl.load(q_ptr + base_p, mask=mask)
+    vxM = tl.load(q_ptr + base_m + n_tets, mask=mask)
+    vxP = tl.load(q_ptr + base_p + n_tets, mask=mask)
+    vyM = tl.load(q_ptr + base_m + 2 * n_tets, mask=mask)
+    vyP = tl.load(q_ptr + base_p + 2 * n_tets, mask=mask)
+    vzM = tl.load(q_ptr + base_m + 3 * n_tets, mask=mask)
+    vzP = tl.load(q_ptr + base_p + 3 * n_tets, mask=mask)
 
     dp = pM - pP
     dvx = vxM - vxP
@@ -1026,10 +1030,11 @@ class AcousticsSimulation:
             and self._use_triton_boundary_ri
             and self._use_triton_boundary_ade
         )
-        self._use_fused_state_accumulation = (
-            self.device.type == "cuda"
-            and os.environ.get("EDG_ACOUSTICS_FUSED_STATE_ACCUMULATION", "0")
-            != "0"
+        fused_state_env = os.environ.get("EDG_ACOUSTICS_FUSED_STATE_ACCUMULATION")
+        self._use_fused_state_accumulation = self.device.type == "cuda" and (
+            (self.N_tets >= 10_000)
+            if fused_state_env is None
+            else fused_state_env != "0"
         )
         self._use_triton_derivative_volume = (
             self.device.type == "cuda"
@@ -1061,6 +1066,9 @@ class AcousticsSimulation:
         self._vmapP = self.vmapP.to(device=self.device, dtype=torch.long)
         self._vmapM_q = self._build_packed_face_indices(self._vmapM)
         self._vmapP_q = self._build_packed_face_indices(self._vmapP)
+        self._face_node_ids = self.Fmask.reshape(-1).to(
+            device=self.device, dtype=torch.long
+        )
         self._nx_flat = self.n_xyz[0].reshape(-1)
         self._ny_flat = self.n_xyz[1].reshape(-1)
         self._nz_flat = self.n_xyz[2].reshape(-1)
@@ -1226,7 +1234,7 @@ class AcousticsSimulation:
             block_size = 256
             interior_flux_kernel[(triton.cdiv(total_faces, block_size),)](
                 q_by_node.reshape(-1),
-                self._vmapM_q,
+                self._face_node_ids,
                 self._vmapP_q,
                 self.flux.cn1s,
                 self.flux.cn2s,

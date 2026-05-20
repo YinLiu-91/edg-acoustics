@@ -114,13 +114,13 @@ The largest scenario1 boundary group is RI-only and does not carry RP/CP ADE sta
 
 ### 9. Benchmark-gated experimental kernels
 
-Several deeper kernels are implemented but default off because they did not consistently beat the current cuBLAS/PyTorch path on V100:
+Several deeper kernels are implemented and benchmark-gated because they do not all beat the current cuBLAS/PyTorch path on V100:
 
-- `EDG_ACOUSTICS_FUSED_STATE_ACCUMULATION=1` fuses RHS write with `Q_flat += coefficient * RHS_Q`;
+- fused state accumulation fuses RHS write with `Q_flat += coefficient * RHS_Q`;
 - `EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME=1` combines derivative application and volume RHS;
 - `EDG_ACOUSTICS_TRITON_LIFT_SURFACE=1` replaces `lift @ Flux_flat` with a direct Triton lift kernel.
 
-They remain useful for future shape/GPU experiments, but the default path keeps the fastest measured configuration.
+Fused state accumulation is now enabled automatically for CUDA meshes with at least `10_000` tetrahedra because the generated fine-geometry profile mesh benefits from it. Override with `EDG_ACOUSTICS_FUSED_STATE_ACCUMULATION=0` or `1`. The derivative-volume and lift-surface Triton kernels remain default-off because they were slower on both the small and profile meshes.
 
 ### 10. CUDA Graph replay and optional chunking
 
@@ -193,6 +193,13 @@ python benchmarks/scenario1_benchmark.py --device cuda --steps 1000 --cuda-graph
 python benchmarks/scenario1_benchmark.py --device cuda --steps 1000 --cuda-graph --enable-fused-state-accumulation
 ```
 
+For fine-geometry profiling, select the generated profile mesh explicitly:
+
+```bash
+python benchmarks/scenario1_benchmark.py --device cuda --mesh-name scenario1_profile_lc0p20.msh --steps 50 --cuda-graph
+python benchmarks/scenario1_benchmark.py --device cuda --mesh-name scenario1_profile_lc0p20.msh --steps 10 --cuda-graph --profile --profile-row-limit 30
+```
+
 ### 3. How to read the profiler output
 
 For this repository, the most useful signals are:
@@ -249,7 +256,48 @@ That is why the next-tier experiments were treated differently:
 - `EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME=1`
 - `EDG_ACOUSTICS_TRITON_LIFT_SURFACE=1`
 
-All three are **correct**, but on the current V100 + scenario1 shape they were not consistently faster than the default path, so they remain benchmark-gated.
+On the original 305-tet scenario1 shape, all three were **correct** but did not consistently beat the default path. On the 45,285-tet profile mesh, fused state accumulation was consistently faster and is now size-gated on by default. The derivative-volume and lift-surface Triton paths remained slower and stay opt-in.
+
+### Fine-geometry profile mesh pass
+
+The full `scenario1_fine.msh` has about 659k tetrahedra and currently OOMs during CUDA initialization on the tested V100. To profile a much larger but runnable fine-geometry case, a deterministic intermediate mesh is generated from `scenario1_fine.geo`:
+
+```bash
+python benchmarks/generate_scenario1_mesh.py --lc 0.20 --output examples/scenario1/scenario1_profile_lc0p20.msh
+```
+
+Generated mesh:
+
+| Mesh | Source | Vertices | Tetrahedra | Relative to coarser |
+| --- | --- | ---: | ---: | ---: |
+| `scenario1_coarser.msh` | existing coarse case | 120 | 305 | 1.0x |
+| `scenario1_profile_lc0p20.msh` | `scenario1_fine.geo`, `lc=0.20` | 9,391 | 45,285 | 148x |
+| `scenario1_fine.msh` | `scenario1_fine.geo`, `lc=0.08` | 117,756 | 659,212 | 2161x |
+
+Profile-mesh hotspot before the final index optimization:
+
+| Profiler row | CUDA time share |
+| --- | ---: |
+| `interior_flux_kernel` | 41.96% |
+| `volume_surface_rhs_kernel` | 21.08% |
+| derivative/lift DGEMMs | 25.87% |
+| remaining elementwise and boundary kernels | 11.09% |
+
+The accepted profile-mesh optimization avoids redundant packed-index reads in `interior_flux_kernel`: the left face-node index is derived from `Fmask`, and the right-side pressure base index is loaded once then reused for the three velocity components. This reduced the profiled `interior_flux_kernel` share from 41.96% to 38.79% and improved fixed-step runtime from about `9.38 ms/step` to `8.75 ms/step`.
+
+Profile-mesh A/B results:
+
+| Variant | ms/step | Decision |
+| --- | ---: | --- |
+| Default before profile-mesh pass | 9.38 | baseline for this pass |
+| Optimized interior indexing | 8.96 | accepted |
+| Optimized interior + fused state auto gate | 8.75 | accepted for `N_tets >= 10_000` |
+| Disable fused state after auto gate | 8.92 | keep fused auto gate |
+| `--enable-triton-derivative-volume` | 13.60 | rejected |
+| `--enable-triton-lift-surface` | 19.72 | rejected |
+| `--disable-scaled-flux-kernels` | 10.18 | rejected |
+| `--disable-triton-volume-surface-rhs` | 10.00 | rejected |
+| `--disable-triton-interior-flux` | 15.82 | rejected |
 
 ## How to use CUDA Graph in `examples/scenario1/main.py`
 
@@ -276,9 +324,9 @@ If the process is not running on CUDA, the graph path is not used.
 
 ## Performance summary
 
-### A. End-to-end `examples/scenario1/main.py` progression
+### A. Historical coarser-mesh `examples/scenario1/main.py` progression
 
-The original baseline and the current script do **not** use the same total simulation time (`2.0s` vs current `0.1s`), so direct wall-clock comparison is not apples-to-apples. The comparable metric is **time per step**.
+These rows record the original coarser-mesh optimization history. The runs did **not** all use the same total simulation time (`2.0s` vs `0.1s`), so direct wall-clock comparison is not apples-to-apples. The comparable metric is **time per step**.
 
 | Stage | Workload | Steps | Observed time | ms/step | Relative to initial |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -297,7 +345,7 @@ Current solver-loop timing printed by `time_integration()` for the CUDA Graph ru
 
 ### B. CPU / GPU hot-path benchmark comparison
 
-All rows below use the same fixed-step benchmark:
+All rows below use the coarser mesh and the same fixed-step benchmark:
 
 ```bash
 python benchmarks/scenario1_benchmark.py --steps 1000 ...
@@ -318,15 +366,29 @@ Interpretation:
 - Triton volume/surface, flux, RI/RP/CP boundary fusion, scaled flux writes, and batched derivatives reduce real graph-internal GPU work, so CUDA eager and CUDA Graph both improve;
 - the current landed design keeps the packed PyTorch fallback and uses CUDA Graph plus CUDA-only fused kernels as the practical speedup path.
 
+### C. Fine-geometry profile mesh performance
+
+All rows use `scenario1_profile_lc0p20.msh` (`45,285` tetrahedra, fp64, V100). This mesh is large enough that real graph-internal work dominates; CUDA Graph removes little beyond launch overhead, but GPU is still much faster than CPU.
+
+| Mode | Device | Steps | Observed time | ms/step | Relative to CPU |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Fixed-step benchmark | CPU, 8 threads | 5 | 3298.15 ms | 659.63 | 1.00x |
+| Fixed-step benchmark + CUDA Graph | CUDA | 50 | 437.64 ms | 8.75 | 75.36x faster |
+| `main.py`, `impulse_length=0.001` | CUDA + CUDA Graph | 205 | 1.77 s solver loop | 8.62 | 76.52x faster by step rate |
+
+The current `examples/scenario1/main.py` uses this profile mesh instead of the full `scenario1_fine.msh`, because the full fine mesh currently OOMs during CUDA initialization. The shorter `impulse_length=0.001` keeps iteration fast while preserving a representative 205-step fine-geometry run.
+
 ## Files most relevant to the final design
 
 - `edg_acoustics/device_ini.py`
 - `edg_acoustics/acoustics_simulation.py`
 - `edg_acoustics/time_integration.py`
+- `benchmarks/generate_scenario1_mesh.py`
 - `benchmarks/scenario1_benchmark.py`
 - `tests/test_scenario1_golden.py`
 - `tests/scenario1_utils.py`
 - `examples/scenario1/main.py`
+- `examples/scenario1/scenario1_profile_lc0p20.msh`
 
 ## Deferred work
 

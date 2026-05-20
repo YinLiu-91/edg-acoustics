@@ -68,9 +68,23 @@ def load_bc_para(data_dir: Path = GOLDEN_DIR):
     return bc_para
 
 
-def build_scenario1_simulation(data_dir: Path = GOLDEN_DIR):
+def resolve_mesh_path(mesh_name: str | Path, data_dir: Path = GOLDEN_DIR):
+    mesh_path = Path(mesh_name)
+    if mesh_path.is_absolute():
+        return mesh_path
+
+    data_dir_mesh = data_dir / mesh_path
+    if data_dir_mesh.exists():
+        return data_dir_mesh
+
+    return EXAMPLE_DIR / mesh_path
+
+
+def build_scenario1_simulation(
+    data_dir: Path = GOLDEN_DIR, mesh_name: str | Path = MESH_NAME
+):
     """Build a fully initialized scenario 1 simulation without advancing time."""
-    mesh = edg_acoustics.Mesh(str(data_dir / MESH_NAME), BC_LABELS)
+    mesh = edg_acoustics.Mesh(str(resolve_mesh_path(mesh_name, data_dir)), BC_LABELS)
     sim = edg_acoustics.AcousticsSimulation(RHO0, C0, NX, mesh, BC_LABELS)
     sim.init_BC(edg_acoustics.AbsorbBC(sim.BCnode, load_bc_para(data_dir)))
     sim.init_IC(edg_acoustics.Monopole_IC(MONOPOLE_XYZ, FREQ_UPPER_LIMIT))

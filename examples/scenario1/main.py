@@ -24,7 +24,8 @@ real_valued_impedance_boundary = [
     # {"label": 11, "RI": 0.9}
 ]  # extra labels for real-valued impedance boundary condition, if needed. The label should be the similar to the label in BC_labels. Since it's frequency-independent, only "RI", the real-valued reflection coefficient, is required. If not needed, just clear the elements of this list and keep the empty list.
 
-mesh_name = "scenario1_coarser.msh"  # name of the mesh file. The mesh file should be in the same folder as this script.
+# Generated from scenario1_fine.geo for CUDA profiling without full-fine OOM.
+mesh_name = "scenario1_profile_lc0p20.msh"
 monopole_xyz = numpy.array(
     [3.04, 2.59, 1.62]
 )  # x,y,z coordinate of the source in the room
@@ -39,7 +40,7 @@ recy = numpy.array([1.76])
 recz = numpy.array([1.62])
 rec = numpy.vstack((recx, recy, recz))  # dim:[3,n_rec]
 
-impulse_length = 0.1  # total simulation time in seconds
+impulse_length = 0.001  # total simulation time in seconds
 save_every_Nstep = 10  # save the results every N steps
 temporary_save_Nstep = 5000  # save the results every N steps temporarily during the simulation. The temporary results will be saved in the root directory of this repo.
 
