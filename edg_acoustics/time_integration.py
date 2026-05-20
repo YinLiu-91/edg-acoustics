@@ -89,7 +89,94 @@ class TSI_TI(TimeIntegrator):
     ):
         super().__init__(L_operator, dtscale, CFL)
         self.Nt = kwargs["Nt"]
+        self.taylor_coefficients = [
+            self.dt**Tind / math.factorial(Tind) for Tind in range(1, self.Nt + 1)
+        ]
+        owner = getattr(L_operator, "__self__", None)
+        self.L_operator_packed = getattr(owner, "RHS_operator_packed", None)
+        self._state_buffers = None
+        self._packed_state_buffer = None
         print("TSI_TI initialized.")
+
+    def _copy_state_to_buffers(
+        self,
+        P: torch.tensor,
+        Vx: torch.tensor,
+        Vy: torch.tensor,
+        Vz: torch.tensor,
+    ):
+        if (
+            self._state_buffers is None
+            or self._state_buffers[0].shape != P.shape
+            or self._state_buffers[0].device != P.device
+            or self._state_buffers[0].dtype != P.dtype
+        ):
+            self._state_buffers = tuple(
+                torch.empty_like(state) for state in (P, Vx, Vy, Vz)
+            )
+
+        P0, Vx0, Vy0, Vz0 = self._state_buffers
+        P0.copy_(P)
+        Vx0.copy_(Vx)
+        Vy0.copy_(Vy)
+        Vz0.copy_(Vz)
+        return P0, Vx0, Vy0, Vz0
+
+    def _copy_packed_state_to_buffer(self, Q_flat: torch.tensor):
+        if (
+            self._packed_state_buffer is None
+            or self._packed_state_buffer.shape != Q_flat.shape
+            or self._packed_state_buffer.device != Q_flat.device
+            or self._packed_state_buffer.dtype != Q_flat.dtype
+        ):
+            self._packed_state_buffer = torch.empty_like(Q_flat)
+
+        self._packed_state_buffer.copy_(Q_flat)
+        return self._packed_state_buffer
+
+    @staticmethod
+    def _copy_boundary_derivatives(BC: edg_acoustics.AbsorbBC):
+        for index, paras in enumerate(BC.BCpara):
+            for polekey in paras:
+                if polekey == "RP":
+                    BC.BCvar[index]["phi"].copy_(BC.BCvar[index]["PHI"])
+                elif polekey == "CP":
+                    BC.BCvar[index]["kexi1"].copy_(BC.BCvar[index]["KEXI1"])
+                    BC.BCvar[index]["kexi2"].copy_(BC.BCvar[index]["KEXI2"])
+
+    def _accumulate_boundary_derivatives(
+        self, BC: edg_acoustics.AbsorbBC, coefficient: float
+    ):
+        for index, paras in enumerate(BC.BCpara):
+            for polekey in paras:
+                if polekey == "RP":
+                    BC.BCvar[index]["PHI"].add_(
+                        BC.BCvar[index]["phi"], alpha=coefficient
+                    )
+                elif polekey == "CP":
+                    BC.BCvar[index]["KEXI1"].add_(
+                        BC.BCvar[index]["kexi1"], alpha=coefficient
+                    )
+                    BC.BCvar[index]["KEXI2"].add_(
+                        BC.BCvar[index]["kexi2"], alpha=coefficient
+                    )
+
+    def step_dt_packed(
+        self,
+        Q_flat: torch.tensor,
+        BC: edg_acoustics.AbsorbBC,
+    ):
+        """Evolve a packed ``[Np, 4 * N_tets]`` state by one time step."""
+        if self.L_operator_packed is None:
+            raise RuntimeError("Packed RHS operator is not available.")
+
+        Q0 = self._copy_packed_state_to_buffer(Q_flat)
+        self._copy_boundary_derivatives(BC)
+
+        for coefficient in self.taylor_coefficients:
+            Q0, BC.BCvar = self.L_operator_packed(Q0, BC.BCvar)
+            Q_flat.add_(Q0, alpha=coefficient)
+            self._accumulate_boundary_derivatives(BC, coefficient)
 
     def step_dt(
         self,
@@ -114,46 +201,18 @@ class TSI_TI(TimeIntegrator):
         #   P := P(T) and P(T + dt)
         # the same for all the other variables
         ##########################
-        P0 = P.clone()
-        Vx0 = Vx.clone()
-        Vy0 = Vy.clone()
-        Vz0 = Vz.clone()
-
-        for index, paras in enumerate(BC.BCpara):
-            for polekey in paras:
-                if polekey == "RP":
-                    BC.BCvar[index]["phi"] = BC.BCvar[index]["PHI"].clone()
-                elif polekey == "CP":
-                    BC.BCvar[index]["kexi1"] = BC.BCvar[index]["KEXI1"].clone()
-                    BC.BCvar[index]["kexi2"] = BC.BCvar[index]["KEXI2"].clone()
+        P0, Vx0, Vy0, Vz0 = self._copy_state_to_buffers(P, Vx, Vy, Vz)
+        self._copy_boundary_derivatives(BC)
 
         ##########################
-        for Tind in range(1, self.Nt + 1):
+        for Tind, coefficient in enumerate(self.taylor_coefficients, start=1):
             # Compute L (L^{Tind-1} q)
             P0, Vx0, Vy0, Vz0, BC.BCvar = self.L_operator(P0, Vx0, Vy0, Vz0, BC.BCvar)
 
             # Add the Taylor term \frac{dt^{Tind}}{Tind!}L^{Tind}q
-            Vx += self.dt**Tind / math.factorial(Tind) * (Vx0)
-            Vy += self.dt**Tind / math.factorial(Tind) * (Vy0)
-            Vz += self.dt**Tind / math.factorial(Tind) * (Vz0)
-            P += self.dt**Tind / math.factorial(Tind) * (P0)
+            Vx.add_(Vx0, alpha=coefficient)
+            Vy.add_(Vy0, alpha=coefficient)
+            Vz.add_(Vz0, alpha=coefficient)
+            P.add_(P0, alpha=coefficient)
 
-            for index, paras in enumerate(BC.BCpara):
-                for polekey in paras:
-                    if polekey == "RP":
-                        BC.BCvar[index]["PHI"] += (
-                            self.dt**Tind
-                            / math.factorial(Tind)
-                            * BC.BCvar[index]["phi"]
-                        )
-                    elif polekey == "CP":
-                        BC.BCvar[index]["KEXI1"] += (
-                            self.dt**Tind
-                            / math.factorial(Tind)
-                            * BC.BCvar[index]["kexi1"]
-                        )
-                        BC.BCvar[index]["KEXI2"] += (
-                            self.dt**Tind
-                            / math.factorial(Tind)
-                            * BC.BCvar[index]["kexi2"]
-                        )
+            self._accumulate_boundary_derivatives(BC, coefficient)

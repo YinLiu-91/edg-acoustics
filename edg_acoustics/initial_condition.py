@@ -71,8 +71,14 @@ class Monopole_IC(InitialCondition):
             halfwidth (float): halfwidth of the initial Gaussian pulse.
         """
         # Given data points
-        x_points = torch.tensor([20, 300, 500, 800, 1000, 2000, 4000, 8000])
-        y_points = torch.tensor([0.6, 0.4, 0.33, 0.23, 0.17, 0.09, 0.05, 0.015])
+        x_points = torch.tensor(
+            [20, 300, 500, 800, 1000, 2000, 4000, 8000],
+            dtype=device_ini.dtype,
+        )
+        y_points = torch.tensor(
+            [0.6, 0.4, 0.33, 0.23, 0.17, 0.09, 0.05, 0.015],
+            dtype=device_ini.dtype,
+        )
 
         linear_interp = interp1d(x_points, y_points, kind="linear")
 
@@ -88,17 +94,23 @@ class Monopole_IC(InitialCondition):
                 + (xyz[2] - self.source_xyz[2]) ** 2
             )
             / self.halfwidth**2,
-        ).to(device_ini.dtype)
+        ).to(device=xyz.device, dtype=device_ini.dtype)
         return pressure
 
     def VXinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in x-direction."""
-        return torch.zeros([xyz.shape[1], xyz.shape[2]]).to(device_ini.dtype)
+        return torch.zeros(
+            [xyz.shape[1], xyz.shape[2]], device=xyz.device, dtype=device_ini.dtype
+        )
 
     def VYinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in y-direction."""
-        return torch.zeros([xyz.shape[1], xyz.shape[2]]).to(device_ini.dtype)
+        return torch.zeros(
+            [xyz.shape[1], xyz.shape[2]], device=xyz.device, dtype=device_ini.dtype
+        )
 
     def VZinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in z-direction."""
-        return torch.zeros([xyz.shape[1], xyz.shape[2]]).to(device_ini.dtype)
+        return torch.zeros(
+            [xyz.shape[1], xyz.shape[2]], device=xyz.device, dtype=device_ini.dtype
+        )

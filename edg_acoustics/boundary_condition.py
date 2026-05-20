@@ -47,7 +47,11 @@ class BoundaryCondition(abc.ABC):
             BCvar.append({"label": paras["label"]})
             BCvar[index].update(
                 {
-                    key: torch.zeros(BCnode[index]["map"].shape).to(device_ini.device)
+                    key: torch.zeros(
+                        BCnode[index]["map"].shape,
+                        device=device_ini.device,
+                        dtype=device_ini.dtype,
+                    )
                     for key in ["vn", "ou", "in"]
                 }
             )
@@ -56,8 +60,10 @@ class BoundaryCondition(abc.ABC):
                     BCvar[index].update(
                         {
                             key: torch.zeros(
-                                [paras["RP"].shape[1], BCnode[index]["map"].shape[0]]
-                            ).to(device_ini.device)
+                                [paras["RP"].shape[1], BCnode[index]["map"].shape[0]],
+                                device=device_ini.device,
+                                dtype=device_ini.dtype,
+                            )
                             for key in ["phi", "PHI"]
                         }
                     )
@@ -65,8 +71,10 @@ class BoundaryCondition(abc.ABC):
                     BCvar[index].update(
                         {
                             key: torch.zeros(
-                                [paras["CP"].shape[1], BCnode[index]["map"].shape[0]]
-                            ).to(device_ini.device)
+                                [paras["CP"].shape[1], BCnode[index]["map"].shape[0]],
+                                device=device_ini.device,
+                                dtype=device_ini.dtype,
+                            )
                             for key in ["kexi1", "kexi2", "KEXI1", "KEXI2"]
                         }
                     )
@@ -102,7 +110,7 @@ class BoundaryCondition(abc.ABC):
             AssertionError: If the number of BC types is not the same in the BC_labels and BC_para, an error is raised.
             AssertionError: If the causality and reality conditions are not met, an error is raised.
         """
-        omega = torch.arange(1.0, freq_max)
+        omega = torch.arange(1.0, freq_max, dtype=device_ini.dtype)
 
         assert len(BCpara) == len(BCnode), (
             "[edg_acoustics.BoundaryCondition] The number of BC types must be the same "
@@ -156,7 +164,7 @@ class BoundaryCondition(abc.ABC):
         Returns:
             Re (torch.tensor): reflection coefficient at the frequencies of omega.
         """
-        Re = torch.ones(omega.shape)
+        Re = torch.ones(omega.shape, device=omega.device, dtype=omega.dtype)
 
         for polekey in paras:
             if polekey == "RI":

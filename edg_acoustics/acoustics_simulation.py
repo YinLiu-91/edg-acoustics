@@ -15,11 +15,16 @@ import time
 import torch
 import sys
 import triton
-from line_profiler import profile
-import triton
 import triton.language as tl
 
 import edg_acoustics.device_ini as device_ini
+
+try:
+    from line_profiler import profile
+except ImportError:
+
+    def profile(func):
+        return func
 
 __all__ = ["AcousticsSimulation", "NODETOL"]
 
@@ -290,6 +295,317 @@ class AcousticsSimulation:
         self.dtscale = (
             AcousticsSimulation.diameter_3d(self.Fscale) / self.c0 / (2 * self.Nx + 1)
         )
+        self.init_runtime_buffers()
+        self.cache_static_indices()
+
+    def init_runtime_buffers(self):
+        """Preallocate buffers reused by RHS computations."""
+        face_shape = self.Fscale.shape
+        node_shape = (self.Np, self.N_tets)
+        kwargs = {"device": self.device, "dtype": device_ini.dtype}
+        self._dVx = torch.empty(face_shape, **kwargs)
+        self._dVy = torch.empty(face_shape, **kwargs)
+        self._dVz = torch.empty(face_shape, **kwargs)
+        self._dP = torch.empty(face_shape, **kwargs)
+        self._fluxVx = torch.empty(face_shape, **kwargs)
+        self._fluxVy = torch.empty(face_shape, **kwargs)
+        self._fluxVz = torch.empty(face_shape, **kwargs)
+        self._fluxP = torch.empty(face_shape, **kwargs)
+        self._jump_left = torch.empty(self.vmapM.shape, **kwargs)
+        self._jump_right = torch.empty(self.vmapP.shape, **kwargs)
+        self._q_by_node = torch.empty((self.Np, 4 * self.N_tets), **kwargs)
+        self._q_by_node_view = self._q_by_node.view(self.Np, 4, self.N_tets)
+        self._dQdr_by_node = torch.empty_like(self._q_by_node)
+        self._dQds_by_node = torch.empty_like(self._q_by_node)
+        self._dQdt_by_node = torch.empty_like(self._q_by_node)
+        self._dQdr_view = self._dQdr_by_node.view(self.Np, 4, self.N_tets)
+        self._dQds_view = self._dQds_by_node.view(self.Np, 4, self.N_tets)
+        self._dQdt_view = self._dQdt_by_node.view(self.Np, 4, self.N_tets)
+        self._dPdx = torch.empty(node_shape, **kwargs)
+        self._dPdy = torch.empty(node_shape, **kwargs)
+        self._dPdz = torch.empty(node_shape, **kwargs)
+        self._divV = torch.empty(node_shape, **kwargs)
+        self._metric_p = self.rst_xyz * (-(self.c0**2) * self.rho0)
+        self._metric_v = self.rst_xyz * (-1.0 / self.rho0)
+        self._flux_by_face = torch.empty((4 * self.Nfp, 4 * self.N_tets), **kwargs)
+        self._flux_by_face_view = self._flux_by_face.view(4 * self.Nfp, 4, self.N_tets)
+        self._surface_by_node = torch.empty((self.Np, 4 * self.N_tets), **kwargs)
+        self._surface_view = self._surface_by_node.view(self.Np, 4, self.N_tets)
+        self._face_left_packed = torch.empty((4, face_shape[0] * face_shape[1]), **kwargs)
+        self._face_right_packed = torch.empty_like(self._face_left_packed)
+        self._rhs_by_node_buffers = tuple(
+            torch.empty((self.Np, 4 * self.N_tets), **kwargs) for _ in range(2)
+        )
+        self._rhs_by_node_views = tuple(
+            rhs.view(self.Np, 4, self.N_tets) for rhs in self._rhs_by_node_buffers
+        )
+        self._rhs_buffer_index = 0
+        self._cuda_step_graph = None
+
+    def cache_static_indices(self):
+        """Cache immutable flattened indices and boundary normals."""
+        self._vmapM = self.vmapM.to(device=self.device, dtype=torch.long)
+        self._vmapP = self.vmapP.to(device=self.device, dtype=torch.long)
+        self._vmapM_q = self._build_packed_face_indices(self._vmapM)
+        self._vmapP_q = self._build_packed_face_indices(self._vmapP)
+        self._nx_flat = self.n_xyz[0].reshape(-1)
+        self._ny_flat = self.n_xyz[1].reshape(-1)
+        self._nz_flat = self.n_xyz[2].reshape(-1)
+
+        for node in self.BCnode:
+            node["map"] = node["map"].to(device=self.device, dtype=torch.long)
+            node["vmap"] = node["vmap"].to(device=self.device, dtype=torch.long)
+            node["vmap_q"] = self._build_packed_face_indices(node["vmap"])
+            node["flux_map_q"] = self._build_packed_flux_indices(node["map"])
+            node["nx"] = self._nx_flat[node["map"]]
+            node["ny"] = self._ny_flat[node["map"]]
+            node["nz"] = self._nz_flat[node["map"]]
+
+    def cache_boundary_parameters(self):
+        """Cache boundary parameters as tensors without changing saved BC metadata."""
+        self._BC_cache = []
+        for index, paras in enumerate(self.BC.BCpara):
+            bcvar = self.BC.BCvar[index]
+            cache = {
+                "RI": torch.as_tensor(
+                    paras["RI"], device=self.device, dtype=device_ini.dtype
+                ),
+                "boundary_q": torch.empty(
+                    (4, bcvar["vn"].numel()),
+                    device=self.device,
+                    dtype=device_ini.dtype,
+                ),
+                "boundary_temp": torch.empty_like(bcvar["vn"]),
+                "boundary_temp2": torch.empty_like(bcvar["vn"]),
+                "boundary_flux": torch.empty(
+                    (4, bcvar["vn"].numel()),
+                    device=self.device,
+                    dtype=device_ini.dtype,
+                ),
+                "incoming_outgoing": torch.empty_like(bcvar["vn"]),
+            }
+            if "RP" in paras:
+                rp = torch.as_tensor(
+                    paras["RP"], device=self.device, dtype=device_ini.dtype
+                )
+                cache["RP_A"] = rp[0].reshape(-1, 1)
+                cache["RP_zeta"] = rp[1].reshape(-1, 1)
+                cache["RP_terms"] = torch.empty_like(bcvar["phi"])
+                cache["RP_sum"] = torch.empty_like(bcvar["vn"])
+            if "CP" in paras:
+                cp = torch.as_tensor(
+                    paras["CP"], device=self.device, dtype=device_ini.dtype
+                )
+                cache["CP_B"] = cp[0].reshape(-1, 1)
+                cache["CP_C"] = cp[1].reshape(-1, 1)
+                cache["CP_alpha"] = cp[2].reshape(-1, 1)
+                cache["CP_beta"] = cp[3].reshape(-1, 1)
+                cache["CP_terms"] = torch.empty_like(bcvar["kexi1"])
+                cache["CP_sum"] = torch.empty_like(bcvar["vn"])
+                cache["kexi1_temp"] = torch.empty_like(
+                    self.BC.BCvar[index]["kexi1"]
+                )
+            self._BC_cache.append(cache)
+
+    def _compute_jump(self, field: torch.tensor, out: torch.tensor):
+        field_flat = field.reshape(-1)
+        torch.index_select(field_flat, 0, self._vmapM, out=self._jump_left)
+        torch.index_select(field_flat, 0, self._vmapP, out=self._jump_right)
+        torch.sub(self._jump_left, self._jump_right, out=out.reshape(-1))
+
+    def _build_packed_face_indices(self, field_indices: torch.tensor):
+        node_ids = torch.div(field_indices, self.N_tets, rounding_mode="floor")
+        tet_ids = torch.remainder(field_indices, self.N_tets)
+        variable_offsets = (
+            torch.arange(4, device=self.device, dtype=torch.long).reshape(4, 1)
+            * self.N_tets
+        )
+        packed_indices = (
+            node_ids.reshape(1, -1) * (4 * self.N_tets)
+            + variable_offsets
+            + tet_ids.reshape(1, -1)
+        )
+        return packed_indices.reshape(-1)
+
+    def _build_packed_flux_indices(self, face_indices: torch.tensor):
+        face_ids = torch.div(face_indices, self.N_tets, rounding_mode="floor")
+        tet_ids = torch.remainder(face_indices, self.N_tets)
+        variable_offsets = (
+            torch.arange(4, device=self.device, dtype=torch.long).reshape(4, 1)
+            * self.N_tets
+        )
+        packed_indices = (
+            face_ids.reshape(1, -1) * (4 * self.N_tets)
+            + variable_offsets
+            + tet_ids.reshape(1, -1)
+        )
+        return packed_indices.reshape(-1)
+
+    def _next_rhs_buffers(self):
+        self._rhs_buffer_index = 1 - self._rhs_buffer_index
+        return (
+            self._rhs_by_node_buffers[self._rhs_buffer_index],
+            self._rhs_by_node_views[self._rhs_buffer_index],
+        )
+
+    def _pack_fields_by_node(
+        self,
+        P: torch.tensor,
+        Vx: torch.tensor,
+        Vy: torch.tensor,
+        Vz: torch.tensor,
+    ):
+        q_view = self._q_by_node_view
+        q_view[:, 0, :].copy_(P)
+        q_view[:, 1, :].copy_(Vx)
+        q_view[:, 2, :].copy_(Vy)
+        q_view[:, 3, :].copy_(Vz)
+        return self._q_by_node
+
+    def _compute_packed_derivatives(self, q_by_node: torch.tensor):
+        torch.mm(self.Dr, q_by_node, out=self._dQdr_by_node)
+        torch.mm(self.Ds, q_by_node, out=self._dQds_by_node)
+        torch.mm(self.Dt, q_by_node, out=self._dQdt_by_node)
+
+    def _compute_packed_jump(self, q_by_node: torch.tensor):
+        q_flat = q_by_node.reshape(-1)
+        torch.index_select(
+            q_flat, 0, self._vmapM_q, out=self._face_left_packed.reshape(-1)
+        )
+        torch.index_select(
+            q_flat, 0, self._vmapP_q, out=self._face_right_packed.reshape(-1)
+        )
+        torch.sub(
+            self._face_left_packed[1],
+            self._face_right_packed[1],
+            out=self._dVx.reshape(-1),
+        )
+        torch.sub(
+            self._face_left_packed[2],
+            self._face_right_packed[2],
+            out=self._dVy.reshape(-1),
+        )
+        torch.sub(
+            self._face_left_packed[3],
+            self._face_right_packed[3],
+            out=self._dVz.reshape(-1),
+        )
+        torch.sub(
+            self._face_left_packed[0],
+            self._face_right_packed[0],
+            out=self._dP.reshape(-1),
+        )
+
+    def _combine_derivative(
+        self, variable_index: int, coordinate_index: int, out: torch.tensor
+    ):
+        torch.mul(
+            self.rst_xyz[0, coordinate_index],
+            self._dQdr_view[:, variable_index, :],
+            out=out,
+        )
+        out.addcmul_(
+            self.rst_xyz[1, coordinate_index],
+            self._dQds_view[:, variable_index, :],
+        )
+        out.addcmul_(
+            self.rst_xyz[2, coordinate_index],
+            self._dQdt_view[:, variable_index, :],
+        )
+
+    def _compute_volume_derivatives(self):
+        self._combine_derivative(0, 0, self._dPdx)
+        self._combine_derivative(0, 1, self._dPdy)
+        self._combine_derivative(0, 2, self._dPdz)
+
+        rx = self.rst_xyz[0, 0]
+        sx = self.rst_xyz[1, 0]
+        tx = self.rst_xyz[2, 0]
+        ry = self.rst_xyz[0, 1]
+        sy = self.rst_xyz[1, 1]
+        ty = self.rst_xyz[2, 1]
+        rz = self.rst_xyz[0, 2]
+        sz = self.rst_xyz[1, 2]
+        tz = self.rst_xyz[2, 2]
+
+        torch.mul(rx, self._dQdr_view[:, 1, :], out=self._divV)
+        self._divV.addcmul_(sx, self._dQds_view[:, 1, :])
+        self._divV.addcmul_(tx, self._dQdt_view[:, 1, :])
+        self._divV.addcmul_(ry, self._dQdr_view[:, 2, :])
+        self._divV.addcmul_(sy, self._dQds_view[:, 2, :])
+        self._divV.addcmul_(ty, self._dQdt_view[:, 2, :])
+        self._divV.addcmul_(rz, self._dQdr_view[:, 3, :])
+        self._divV.addcmul_(sz, self._dQds_view[:, 3, :])
+        self._divV.addcmul_(tz, self._dQdt_view[:, 3, :])
+
+    def _compute_volume_rhs(self, rhs_view: torch.tensor):
+        rhs_p = rhs_view[:, 0, :]
+        rhs_vx = rhs_view[:, 1, :]
+        rhs_vy = rhs_view[:, 2, :]
+        rhs_vz = rhs_view[:, 3, :]
+
+        torch.mul(self._metric_v[0, 0], self._dQdr_view[:, 0, :], out=rhs_vx)
+        rhs_vx.addcmul_(self._metric_v[1, 0], self._dQds_view[:, 0, :])
+        rhs_vx.addcmul_(self._metric_v[2, 0], self._dQdt_view[:, 0, :])
+
+        torch.mul(self._metric_v[0, 1], self._dQdr_view[:, 0, :], out=rhs_vy)
+        rhs_vy.addcmul_(self._metric_v[1, 1], self._dQds_view[:, 0, :])
+        rhs_vy.addcmul_(self._metric_v[2, 1], self._dQdt_view[:, 0, :])
+
+        torch.mul(self._metric_v[0, 2], self._dQdr_view[:, 0, :], out=rhs_vz)
+        rhs_vz.addcmul_(self._metric_v[1, 2], self._dQds_view[:, 0, :])
+        rhs_vz.addcmul_(self._metric_v[2, 2], self._dQdt_view[:, 0, :])
+
+        torch.mul(self._metric_p[0, 0], self._dQdr_view[:, 1, :], out=rhs_p)
+        rhs_p.addcmul_(self._metric_p[1, 0], self._dQds_view[:, 1, :])
+        rhs_p.addcmul_(self._metric_p[2, 0], self._dQdt_view[:, 1, :])
+        rhs_p.addcmul_(self._metric_p[0, 1], self._dQdr_view[:, 2, :])
+        rhs_p.addcmul_(self._metric_p[1, 1], self._dQds_view[:, 2, :])
+        rhs_p.addcmul_(self._metric_p[2, 1], self._dQdt_view[:, 2, :])
+        rhs_p.addcmul_(self._metric_p[0, 2], self._dQdr_view[:, 3, :])
+        rhs_p.addcmul_(self._metric_p[1, 2], self._dQds_view[:, 3, :])
+        rhs_p.addcmul_(self._metric_p[2, 2], self._dQdt_view[:, 3, :])
+
+    def _compute_lift_surface(self):
+        torch.mm(self.lift, self._flux_by_face, out=self._surface_by_node)
+
+    def _snapshot_time_state(self):
+        return (
+            self.Q_flat.clone(),
+            [
+                {
+                    key: value.clone()
+                    for key, value in state.items()
+                    if torch.is_tensor(value)
+                }
+                for state in self.BC.BCvar
+            ],
+        )
+
+    def _restore_time_state(self, snapshot):
+        q_snapshot, bc_snapshot = snapshot
+        self.Q_flat.copy_(q_snapshot)
+        for state, state_snapshot in zip(self.BC.BCvar, bc_snapshot):
+            for key, value in state_snapshot.items():
+                state[key].copy_(value)
+
+    def _ensure_cuda_step_graph(self):
+        if self._cuda_step_graph is not None:
+            return self._cuda_step_graph
+        if not torch.cuda.is_available() or self.Q_flat.device.type != "cuda":
+            raise RuntimeError("CUDA graph time stepping requires CUDA tensors.")
+
+        snapshot = self._snapshot_time_state()
+        self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
+        torch.cuda.synchronize()
+        self._restore_time_state(snapshot)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
+        self._restore_time_state(snapshot)
+        self._cuda_step_graph = graph
+        return graph
 
     # Static methods ---------------------------------------------------------------------------------------------------
     @staticmethod
@@ -385,8 +701,10 @@ class AcousticsSimulation:
 
         # Start by allocating space for the xyz-coordinates for collocation points on each element
         xyz = torch.zeros(
-            [dim, rst.shape[1], EToV.shape[1]], dtype=device_ini.dtype
-        ).to(device_ini.device)
+            [dim, rst.shape[1], EToV.shape[1]],
+            device=device_ini.device,
+            dtype=device_ini.dtype,
+        )
 
         # Then get shorter references for the indices of the references for each of the nodes of the elements
         # get the indices of the first node of each element
@@ -448,7 +766,11 @@ class AcousticsSimulation:
         simplex_basis = modepy.simplex_onb(dim, Nx)
 
         # Compute van der Monde matrix of simplex_basis over the nodes in rst
-        return torch.from_numpy(modepy.vandermonde(simplex_basis, rst)).to(device_ini.device).to(device_ini.dtype)  # type: ignore
+        return torch.as_tensor(
+            modepy.vandermonde(simplex_basis, rst),
+            device=device_ini.device,
+            dtype=device_ini.dtype,
+        )  # type: ignore
 
     @staticmethod
     def compute_derivative_matrix(Nx: int, rst: numpy.ndarray, dim: int = 3):
@@ -474,9 +796,9 @@ class AcousticsSimulation:
 
         # Return d/dr, d/ds and d/dt matrices
         return (
-            torch.from_numpy(D[0]).to(device).to(device_ini.dtype),
-            torch.from_numpy(D[1]).to(device).to(device_ini.dtype),
-            torch.from_numpy(D[2]).to(device).to(device_ini.dtype),
+            torch.as_tensor(D[0], device=device, dtype=device_ini.dtype),
+            torch.as_tensor(D[1], device=device, dtype=device_ini.dtype),
+            torch.as_tensor(D[2], device=device, dtype=device_ini.dtype),
         )
 
     # ------------------------------------------------------------------------------------------------------------------
@@ -499,7 +821,7 @@ class AcousticsSimulation:
             Nx
         )  # get the number of collocation points per face
 
-        Fmask = torch.zeros([4, Nfp], dtype=torch.int32).to(device)
+        Fmask = torch.zeros([4, Nfp], device=device, dtype=torch.int32)
 
         # Find all the nodes that lie on each surface
         Fmask[0] = torch.nonzero(torch.abs(1 + rst[2]) < node_tol).flatten()
@@ -528,9 +850,11 @@ class AcousticsSimulation:
             Nx
         )  # the number of nodes per surface for basis of polynomial degree Nx
 
-        Emat = torch.zeros([Np, Nfp * 4], dtype=device_ini.dtype).to(device_ini.device)
-        faceR = torch.zeros([1, Nfp], dtype=device_ini.dtype).to(device_ini.device)
-        faceS = torch.zeros([1, Nfp], dtype=device_ini.dtype).to(device_ini.device)
+        Emat = torch.zeros(
+            [Np, Nfp * 4], device=device_ini.device, dtype=device_ini.dtype
+        )
+        faceR = torch.zeros([1, Nfp], device=device_ini.device, dtype=device_ini.dtype)
+        faceS = torch.zeros([1, Nfp], device=device_ini.device, dtype=device_ini.dtype)
 
         for face in range(4):
             if face == 0:
@@ -559,7 +883,9 @@ class AcousticsSimulation:
             massFace = numpy.linalg.inv(vandermondeFace @ (vandermondeFace.transpose()))
 
             Emat[Fmask[face], face * Nfp : (face + 1) * Nfp] += (
-                torch.from_numpy(massFace).to(device_ini.dtype).to(device_ini.device)
+                torch.as_tensor(
+                    massFace, device=device_ini.device, dtype=device_ini.dtype
+                )
             )
 
         return V @ (V.t() @ Emat)
@@ -605,8 +931,8 @@ class AcousticsSimulation:
         )
 
         # Compute the derivates of the local coordinates at the nodal points
-        rst_xyz = torch.zeros([3, 3, Np, N_tets], dtype=device_ini.dtype).to(
-            device
+        rst_xyz = torch.zeros(
+            [3, 3, Np, N_tets], device=device, dtype=device_ini.dtype
         )  # pre-allocate memory space
 
         # r
@@ -657,22 +983,16 @@ class AcousticsSimulation:
         frst_xyz = rst_xyz[:, :, Fmask.reshape(-1), :]
 
         # Construct the normals
-        n_xyz = (
-            torch.zeros([3, 4 * Nfp, N_tets]).to(device_ini.dtype).to(device_ini.device)
+        n_xyz = torch.zeros(
+            [3, 4 * Nfp, N_tets],
+            device=device_ini.device,
+            dtype=device_ini.dtype,
         )  # allocate memory space
 
-        face_0_idx = torch.arange(0, Nfp).to(
-            device_ini.device
-        )  # indices of the nodes of face 0
-        face_1_idx = torch.arange(Nfp, 2 * Nfp).to(
-            device_ini.device
-        )  # indices of the nodes of face 1
-        face_2_idx = torch.arange(2 * Nfp, 3 * Nfp).to(
-            device_ini.device
-        )  # indices of the nodes of face 2
-        face_3_idx = torch.arange(3 * Nfp, 4 * Nfp).to(
-            device_ini.device
-        )  # indices of the nodes of face 3
+        face_0_idx = torch.arange(0, Nfp, device=device_ini.device)
+        face_1_idx = torch.arange(Nfp, 2 * Nfp, device=device_ini.device)
+        face_2_idx = torch.arange(2 * Nfp, 3 * Nfp, device=device_ini.device)
+        face_3_idx = torch.arange(3 * Nfp, 4 * Nfp, device=device_ini.device)
 
         # Face 0
         n_xyz[0, face_0_idx, :] = -frst_xyz[2, 0, face_0_idx, :]  # nx
@@ -751,10 +1071,14 @@ class AcousticsSimulation:
         )  # the number of nodes per surface for basis of polynomial degree Nx
         nodeids = torch.arange(N_tets * Np).reshape(Np, N_tets).to(device_ini.device)
 
-        vmapM = torch.zeros([4, Nfp, N_tets], dtype=torch.int32).to(device_ini.device)
-        vmapP = torch.zeros([4, Nfp, N_tets], dtype=torch.int32).to(device_ini.device)
-        tmp = torch.ones(Nfp, dtype=torch.int32).to(device_ini.device)
-        D = torch.zeros([Nfp, Nfp], dtype=device_ini.dtype).to(device_ini.device)
+        vmapM = torch.zeros(
+            [4, Nfp, N_tets], device=device_ini.device, dtype=torch.int32
+        )
+        vmapP = torch.zeros(
+            [4, Nfp, N_tets], device=device_ini.device, dtype=torch.int32
+        )
+        tmp = torch.ones(Nfp, device=device_ini.device, dtype=torch.int32)
+        D = torch.zeros([Nfp, Nfp], device=device_ini.device, dtype=device_ini.dtype)
 
         xV = xyz[0].reshape(-1)  # flatten the x-coordinates
         yV = xyz[1].reshape(-1)
@@ -1041,10 +1365,22 @@ class AcousticsSimulation:
             IC (edg_acoustics.InitialCondition): the initial condition object.
         """
         self.IC = IC
-        self.P = self.IC.Pinit(self.xyz.to(torch.float32)).to(self.device)
-        self.Vx = self.IC.VXinit(self.xyz.to(torch.float32)).to(self.device)
-        self.Vy = self.IC.VYinit(self.xyz.to(torch.float32)).to(self.device)
-        self.Vz = self.IC.VZinit(self.xyz.to(torch.float32)).to(self.device)
+        P = self.IC.Pinit(self.xyz).to(device=self.device, dtype=device_ini.dtype)
+        Vx = self.IC.VXinit(self.xyz).to(device=self.device, dtype=device_ini.dtype)
+        Vy = self.IC.VYinit(self.xyz).to(device=self.device, dtype=device_ini.dtype)
+        Vz = self.IC.VZinit(self.xyz).to(device=self.device, dtype=device_ini.dtype)
+        self.Q_flat = torch.empty(
+            (self.Np, 4 * self.N_tets), device=self.device, dtype=device_ini.dtype
+        )
+        self.Q = self.Q_flat.view(self.Np, 4, self.N_tets)
+        self.P = self.Q[:, 0, :]
+        self.Vx = self.Q[:, 1, :]
+        self.Vy = self.Q[:, 2, :]
+        self.Vz = self.Q[:, 3, :]
+        self.P.copy_(P)
+        self.Vx.copy_(Vx)
+        self.Vy.copy_(Vy)
+        self.Vz.copy_(Vz)
 
     def init_BC(self, BC):
         """load the boundary condition and save it to the :class:`AcousticsSimulation` class.
@@ -1053,6 +1389,7 @@ class AcousticsSimulation:
             BC (edg_acoustics.BoundaryCondition): the boundary condition object.
         """
         self.BC = BC
+        self.cache_boundary_parameters()
 
     def init_rec(self, rec: numpy.ndarray, methodLocate: str = "scipy"):
         """load the receiver locations and save it to the :class:`AcousticsSimulation` class.
@@ -1103,129 +1440,123 @@ class AcousticsSimulation:
             BCvar (list[dict]): updated boundary condition variables.
         """
 
-        # Initialize jump variables
-        dVx = torch.zeros_like(self.Fscale).to(self.device).to(device_ini.dtype)
-        dVy = torch.zeros_like(dVx).to(self.device).to(device_ini.dtype)
-        dVz = torch.zeros_like(dVx).to(self.device).to(device_ini.dtype)
-        dP = torch.zeros_like(dVx).to(self.device).to(device_ini.dtype)
+        q_by_node = self._pack_fields_by_node(P, Vx, Vy, Vz)
+        rhs_by_node, BCvar = self.RHS_operator_packed(q_by_node, BCvar)
+        rhs_view = rhs_by_node.view(self.Np, 4, self.N_tets)
+        return (
+            rhs_view[:, 0, :],
+            rhs_view[:, 1, :],
+            rhs_view[:, 2, :],
+            rhs_view[:, 3, :],
+            BCvar,
+        )
 
-        # calculate jump values across the faces of neighboring elements
-        dVx.reshape(-1)[:] = Vx.reshape(-1)[(self.vmapM)] - Vx.reshape(-1)[(self.vmapP)]
-        # print(f"dVx ID {id(dVx)}, sim.dVx ID {id(self.sim.dVx)}")
-        dVy.reshape(-1)[:] = Vy.reshape(-1)[(self.vmapM)] - Vy.reshape(-1)[(self.vmapP)]
-        dVz.reshape(-1)[:] = Vz.reshape(-1)[(self.vmapM)] - Vz.reshape(-1)[(self.vmapP)]
-        dP.reshape(-1)[:] = P.reshape(-1)[(self.vmapM)] - P.reshape(-1)[(self.vmapP)]
+    def RHS_operator_packed(
+        self,
+        q_by_node: torch.tensor,
+        BCvar: list[dict],
+    ):
+        """Compute packed RHS for ``q_by_node`` shaped ``[Np, 4 * N_tets]``."""
 
-        # Compute the inter-element fluxes
-        fluxVx = self.flux.FluxVx(
-            dVx, dVy, dVz, dP
-        )  # has return object, might make copy,
-        fluxVy = self.flux.FluxVy(dVx, dVy, dVz, dP)
-        fluxVz = self.flux.FluxVz(dVx, dVy, dVz, dP)
-        fluxP = self.flux.FluxP(dVx, dVy, dVz, dP)
+        RHS_Q, RHS_Q_view = self._next_rhs_buffers()
+        RHS_P = RHS_Q_view[:, 0, :]
+        RHS_Vx = RHS_Q_view[:, 1, :]
+        RHS_Vy = RHS_Q_view[:, 2, :]
+        RHS_Vz = RHS_Q_view[:, 3, :]
+        self._compute_packed_derivatives(q_by_node)
+        dVx = self._dVx
+        dVy = self._dVy
+        dVz = self._dVz
+        dP = self._dP
 
-        for index, paras in enumerate(self.BC.BCpara):
+        self._compute_packed_jump(q_by_node)
+
+        flux_view = self._flux_by_face_view
+        fluxP = flux_view[:, 0, :]
+        fluxVx = flux_view[:, 1, :]
+        fluxVy = flux_view[:, 2, :]
+        fluxVz = flux_view[:, 3, :]
+        self.flux.compute_all(dVx, dVy, dVz, dP, fluxVx, fluxVy, fluxVz, fluxP)
+
+        flux_flat = self._flux_by_face.reshape(-1)
+
+        for index, bc_cache in enumerate(self._BC_cache):
             # 'RI' refers to the limit value of the reflection coefficient as the frequency approaches infinity, i.e., :math:`R_\\inf`.
             # 'RP' refers to real pole pairs, i.e., :math:`A` (stored in 1st row), :math:`\\zeta` (stored in 2nd row).
             #     'CP' refers to complex pole pairs, i.e., :math:`B` (stored in 1st row), :math:`C` (stored in 2nd row),
             #          :math:`\\alpha` (stored in 3rd row), :math:`\\beta`(stored in 4th row).
-            BCvar[index]["vn"] = (
-                (self.n_xyz[0]).reshape(-1)[self.BCnode[index]["map"]]
-                * Vx.reshape(-1)[self.BCnode[index]["vmap"]]
-                + (self.n_xyz[1]).reshape(-1)[self.BCnode[index]["map"]]
-                * Vy.reshape(-1)[self.BCnode[index]["vmap"]]
-                + (self.n_xyz[2]).reshape(-1)[self.BCnode[index]["map"]]
-                * Vz.reshape(-1)[self.BCnode[index]["vmap"]]
+            node = self.BCnode[index]
+            bcvar = BCvar[index]
+            boundary_q = bc_cache["boundary_q"]
+            torch.index_select(
+                q_by_node.reshape(-1),
+                0,
+                node["vmap_q"],
+                out=boundary_q.reshape(-1),
             )
-            BCvar[index]["ou"] = (
-                BCvar[index]["vn"]
-                + P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 / self.c0
-            )
-            BCvar[index]["in"] = BCvar[index]["ou"] * paras["RI"]
+            boundary_p = boundary_q[0]
+            boundary_temp = bc_cache["boundary_temp"]
+            boundary_temp2 = bc_cache["boundary_temp2"]
+            boundary_flux = bc_cache["boundary_flux"]
+            incoming_outgoing = bc_cache["incoming_outgoing"]
+            torch.mul(node["nx"], boundary_q[1], out=bcvar["vn"])
+            bcvar["vn"].addcmul_(node["ny"], boundary_q[2])
+            bcvar["vn"].addcmul_(node["nz"], boundary_q[3])
+            torch.mul(boundary_p, 1.0 / (self.rho0 * self.c0), out=boundary_temp)
+            torch.add(bcvar["vn"], boundary_temp, out=bcvar["ou"])
+            torch.mul(bcvar["ou"], bc_cache["RI"], out=bcvar["in"])
 
-            for polekey in paras:
-                if polekey == "RP":
-                    for i in range(paras["RP"].shape[1]):
-                        BCvar[index]["in"] += paras["RP"][0, i] * BCvar[index]["phi"][i]
-                        BCvar[index]["phi"][i] = (
-                            BCvar[index]["ou"]
-                            - paras["RP"][1, i] * BCvar[index]["phi"][i]
-                        )  # RHS for BCvar[index]['phi']
+            if "RP_A" in bc_cache:
+                phi = bcvar["phi"]
+                torch.mul(bc_cache["RP_A"], phi, out=bc_cache["RP_terms"])
+                torch.sum(bc_cache["RP_terms"], dim=0, out=bc_cache["RP_sum"])
+                bcvar["in"].add_(bc_cache["RP_sum"])
+                phi.copy_(bcvar["ou"].unsqueeze(0) - bc_cache["RP_zeta"] * phi)
 
-                elif polekey == "CP":
-                    for i in range(paras["CP"].shape[1]):
-                        BCvar[index]["in"] += (
-                            paras["CP"][0, i] * BCvar[index]["kexi1"][i]
-                            + paras["CP"][1, i] * BCvar[index]["kexi2"][i]
-                        )
-                        kexi1temp = BCvar[index]["kexi1"][i].clone()
-                        BCvar[index]["kexi1"][i] = (
-                            BCvar[index]["ou"]
-                            - paras["CP"][2, i] * BCvar[index]["kexi1"][i]
-                            - paras["CP"][3, i] * BCvar[index]["kexi2"][i]
-                        )  # RHS for BCvar[index]['kexi1']
-                        BCvar[index]["kexi2"][i] = (
-                            -paras["CP"][2, i] * BCvar[index]["kexi2"][i]
-                            + paras["CP"][3, i] * kexi1temp
-                        )  # RHS for BCvar[index]['kexi2']
+            if "CP_B" in bc_cache:
+                kexi1 = bcvar["kexi1"]
+                kexi2 = bcvar["kexi2"]
+                torch.mul(bc_cache["CP_B"], kexi1, out=bc_cache["CP_terms"])
+                bc_cache["CP_terms"].addcmul_(bc_cache["CP_C"], kexi2)
+                torch.sum(bc_cache["CP_terms"], dim=0, out=bc_cache["CP_sum"])
+                bcvar["in"].add_(bc_cache["CP_sum"])
+                bc_cache["kexi1_temp"].copy_(kexi1)
+                kexi1.copy_(
+                    bcvar["ou"].unsqueeze(0)
+                    - bc_cache["CP_alpha"] * kexi1
+                    - bc_cache["CP_beta"] * kexi2
+                )
+                kexi2.copy_(
+                    -bc_cache["CP_alpha"] * kexi2
+                    + bc_cache["CP_beta"] * bc_cache["kexi1_temp"]
+                )
 
-            fluxVx.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[0]).reshape(-1)[
-                self.BCnode[index]["map"]
-            ] * P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 - (
-                self.n_xyz[0]
-            ).reshape(
-                -1
-            )[
-                self.BCnode[index]["map"]
-            ] * self.c0 * (
-                BCvar[index]["ou"] + BCvar[index]["in"]
-            ) / 2
+            torch.add(bcvar["ou"], bcvar["in"], out=incoming_outgoing)
+            torch.mul(boundary_p, 1.0 / self.rho0, out=boundary_temp)
+            boundary_temp.add_(incoming_outgoing, alpha=-0.5 * self.c0)
+            torch.mul(node["nx"], boundary_temp, out=boundary_flux[1])
+            torch.mul(node["ny"], boundary_temp, out=boundary_flux[2])
+            torch.mul(node["nz"], boundary_temp, out=boundary_flux[3])
 
-            fluxVy.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[1]).reshape(-1)[
-                self.BCnode[index]["map"]
-            ] * P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 - (
-                self.n_xyz[1]
-            ).reshape(
-                -1
-            )[
-                self.BCnode[index]["map"]
-            ] * self.c0 * (
-                BCvar[index]["ou"] + BCvar[index]["in"]
-            ) / 2
+            boundary_temp.copy_(bcvar["vn"])
+            boundary_temp.add_(bcvar["ou"], alpha=-0.5)
+            boundary_temp.add_(bcvar["in"], alpha=0.5)
+            boundary_temp.mul_((self.c0**2) * self.rho0)
+            boundary_flux[0].copy_(boundary_temp)
+            flux_flat[node["flux_map_q"]] = boundary_flux.reshape(-1)
 
-            fluxVz.reshape(-1)[self.BCnode[index]["map"]] = (self.n_xyz[2]).reshape(-1)[
-                self.BCnode[index]["map"]
-            ] * P.reshape(-1)[self.BCnode[index]["vmap"]] / self.rho0 - (
-                self.n_xyz[2]
-            ).reshape(
-                -1
-            )[
-                self.BCnode[index]["map"]
-            ] * self.c0 * (
-                BCvar[index]["ou"] + BCvar[index]["in"]
-            ) / 2
+        flux_view.mul_(self.Fscale.unsqueeze(1))
 
-            fluxP.reshape(-1)[self.BCnode[index]["map"]] = (
-                self.c0**2
-                * self.rho0
-                * (BCvar[index]["vn"] - 0.5 * (BCvar[index]["ou"] - BCvar[index]["in"]))
-            )
+        self._compute_volume_rhs(RHS_Q_view)
+        self._compute_lift_surface()
+        surface = self._surface_view
 
-        dPdx, dPdy, dPdz = self.grad_3d(P, "xyz")
-        RHS_P = -self.c0**2 * self.rho0 * (
-            self.grad_3d(Vx, "x") + self.grad_3d(Vy, "y") + self.grad_3d(Vz, "z")  # type: ignore
-        ) + (self.lift) @ (self.Fscale * fluxP)
-        RHS_Vx = -dPdx / self.rho0 + (self.lift) @ (self.Fscale * fluxVx)
-        RHS_Vy = -dPdy / self.rho0 + (self.lift) @ (self.Fscale * fluxVy)
-        RHS_Vz = -dPdz / self.rho0 + (self.lift) @ (self.Fscale * fluxVz)
+        RHS_P.add_(surface[:, 0, :])
+        RHS_Vx.add_(surface[:, 1, :])
+        RHS_Vy.add_(surface[:, 2, :])
+        RHS_Vz.add_(surface[:, 3, :])
 
-        return (
-            RHS_P,
-            RHS_Vx,
-            RHS_Vy,
-            RHS_Vz,
-            BCvar,
-        )
+        return RHS_Q, BCvar
 
     def time_integration(self, **kwargs):
         """Perform time integration for the acoustics simulation. Additional keyword arguments are optional and can vary:
@@ -1236,6 +1567,9 @@ class AcousticsSimulation:
             delta_step (int): print solution every delta_step time steps.
             save_step (int): save solution every save_step time steps.
             format (str): the format of the file to save the results. Can be either 'mat' or 'npy'. The default format is 'mat'.
+            progress (bool): print progress and timing information. The default is True.
+            synchronize_timing (bool): synchronize CUDA before final timing. The default is False.
+            use_cuda_graph (bool): replay a captured CUDA graph for each packed time step. The default is False.
 
         Returns:
             prec (torch.tensor): Pressure field at the microphone locations.
@@ -1249,6 +1583,7 @@ class AcousticsSimulation:
         elif "n_time_steps" in kwargs:
             # Directly use the number of timesteps
             self.Ntimesteps = kwargs["n_time_steps"]
+            total_time = self.Ntimesteps * self.time_integrator.dt
 
         elif "total_time" in kwargs:
             # Compute the number of time steps from the total simulation time and the time step size of the time integrator
@@ -1258,29 +1593,56 @@ class AcousticsSimulation:
         else:
             raise ValueError("You need to set n_time_steps or total_time...")
 
-        print(f"Total simulation time is {total_time}")
-        print(f"Total number of simulation steps is {self.Ntimesteps}")
+        progress = kwargs.get("progress", True)
+        synchronize_timing = kwargs.get("synchronize_timing", False)
+        use_cuda_graph = (
+            kwargs.get("use_cuda_graph", False)
+            and torch.cuda.is_available()
+            and hasattr(self, "Q_flat")
+            and self.Q_flat.device.type == "cuda"
+            and hasattr(self.time_integrator, "step_dt_packed")
+        )
+        if progress:
+            print(f"Total simulation time is {total_time}")
+            print(f"Total number of simulation steps is {self.Ntimesteps}")
 
         self.prec = torch.zeros(
-            [self.rec.shape[1], self.Ntimesteps], dtype=device_ini.dtype
-        ).to(device_ini.device)
+            [self.rec.shape[1], self.Ntimesteps],
+            device=device_ini.device,
+            dtype=device_ini.dtype,
+        )
 
-        curTime = time.time()
+        cuda_step_graph = self._ensure_cuda_step_graph() if use_cuda_graph else None
+        startTime = time.time()
+        curTime = startTime
         prevEstimated = 0
         # Step the solution
         for StepIndex in range(self.Ntimesteps):
             # for StepIndex in range(1):
 
-            self.time_integrator.step_dt(
-                self.P,
-                self.Vx,
-                self.Vy,
-                self.Vz,
-                self.BC,
-            )  # by changing the value in place, the ID of the object is not changed (no new object is created), but the previous value is lost, which is not important here, because the previous value is not used anymore``
-            self.prec[:, StepIndex] = torch.diag(self.sampleWeight @ self.P[:, self.nodeindex])  # type: ignore
+            if cuda_step_graph is not None:
+                cuda_step_graph.replay()
+            elif hasattr(self, "Q_flat") and hasattr(
+                self.time_integrator, "step_dt_packed"
+            ):
+                self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
+            else:
+                self.time_integrator.step_dt(
+                    self.P,
+                    self.Vx,
+                    self.Vy,
+                    self.Vz,
+                    self.BC,
+                )  # by changing the value in place, the ID of the object is not changed (no new object is created), but the previous value is lost, which is not important here, because the previous value is not used anymore``
+            self.prec[:, StepIndex] = (
+                self.sampleWeight * self.P[:, self.nodeindex].T
+            ).sum(dim=1)
 
-            if "delta_step" in kwargs and StepIndex % kwargs["delta_step"] == 0:
+            if (
+                progress
+                and "delta_step" in kwargs
+                and StepIndex % kwargs["delta_step"] == 0
+            ):
                 newTime = time.time()
                 elapsed = newTime - curTime
                 if prevEstimated == 0:
@@ -1307,8 +1669,11 @@ class AcousticsSimulation:
 
             if "save_step" in kwargs and StepIndex % kwargs["save_step"] == 0:
                 self.save_results_on_the_run(format=kwargs.get("format", "mat"))
+        if synchronize_timing and torch.cuda.is_available():
+            torch.cuda.synchronize()
         end_time = time.time()
-        print(f"time: {end_time-curTime} s")
+        if progress:
+            print(f"time: {end_time-startTime} s")
         return self.prec
 
     def save_results_on_the_run(self, format: str = "mat"):

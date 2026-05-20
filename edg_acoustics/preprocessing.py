@@ -104,6 +104,38 @@ class UpwindFlux(Flux):
             - self.c0 / 2 * dp
         )
 
+    def compute_all(
+        self,
+        dvx: torch.tensor,
+        dvy: torch.tensor,
+        dvz: torch.tensor,
+        dp: torch.tensor,
+        out_vx: torch.tensor,
+        out_vy: torch.tensor,
+        out_vz: torch.tensor,
+        out_p: torch.tensor,
+    ):
+        """Calculate all upwind flux components into preallocated buffers."""
+        torch.mul(dp, self.n1rho, out=out_vx)
+        out_vx.addcmul_(self.cn1s, dvx)
+        out_vx.addcmul_(self.cn1n2, dvy)
+        out_vx.addcmul_(self.cn1n3, dvz)
+
+        torch.mul(dp, self.n2rho, out=out_vy)
+        out_vy.addcmul_(self.cn1n2, dvx)
+        out_vy.addcmul_(self.cn2s, dvy)
+        out_vy.addcmul_(self.cn2n3, dvz)
+
+        torch.mul(dp, self.n3rho, out=out_vz)
+        out_vz.addcmul_(self.cn1n3, dvx)
+        out_vz.addcmul_(self.cn2n3, dvy)
+        out_vz.addcmul_(self.cn3s, dvz)
+
+        torch.mul(dp, -self.c0 / 2, out=out_p)
+        out_p.addcmul_(self.csn1rho, dvx)
+        out_p.addcmul_(self.csn2rho, dvy)
+        out_p.addcmul_(self.csn3rho, dvz)
+
     def FluxVx(
         self,
         dvx: torch.tensor,

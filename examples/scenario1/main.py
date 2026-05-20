@@ -39,9 +39,9 @@ recy = numpy.array([1.76])
 recz = numpy.array([1.62])
 rec = numpy.vstack((recx, recy, recz))  # dim:[3,n_rec]
 
-impulse_length = 2  # total simulation time in seconds
+impulse_length = 0.1  # total simulation time in seconds
 save_every_Nstep = 10  # save the results every N steps
-temporary_save_Nstep = 500  # save the results every N steps temporarily during the simulation. The temporary results will be saved in the root directory of this repo.
+temporary_save_Nstep = 5000  # save the results every N steps temporarily during the simulation. The temporary results will be saved in the root directory of this repo.
 
 result_filename = "result"  # name of the result file. The result file will be saved in the same folder as this script. The result file will be saved in .mat format.
 
@@ -121,6 +121,7 @@ sim.time_integration(
     delta_step=save_every_Nstep,
     save_step=temporary_save_Nstep,
     format="mat",
+    use_cuda_graph=True,
 )
 
 results = edg_acoustics.Monopole_postprocessor(sim, 1)
