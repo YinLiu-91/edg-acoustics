@@ -503,6 +503,166 @@ def interior_flux_kernel(
 
 
 @triton.jit
+def compact_interior_flux_kernel(
+    q_ptr,
+    face_node_ids_ptr,
+    vmapP_q_ptr,
+    nx_ptr,
+    ny_ptr,
+    nz_ptr,
+    fscale_ptr,
+    flux_ptr,
+    total_faces: tl.constexpr,
+    n_tets: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    rho0: tl.constexpr,
+    c0: tl.constexpr,
+    SCALE_FLUX: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_faces
+    tet = offsets % n_tets
+    face_node = offsets // n_tets
+
+    node_m = tl.load(face_node_ids_ptr + face_node, mask=mask)
+    base_m = node_m * n_var_tets + tet
+    base_p = tl.load(vmapP_q_ptr + offsets, mask=mask)
+
+    pM = tl.load(q_ptr + base_m, mask=mask)
+    pP = tl.load(q_ptr + base_p, mask=mask)
+    vxM = tl.load(q_ptr + base_m + n_tets, mask=mask)
+    vxP = tl.load(q_ptr + base_p + n_tets, mask=mask)
+    vyM = tl.load(q_ptr + base_m + 2 * n_tets, mask=mask)
+    vyP = tl.load(q_ptr + base_p + 2 * n_tets, mask=mask)
+    vzM = tl.load(q_ptr + base_m + 3 * n_tets, mask=mask)
+    vzP = tl.load(q_ptr + base_p + 3 * n_tets, mask=mask)
+
+    nx = tl.load(nx_ptr + offsets, mask=mask)
+    ny = tl.load(ny_ptr + offsets, mask=mask)
+    nz = tl.load(nz_ptr + offsets, mask=mask)
+
+    dp = pM - pP
+    dvx = vxM - vxP
+    dvy = vyM - vyP
+    dvz = vzM - vzP
+    dvn = nx * dvx + ny * dvy + nz * dvz
+
+    velocity_flux = 0.5 * (dp / rho0 - c0 * dvn)
+    flux_p = -0.5 * c0 * dp + 0.5 * c0 * c0 * rho0 * dvn
+    flux_vx = nx * velocity_flux
+    flux_vy = ny * velocity_flux
+    flux_vz = nz * velocity_flux
+
+    if SCALE_FLUX:
+        fscale = tl.load(fscale_ptr + offsets, mask=mask)
+        flux_p *= fscale
+        flux_vx *= fscale
+        flux_vy *= fscale
+        flux_vz *= fscale
+
+    out_base = face_node * n_var_tets + tet
+    tl.store(flux_ptr + out_base, flux_p, mask=mask)
+    tl.store(flux_ptr + out_base + n_tets, flux_vx, mask=mask)
+    tl.store(flux_ptr + out_base + 2 * n_tets, flux_vy, mask=mask)
+    tl.store(flux_ptr + out_base + 3 * n_tets, flux_vz, mask=mask)
+
+
+@triton.jit
+def paired_interior_flux_kernel(
+    q_ptr,
+    pair_offsets_ptr,
+    pair_partner_offsets_ptr,
+    face_node_ids_ptr,
+    nx_ptr,
+    ny_ptr,
+    nz_ptr,
+    fscale_ptr,
+    flux_ptr,
+    n_pairs: tl.constexpr,
+    n_tets: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    rho0: tl.constexpr,
+    c0: tl.constexpr,
+    SCALE_FLUX: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pair_ids = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = pair_ids < n_pairs
+    offsets_m = tl.load(pair_offsets_ptr + pair_ids, mask=mask)
+    offsets_p = tl.load(pair_partner_offsets_ptr + pair_ids, mask=mask)
+
+    tet_m = offsets_m % n_tets
+    face_node_m = offsets_m // n_tets
+    tet_p = offsets_p % n_tets
+    face_node_p = offsets_p // n_tets
+
+    node_m = tl.load(face_node_ids_ptr + face_node_m, mask=mask)
+    node_p = tl.load(face_node_ids_ptr + face_node_p, mask=mask)
+    base_m = node_m * n_var_tets + tet_m
+    base_p = node_p * n_var_tets + tet_p
+
+    pM = tl.load(q_ptr + base_m, mask=mask)
+    pP = tl.load(q_ptr + base_p, mask=mask)
+    vxM = tl.load(q_ptr + base_m + n_tets, mask=mask)
+    vxP = tl.load(q_ptr + base_p + n_tets, mask=mask)
+    vyM = tl.load(q_ptr + base_m + 2 * n_tets, mask=mask)
+    vyP = tl.load(q_ptr + base_p + 2 * n_tets, mask=mask)
+    vzM = tl.load(q_ptr + base_m + 3 * n_tets, mask=mask)
+    vzP = tl.load(q_ptr + base_p + 3 * n_tets, mask=mask)
+
+    dp_m = pM - pP
+    dvx_m = vxM - vxP
+    dvy_m = vyM - vyP
+    dvz_m = vzM - vzP
+
+    nx_m = tl.load(nx_ptr + offsets_m, mask=mask)
+    ny_m = tl.load(ny_ptr + offsets_m, mask=mask)
+    nz_m = tl.load(nz_ptr + offsets_m, mask=mask)
+    dvn_m = nx_m * dvx_m + ny_m * dvy_m + nz_m * dvz_m
+    velocity_flux_m = 0.5 * (dp_m / rho0 - c0 * dvn_m)
+    flux_p_m = -0.5 * c0 * dp_m + 0.5 * c0 * c0 * rho0 * dvn_m
+    flux_vx_m = nx_m * velocity_flux_m
+    flux_vy_m = ny_m * velocity_flux_m
+    flux_vz_m = nz_m * velocity_flux_m
+
+    nx_p = tl.load(nx_ptr + offsets_p, mask=mask)
+    ny_p = tl.load(ny_ptr + offsets_p, mask=mask)
+    nz_p = tl.load(nz_ptr + offsets_p, mask=mask)
+    dvn_p = -(nx_p * dvx_m + ny_p * dvy_m + nz_p * dvz_m)
+    velocity_flux_p = 0.5 * (-dp_m / rho0 - c0 * dvn_p)
+    flux_p_p = 0.5 * c0 * dp_m + 0.5 * c0 * c0 * rho0 * dvn_p
+    flux_vx_p = nx_p * velocity_flux_p
+    flux_vy_p = ny_p * velocity_flux_p
+    flux_vz_p = nz_p * velocity_flux_p
+
+    if SCALE_FLUX:
+        fscale_m = tl.load(fscale_ptr + offsets_m, mask=mask)
+        flux_p_m *= fscale_m
+        flux_vx_m *= fscale_m
+        flux_vy_m *= fscale_m
+        flux_vz_m *= fscale_m
+
+        fscale_p = tl.load(fscale_ptr + offsets_p, mask=mask)
+        flux_p_p *= fscale_p
+        flux_vx_p *= fscale_p
+        flux_vy_p *= fscale_p
+        flux_vz_p *= fscale_p
+
+    out_m = face_node_m * n_var_tets + tet_m
+    tl.store(flux_ptr + out_m, flux_p_m, mask=mask)
+    tl.store(flux_ptr + out_m + n_tets, flux_vx_m, mask=mask)
+    tl.store(flux_ptr + out_m + 2 * n_tets, flux_vy_m, mask=mask)
+    tl.store(flux_ptr + out_m + 3 * n_tets, flux_vz_m, mask=mask)
+
+    out_p = face_node_p * n_var_tets + tet_p
+    tl.store(flux_ptr + out_p, flux_p_p, mask=mask)
+    tl.store(flux_ptr + out_p + n_tets, flux_vx_p, mask=mask)
+    tl.store(flux_ptr + out_p + 2 * n_tets, flux_vy_p, mask=mask)
+    tl.store(flux_ptr + out_p + 3 * n_tets, flux_vz_p, mask=mask)
+
+
+@triton.jit
 def boundary_ri_flux_kernel(
     q_ptr,
     vmap_q_ptr,
@@ -989,6 +1149,10 @@ class AcousticsSimulation:
         self._dQdr_by_node = self._dQ_by_derivative[0]
         self._dQds_by_node = self._dQ_by_derivative[1]
         self._dQdt_by_node = self._dQ_by_derivative[2]
+        self._D_merged = torch.cat((self.Dr, self.Ds, self.Dt), dim=0).contiguous()
+        self._dQ_merged_by_node = self._dQ_by_derivative.reshape(
+            3 * self.Np, 4 * self.N_tets
+        )
         self._dQdr_view = self._dQdr_by_node.view(self.Np, 4, self.N_tets)
         self._dQds_view = self._dQds_by_node.view(self.Np, 4, self.N_tets)
         self._dQdt_view = self._dQdt_by_node.view(self.Np, 4, self.N_tets)
@@ -1045,6 +1209,21 @@ class AcousticsSimulation:
             self.device.type == "cuda"
             and os.environ.get("EDG_ACOUSTICS_TRITON_LIFT_SURFACE", "0") != "0"
         )
+        self._use_compact_flux_coefficients = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS", "1")
+            != "0"
+        )
+        self._use_paired_interior_flux = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_PAIRED_INTERIOR_FLUX", "0") != "0"
+        )
+        merged_derivatives_env = os.environ.get("EDG_ACOUSTICS_MERGED_DERIVATIVES")
+        self._use_merged_derivatives = self.device.type == "cuda" and (
+            (self.N_tets >= 10_000)
+            if merged_derivatives_env is None
+            else merged_derivatives_env != "0"
+        )
         self._flux_by_face = torch.empty((4 * self.Nfp, 4 * self.N_tets), **kwargs)
         self._flux_by_face_view = self._flux_by_face.view(4 * self.Nfp, 4, self.N_tets)
         self._surface_by_node = torch.empty((self.Np, 4 * self.N_tets), **kwargs)
@@ -1069,6 +1248,8 @@ class AcousticsSimulation:
         self._face_node_ids = self.Fmask.reshape(-1).to(
             device=self.device, dtype=torch.long
         )
+        self._cache_compact_face_geometry()
+        self._cache_interior_face_pairs()
         self._nx_flat = self.n_xyz[0].reshape(-1)
         self._ny_flat = self.n_xyz[1].reshape(-1)
         self._nz_flat = self.n_xyz[2].reshape(-1)
@@ -1082,6 +1263,40 @@ class AcousticsSimulation:
             node["ny"] = self._ny_flat[node["map"]]
             node["nz"] = self._nz_flat[node["map"]]
             node["fscale"] = self.Fscale.reshape(-1)[node["map"]]
+
+    def _cache_compact_face_geometry(self):
+        face_normals = self.n_xyz.reshape(3, 4, self.Nfp, self.N_tets)
+        face_scales = self.Fscale.reshape(4, self.Nfp, self.N_tets)
+        normal_delta = (face_normals - face_normals[:, :, :1, :]).abs().max()
+        scale_delta = (face_scales - face_scales[:, :1, :]).abs().max()
+        self._face_geometry_is_affine = bool(
+            normal_delta <= 1.0e-9 and scale_delta <= 1.0e-9
+        )
+        self._nx_by_face = face_normals[0, :, 0, :].contiguous()
+        self._ny_by_face = face_normals[1, :, 0, :].contiguous()
+        self._nz_by_face = face_normals[2, :, 0, :].contiguous()
+        self._fscale_by_face = face_scales[:, 0, :].contiguous()
+
+    def _cache_interior_face_pairs(self):
+        total_face_nodes = self._vmapM.numel()
+        offsets = torch.arange(total_face_nodes, device=self.device, dtype=torch.long)
+        n_global_nodes = int(torch.maximum(self._vmapM.max(), self._vmapP.max()).item()) + 1
+        pair_keys = self._vmapM * n_global_nodes + self._vmapP
+        reverse_keys = self._vmapP * n_global_nodes + self._vmapM
+        sorted_keys, sorted_offsets = torch.sort(pair_keys)
+        positions = torch.searchsorted(sorted_keys, reverse_keys)
+        safe_positions = torch.clamp(positions, max=total_face_nodes - 1)
+        partner_offsets = sorted_offsets[safe_positions]
+        valid_partners = (
+            (positions < total_face_nodes)
+            & (sorted_keys[safe_positions] == reverse_keys)
+            & (self._vmapM != self._vmapP)
+        )
+        interior_pair_mask = valid_partners & (offsets < partner_offsets)
+        self._interior_pair_offsets = offsets[interior_pair_mask].contiguous()
+        self._interior_pair_partner_offsets = partner_offsets[
+            interior_pair_mask
+        ].contiguous()
 
     def cache_boundary_parameters(self):
         """Cache boundary parameters as tensors without changing saved BC metadata."""
@@ -1187,6 +1402,10 @@ class AcousticsSimulation:
         return self._q_by_node
 
     def _compute_packed_derivatives(self, q_by_node: torch.tensor):
+        if self._use_merged_derivatives:
+            torch.mm(self._D_merged, q_by_node, out=self._dQ_merged_by_node)
+            return
+
         if self._use_batched_derivatives:
             torch.bmm(
                 self._D_stack,
@@ -1232,6 +1451,54 @@ class AcousticsSimulation:
         if self._use_triton_interior_flux:
             total_faces = 4 * self.Nfp * self.N_tets
             block_size = 256
+            if (
+                self._use_paired_interior_flux
+                and self._use_compact_flux_coefficients
+                and self._interior_pair_offsets.numel() > 0
+            ):
+                n_pairs = self._interior_pair_offsets.numel()
+                paired_interior_flux_kernel[(triton.cdiv(n_pairs, block_size),)](
+                    q_by_node.reshape(-1),
+                    self._interior_pair_offsets,
+                    self._interior_pair_partner_offsets,
+                    self._face_node_ids,
+                    self._nx_flat,
+                    self._ny_flat,
+                    self._nz_flat,
+                    self.Fscale.reshape(-1),
+                    self._flux_by_face.reshape(-1),
+                    n_pairs,
+                    self.N_tets,
+                    4 * self.N_tets,
+                    self.rho0,
+                    self.c0,
+                    self._use_scaled_flux_kernels,
+                    BLOCK_SIZE=block_size,
+                )
+                return
+
+            if (
+                self._use_compact_flux_coefficients
+            ):
+                compact_interior_flux_kernel[(triton.cdiv(total_faces, block_size),)](
+                    q_by_node.reshape(-1),
+                    self._face_node_ids,
+                    self._vmapP_q,
+                    self._nx_flat,
+                    self._ny_flat,
+                    self._nz_flat,
+                    self.Fscale.reshape(-1),
+                    self._flux_by_face.reshape(-1),
+                    total_faces,
+                    self.N_tets,
+                    4 * self.N_tets,
+                    self.rho0,
+                    self.c0,
+                    self._use_scaled_flux_kernels,
+                    BLOCK_SIZE=block_size,
+                )
+                return
+
             interior_flux_kernel[(triton.cdiv(total_faces, block_size),)](
                 q_by_node.reshape(-1),
                 self._face_node_ids,

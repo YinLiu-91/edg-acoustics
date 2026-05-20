@@ -73,6 +73,15 @@ torch.bmm(stack([Dr, Ds, Dt]), Q_flat.expand(3, -1, -1))
 
 Set `EDG_ACOUSTICS_BATCHED_DERIVATIVES=0` to force the original three-GEMM fallback.
 
+For larger CUDA meshes, the derivative path now uses a merged cuBLAS DGEMM by default:
+
+```python
+D_merged = torch.cat((Dr, Ds, Dt), dim=0)  # [3 * Np, Np]
+D_merged @ Q_flat                          # [3 * Np, 4 * N_tets]
+```
+
+This keeps the operation in cuBLAS fp64 while using a single taller GEMM shape. It is enabled automatically for CUDA meshes with at least `10_000` tetrahedra. Override with `EDG_ACOUSTICS_MERGED_DERIVATIVES=0` or `1`.
+
 and face lift work was packed into one GEMM:
 
 - `lift @ Flux_flat`
@@ -108,6 +117,16 @@ Flux_flat: [4 * Nfp, 4 * N_tets]
 
 Boundary ADE/impedance overrides still run after interior flux assembly. When all CUDA boundary writers are enabled, the interior and boundary flux kernels write `Fscale`-scaled flux directly and skip the global `flux_view.mul_(Fscale)` pass. Set `EDG_ACOUSTICS_TRITON_INTERIOR_FLUX=0` or `EDG_ACOUSTICS_SCALED_FLUX_KERNELS=0` to force fallback behavior.
 
+The default CUDA interior flux kernel now computes the homogeneous acoustic upwind flux from `nx/ny/nz` and `Fscale` directly:
+
+```text
+dvn = nx * dVx + ny * dVy + nz * dVz
+flux_v = 0.5 * n * (dP / rho0 - c0 * dvn)
+flux_p = -0.5 * c0 * dP + 0.5 * c0^2 * rho0 * dvn
+```
+
+This replaces loads from the expanded coefficient tensors (`cn*`, `n*rho`, `csn*rho`) with fewer geometry loads and extra fp64 arithmetic. It is enabled by default on CUDA; set `EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS=0` to restore the coefficient-load path.
+
 ### 8. Fused RI-only boundary flux
 
 The largest scenario1 boundary group is RI-only and does not carry RP/CP ADE state. On CUDA that group is fused into one Triton kernel that gathers boundary state, computes `vn/ou/in`, and writes packed boundary fluxes. RP-only and RP+CP impedance groups now have separate Triton kernels that also update recursive ADE state (`phi`, `kexi1`, `kexi2`) in place. Set `EDG_ACOUSTICS_TRITON_BOUNDARY_RI=0` or `EDG_ACOUSTICS_TRITON_BOUNDARY_ADE=0` to force the fallback.
@@ -117,10 +136,11 @@ The largest scenario1 boundary group is RI-only and does not carry RP/CP ADE sta
 Several deeper kernels are implemented and benchmark-gated because they do not all beat the current cuBLAS/PyTorch path on V100:
 
 - fused state accumulation fuses RHS write with `Q_flat += coefficient * RHS_Q`;
+- `EDG_ACOUSTICS_PAIRED_INTERIOR_FLUX=1` computes each physical interior face-node pair once and writes both element-side fluxes;
 - `EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME=1` combines derivative application and volume RHS;
 - `EDG_ACOUSTICS_TRITON_LIFT_SURFACE=1` replaces `lift @ Flux_flat` with a direct Triton lift kernel.
 
-Fused state accumulation is now enabled automatically for CUDA meshes with at least `10_000` tetrahedra because the generated fine-geometry profile mesh benefits from it. Override with `EDG_ACOUSTICS_FUSED_STATE_ACCUMULATION=0` or `1`. The derivative-volume and lift-surface Triton kernels remain default-off because they were slower on both the small and profile meshes.
+Fused state accumulation is now enabled automatically for CUDA meshes with at least `10_000` tetrahedra because the generated fine-geometry profile mesh benefits from it. Override with `EDG_ACOUSTICS_FUSED_STATE_ACCUMULATION=0` or `1`. The paired-face, derivative-volume, and lift-surface Triton kernels remain default-off because they were slower on the tested V100/profile-mesh shape.
 
 ### 10. CUDA Graph replay and optional chunking
 
@@ -220,6 +240,20 @@ Interpretation rules used in this repository:
 
 After the current fused path landed, the remaining cost profile changed substantially:
 
+### GitHub research references used for the follow-up pass
+
+The lc0p20 pass also checked open-source GPU DG/high-order solvers for comparable implementation patterns:
+
+| Reference | Files / concept | Design takeaway for this repository |
+| --- | --- | --- |
+| `paranumal/libparanumal` | `solvers/acoustics/okl/acousticsSurfaceTet3D.okl`, `acousticsVolumeTet3D.okl` | Acoustic DG kernels compute flux from normals and apply local `LIFT`; volume kernels store affine metrics compactly. This motivated recomputing acoustic flux coefficients from `nx/ny/nz` instead of loading many expanded coefficient tensors. |
+| `tcew/MIDG2` | `src/MaxwellsSurfaceKernel3D.occa`, `src/MaxwellsOKL3d.cpp` | Surface kernels use compact face metadata (`Fscale`, `nx`, `ny`, `nz`) and local lift-style accumulation, reinforcing the compact face-data direction. |
+| `mfem/mfem` | `fem/restriction.hpp`, `fem/restriction.cpp` `L2FaceRestriction` | MFEM represents DG faces as a double-valued physical-face restriction with two traces and face-node permutations. This informed the experimental paired interior-face table. |
+| `exapde/Exasim` | `backend/Common/pblas.h` | Pure dense high-order transforms are kept on BLAS/cuBLAS. This motivated the accepted merged-derivative GEMM instead of replacing derivatives with scalar Triton loops. |
+| `CEED/NekRS` | `kernels/elliptic/ellipticPartialAxCoeffHex3D.okl` | Custom kernels are most useful when fusion removes enough global-memory traffic; otherwise dense operator application should stay with optimized libraries. |
+
+The full libParanumal/MIDG2-style surface-flux plus `LIFT` fusion remains a strong future direction, but a naive Triton replacement of lift was already measured slower on this V100. This pass therefore landed lower-risk pieces that preserve cuBLAS for dense work and reduce memory traffic in the dominant flux kernel.
+
 ### Before deep fusion
 
 The hot path was dominated by:
@@ -299,6 +333,34 @@ Profile-mesh A/B results:
 | `--disable-triton-volume-surface-rhs` | 10.00 | rejected |
 | `--disable-triton-interior-flux` | 15.82 | rejected |
 
+### lc0p20 follow-up pass
+
+The second lc0p20 pass started from this measured baseline:
+
+| Run | Steps | ms/step | Notes |
+| --- | ---: | ---: | --- |
+| Previous lc0p20 default | 100 | 8.69 | compact flux off, merged derivatives off |
+| Compact flux coefficients | 100 | 7.85 | accepted |
+| Compact flux + merged derivatives | 100 | 7.33 | accepted for `N_tets >= 10_000` |
+| Compact flux only, merged disabled | 100 | 7.84 | confirms merged-derivative gain |
+| Paired interior physical-face kernel | 100 | 12.72 | correct but rejected/default-off |
+| Legacy coefficient-load path | 100 | 8.67 | kept as fallback |
+
+Current lc0p20 profiler with accepted defaults:
+
+| Profiler row | CUDA share | Per RHS call | Decision |
+| --- | ---: | ---: | --- |
+| `compact_interior_flux_kernel` | 36.34% | 0.920 ms | improved from original `interior_flux_kernel` 1.193 ms/RHS |
+| `volume_surface_rhs_kernel` | 31.21% | 0.790 ms | still a major hotspot |
+| merged derivative/lift DGEMMs | 25.41% | 0.322 ms per visible DGEMM row | merged derivative keeps cuBLAS and reduces fixed-step time |
+| boundary Triton kernels | 4.37% | small | no longer first-order |
+
+Rejected/default-off details:
+
+- `EDG_ACOUSTICS_PAIRED_INTERIOR_FLUX=1` is correct after matching reciprocal `(vmapM, vmapP)` / `(vmapP, vmapM)` keys, but it is slower on V100 because the compact pair list introduces indirect loads and the kernel becomes less coalesced than the dense element-side pass.
+- Affine face geometry is detected (`affine_face_geometry=1`), but the accepted compact kernel still uses per-face-node normals/Fscale to preserve strict fp64 equivalence. Per-face compressed geometry remains possible behind a future tolerance-gated path.
+- Affine volume metrics vary only at about `1e-10` from node to node on lc0p20, but multiplying by acoustic pressure coefficients can amplify that enough to risk strict fp64 golden tolerances. The current `volume_surface_rhs_kernel` therefore remains the correctness-preserving default.
+
 ## How to use CUDA Graph in `examples/scenario1/main.py`
 
 The scenario now enables CUDA Graph directly in:
@@ -373,8 +435,10 @@ All rows use `scenario1_profile_lc0p20.msh` (`45,285` tetrahedra, fp64, V100). T
 | Mode | Device | Steps | Observed time | ms/step | Relative to CPU |
 | --- | --- | ---: | ---: | ---: | ---: |
 | Fixed-step benchmark | CPU, 8 threads | 5 | 3298.15 ms | 659.63 | 1.00x |
-| Fixed-step benchmark + CUDA Graph | CUDA | 50 | 437.64 ms | 8.75 | 75.36x faster |
-| `main.py`, `impulse_length=0.001` | CUDA + CUDA Graph | 205 | 1.77 s solver loop | 8.62 | 76.52x faster by step rate |
+| Fixed-step benchmark + CUDA Graph, first lc0p20 pass | CUDA | 50 | 437.64 ms | 8.75 | 75.36x faster |
+| Fixed-step benchmark + CUDA Graph, current | CUDA | 100 | 732.77 ms | 7.33 | 90.02x faster |
+| `main.py`, `impulse_length=0.001`, first lc0p20 pass | CUDA + CUDA Graph | 205 | 1.77 s solver loop | 8.62 | 76.52x faster by step rate |
+| `main.py`, `impulse_length=0.001`, current | CUDA + CUDA Graph | 205 | 1.49 s solver loop | 7.26 | 90.86x faster by step rate |
 
 The current `examples/scenario1/main.py` uses this profile mesh instead of the full `scenario1_fine.msh`, because the full fine mesh currently OOMs during CUDA initialization. The shorter `impulse_length=0.001` keeps iteration fast while preserving a representative 205-step fine-geometry run.
 
@@ -386,6 +450,7 @@ The current `examples/scenario1/main.py` uses this profile mesh instead of the f
 - `benchmarks/generate_scenario1_mesh.py`
 - `benchmarks/scenario1_benchmark.py`
 - `tests/test_scenario1_golden.py`
+- `tests/test_scenario1_profile_mesh_optimizations.py`
 - `tests/scenario1_utils.py`
 - `examples/scenario1/main.py`
 - `examples/scenario1/scenario1_profile_lc0p20.msh`

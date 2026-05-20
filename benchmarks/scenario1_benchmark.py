@@ -100,6 +100,16 @@ def run_fixed_steps(
     print(f"Np={sim.Np}")
     print(f"Nfp={sim.Nfp}")
     print(f"dt={sim.time_integrator.dt}")
+    total_face_nodes = 4 * sim.Nfp * sim.N_tets
+    boundary_face_nodes = sum(node["map"].numel() for node in sim.BCnode)
+    interior_face_nodes = total_face_nodes - boundary_face_nodes
+    paired_interior_face_nodes = sim._interior_pair_offsets.numel()
+    print(f"total_face_nodes={total_face_nodes}")
+    print(f"boundary_face_nodes={boundary_face_nodes}")
+    print(f"interior_face_nodes={interior_face_nodes}")
+    print(f"unique_interior_face_nodes={interior_face_nodes // 2}")
+    print(f"paired_interior_face_nodes={paired_interior_face_nodes}")
+    print(f"affine_face_geometry={int(sim._face_geometry_is_affine)}")
     print(f"elapsed_ms={elapsed_ms:.6f}")
     print(f"ms_per_step={elapsed_ms / steps:.6f}")
     print(f"peak_memory_mb={peak_memory_mb:.3f}")
@@ -119,7 +129,10 @@ def run_fixed_steps(
         f"scaled_flux:{int(sim._use_scaled_flux_kernels)},"
         f"fused_state_accumulation:{int(sim._use_fused_state_accumulation)},"
         f"derivative_volume:{int(sim._use_triton_derivative_volume)},"
-        f"lift_surface:{int(sim._use_triton_lift_surface)}"
+        f"lift_surface:{int(sim._use_triton_lift_surface)},"
+        f"compact_flux:{int(sim._use_compact_flux_coefficients)},"
+        f"paired_interior_flux:{int(sim._use_paired_interior_flux)},"
+        f"merged_derivatives:{int(sim._use_merged_derivatives)}"
     )
     if sim.P.device.type == "cuda":
         print(f"cuda_name={torch.cuda.get_device_name(sim.P.device)}")
@@ -184,6 +197,15 @@ def parse_args():
     )
     parser.add_argument("--enable-triton-derivative-volume", action="store_true")
     parser.add_argument("--enable-triton-lift-surface", action="store_true")
+    parser.add_argument("--disable-compact-flux-coefficients", action="store_true")
+    parser.add_argument("--disable-paired-interior-flux", action="store_true")
+    merged_derivatives_group = parser.add_mutually_exclusive_group()
+    merged_derivatives_group.add_argument(
+        "--enable-merged-derivatives", action="store_true"
+    )
+    merged_derivatives_group.add_argument(
+        "--disable-merged-derivatives", action="store_true"
+    )
     return parser.parse_args()
 
 
@@ -212,6 +234,14 @@ def main():
         os.environ["EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME"] = "1"
     if args.enable_triton_lift_surface:
         os.environ["EDG_ACOUSTICS_TRITON_LIFT_SURFACE"] = "1"
+    if args.disable_compact_flux_coefficients:
+        os.environ["EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS"] = "0"
+    if args.disable_paired_interior_flux:
+        os.environ["EDG_ACOUSTICS_PAIRED_INTERIOR_FLUX"] = "0"
+    if args.enable_merged_derivatives:
+        os.environ["EDG_ACOUSTICS_MERGED_DERIVATIVES"] = "1"
+    if args.disable_merged_derivatives:
+        os.environ["EDG_ACOUSTICS_MERGED_DERIVATIVES"] = "0"
     if args.cpu_threads is not None:
         torch.set_num_threads(args.cpu_threads)
 
