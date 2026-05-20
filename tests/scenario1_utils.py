@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import glob
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy
@@ -11,6 +12,8 @@ import scipy.io
 import torch
 
 import edg_acoustics
+import edg_acoustics.acoustics_simulation as acoustics_simulation
+import edg_acoustics.device_ini as device_ini
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -80,10 +83,31 @@ def resolve_mesh_path(mesh_name: str | Path, data_dir: Path = GOLDEN_DIR):
     return EXAMPLE_DIR / mesh_path
 
 
+@contextmanager
+def acoustic_device(device: str | torch.device):
+    """Temporarily route newly created simulation objects to a device."""
+    target = torch.device(device)
+    previous_device_ini = device_ini.device
+    previous_simulation_device = acoustics_simulation.device
+    device_ini.device = target
+    acoustics_simulation.device = target
+    try:
+        yield target
+    finally:
+        device_ini.device = previous_device_ini
+        acoustics_simulation.device = previous_simulation_device
+
+
 def build_scenario1_simulation(
-    data_dir: Path = GOLDEN_DIR, mesh_name: str | Path = MESH_NAME
+    data_dir: Path = GOLDEN_DIR,
+    mesh_name: str | Path = MESH_NAME,
+    device: str | torch.device | None = None,
 ):
     """Build a fully initialized scenario 1 simulation without advancing time."""
+    if device is not None:
+        with acoustic_device(device):
+            return build_scenario1_simulation(data_dir, mesh_name)
+
     mesh = edg_acoustics.Mesh(str(resolve_mesh_path(mesh_name, data_dir)), BC_LABELS)
     sim = edg_acoustics.AcousticsSimulation(RHO0, C0, NX, mesh, BC_LABELS)
     sim.init_BC(edg_acoustics.AbsorbBC(sim.BCnode, load_bc_para(data_dir)))
@@ -108,3 +132,82 @@ def clone_bcvar(bcvar: list[dict]):
 def tensor_to_numpy(value: torch.Tensor):
     """Convert a tensor to a CPU NumPy array."""
     return value.detach().cpu().numpy()
+
+
+def assert_tensor_close(
+    name: str,
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    *,
+    rtol: float,
+    atol: float,
+):
+    assert actual.dtype == torch.float64
+    assert expected.dtype == torch.float64
+    numpy.testing.assert_allclose(
+        tensor_to_numpy(actual),
+        tensor_to_numpy(expected),
+        rtol=rtol,
+        atol=atol,
+        err_msg=name,
+    )
+
+
+def assert_bc_state_close(
+    actual: list[dict],
+    expected: list[dict],
+    *,
+    rtol: float,
+    atol: float,
+):
+    assert len(actual) == len(expected)
+    for index, (actual_state, expected_state) in enumerate(zip(actual, expected)):
+        assert actual_state.keys() == expected_state.keys()
+        for key, actual_value in actual_state.items():
+            expected_value = expected_state[key]
+            if torch.is_tensor(actual_value):
+                assert_tensor_close(
+                    f"bc{index}_{key}",
+                    actual_value,
+                    expected_value,
+                    rtol=rtol,
+                    atol=atol,
+                )
+            elif isinstance(actual_value, numpy.ndarray):
+                numpy.testing.assert_allclose(
+                    actual_value,
+                    expected_value,
+                    rtol=rtol,
+                    atol=atol,
+                    err_msg=f"bc{index}_{key}",
+                )
+            else:
+                assert actual_value == expected_value
+
+
+def assert_rhs_close(actual, expected, *, rtol: float, atol: float):
+    for name, actual_value, expected_value in zip(
+        ("rhs_p", "rhs_vx", "rhs_vy", "rhs_vz"),
+        actual[:4],
+        expected[:4],
+    ):
+        assert_tensor_close(
+            name,
+            actual_value,
+            expected_value,
+            rtol=rtol,
+            atol=atol,
+        )
+    assert_bc_state_close(actual[4], expected[4], rtol=rtol, atol=atol)
+
+
+def assert_simulation_state_close(actual, expected, *, rtol: float, atol: float):
+    for name in ("P", "Vx", "Vy", "Vz", "prec"):
+        assert_tensor_close(
+            name,
+            getattr(actual, name),
+            getattr(expected, name),
+            rtol=rtol,
+            atol=atol,
+        )
+    assert_bc_state_close(actual.BC.BCvar, expected.BC.BCvar, rtol=rtol, atol=atol)

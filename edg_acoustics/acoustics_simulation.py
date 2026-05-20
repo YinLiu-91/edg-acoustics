@@ -2980,8 +2980,13 @@ class AcousticsSimulation:
         if synchronize_timing and torch.cuda.is_available():
             torch.cuda.synchronize()
         end_time = time.time()
+        self.last_time_integration_elapsed_s = end_time - startTime
+        self.last_time_integration_steps = self.Ntimesteps
+        self.last_time_integration_total_time = total_time
+        self.last_time_integration_used_cuda_graph = use_cuda_graph
+        self.last_time_integration_record_receivers = record_receivers
         if progress:
-            print(f"time: {end_time-startTime} s")
+            print(f"time: {self.last_time_integration_elapsed_s} s")
         return self.prec
 
     def save_results_on_the_run(self, format: str = "mat"):

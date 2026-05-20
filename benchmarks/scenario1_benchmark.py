@@ -28,6 +28,48 @@ def synchronize():
         torch.cuda.synchronize()
 
 
+def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_graph: bool):
+    print(f"mesh_name={mesh_name}")
+    print(f"N_tets={sim.N_tets}")
+    print(f"Np={sim.Np}")
+    print(f"Nfp={sim.Nfp}")
+    print(f"dt={sim.time_integrator.dt}")
+    total_face_nodes = 4 * sim.Nfp * sim.N_tets
+    boundary_face_nodes = sum(node["map"].numel() for node in sim.BCnode)
+    interior_face_nodes = total_face_nodes - boundary_face_nodes
+    paired_interior_face_nodes = sim._interior_pair_offsets.numel()
+    print(f"total_face_nodes={total_face_nodes}")
+    print(f"boundary_face_nodes={boundary_face_nodes}")
+    print(f"interior_face_nodes={interior_face_nodes}")
+    print(f"unique_interior_face_nodes={interior_face_nodes // 2}")
+    print(f"paired_interior_face_nodes={paired_interior_face_nodes}")
+    print(f"affine_face_geometry={int(sim._face_geometry_is_affine)}")
+    print(f"dtype={sim.P.dtype}")
+    print(f"device={sim.P.device}")
+    print(f"cuda_graph={cuda_graph and sim.P.device.type == 'cuda'}")
+    print(f"record_receivers={record_receivers}")
+    print(
+        "optimizations="
+        f"volume_rhs:{int(sim._use_triton_volume_rhs)},"
+        f"interior_flux:{int(sim._use_triton_interior_flux)},"
+        f"boundary_ri:{int(sim._use_triton_boundary_ri)},"
+        f"boundary_ade:{int(sim._use_triton_boundary_ade)},"
+        f"batched_derivatives:{int(sim._use_batched_derivatives)},"
+        f"volume_surface_rhs:{int(sim._use_triton_volume_surface_rhs)},"
+        f"scaled_flux:{int(sim._use_scaled_flux_kernels)},"
+        f"fused_state_accumulation:{int(sim._use_fused_state_accumulation)},"
+        f"derivative_volume:{int(sim._use_triton_derivative_volume)},"
+        f"lift_surface:{int(sim._use_triton_lift_surface)},"
+        f"compact_flux:{int(sim._use_compact_flux_coefficients)},"
+        f"paired_interior_flux:{int(sim._use_paired_interior_flux)},"
+        f"merged_derivatives:{int(sim._use_merged_derivatives)}"
+    )
+    if sim.P.device.type == "cuda":
+        print(f"cuda_name={torch.cuda.get_device_name(sim.P.device)}")
+    else:
+        print(f"cpu_threads={torch.get_num_threads()}")
+
+
 def run_fixed_steps(
     steps: int,
     mesh_name: str,
@@ -95,53 +137,63 @@ def run_fixed_steps(
         peak_memory_mb = 0.0
 
     print(f"steps={steps}")
-    print(f"mesh_name={mesh_name}")
-    print(f"N_tets={sim.N_tets}")
-    print(f"Np={sim.Np}")
-    print(f"Nfp={sim.Nfp}")
-    print(f"dt={sim.time_integrator.dt}")
-    total_face_nodes = 4 * sim.Nfp * sim.N_tets
-    boundary_face_nodes = sum(node["map"].numel() for node in sim.BCnode)
-    interior_face_nodes = total_face_nodes - boundary_face_nodes
-    paired_interior_face_nodes = sim._interior_pair_offsets.numel()
-    print(f"total_face_nodes={total_face_nodes}")
-    print(f"boundary_face_nodes={boundary_face_nodes}")
-    print(f"interior_face_nodes={interior_face_nodes}")
-    print(f"unique_interior_face_nodes={interior_face_nodes // 2}")
-    print(f"paired_interior_face_nodes={paired_interior_face_nodes}")
-    print(f"affine_face_geometry={int(sim._face_geometry_is_affine)}")
+    print("mode=fixed_steps")
     print(f"elapsed_ms={elapsed_ms:.6f}")
     print(f"ms_per_step={elapsed_ms / steps:.6f}")
     print(f"peak_memory_mb={peak_memory_mb:.3f}")
-    print(f"dtype={sim.P.dtype}")
-    print(f"device={sim.P.device}")
-    print(f"cuda_graph={cuda_graph and sim.P.device.type == 'cuda'}")
+    print(f"steps={steps}")
     print(f"cuda_graph_chunk_steps={cuda_graph_chunk_steps if cuda_graph else 1}")
-    print(f"record_receivers={record_receivers}")
-    print(
-        "optimizations="
-        f"volume_rhs:{int(sim._use_triton_volume_rhs)},"
-        f"interior_flux:{int(sim._use_triton_interior_flux)},"
-        f"boundary_ri:{int(sim._use_triton_boundary_ri)},"
-        f"boundary_ade:{int(sim._use_triton_boundary_ade)},"
-        f"batched_derivatives:{int(sim._use_batched_derivatives)},"
-        f"volume_surface_rhs:{int(sim._use_triton_volume_surface_rhs)},"
-        f"scaled_flux:{int(sim._use_scaled_flux_kernels)},"
-        f"fused_state_accumulation:{int(sim._use_fused_state_accumulation)},"
-        f"derivative_volume:{int(sim._use_triton_derivative_volume)},"
-        f"lift_surface:{int(sim._use_triton_lift_surface)},"
-        f"compact_flux:{int(sim._use_compact_flux_coefficients)},"
-        f"paired_interior_flux:{int(sim._use_paired_interior_flux)},"
-        f"merged_derivatives:{int(sim._use_merged_derivatives)}"
+    print_common_metadata(
+        sim,
+        mesh_name=mesh_name,
+        record_receivers=record_receivers,
+        cuda_graph=cuda_graph,
     )
-    if sim.P.device.type == "cuda":
-        print(f"cuda_name={torch.cuda.get_device_name(sim.P.device)}")
-    else:
-        print(f"cpu_threads={torch.get_num_threads()}")
 
     if prof is not None:
         sort_by = "cuda_time_total" if torch.cuda.is_available() else "cpu_time_total"
         print(prof.key_averages().table(sort_by=sort_by, row_limit=profile_row_limit))
+
+
+def run_real_case(
+    total_time: float,
+    mesh_name: str,
+    cuda_graph: bool,
+    record_receivers: bool,
+):
+    from scenario1_utils import build_scenario1_simulation
+
+    sim = build_scenario1_simulation(mesh_name=mesh_name)
+    if sim.P.device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    sim.time_integration(
+        total_time=total_time,
+        progress=False,
+        use_cuda_graph=cuda_graph,
+        record_receivers=record_receivers,
+        synchronize_timing=True,
+    )
+    elapsed_s = sim.last_time_integration_elapsed_s
+    steps = sim.last_time_integration_steps
+    print("mode=real_case")
+    print(f"total_time={sim.last_time_integration_total_time}")
+    print(f"steps={steps}")
+    print(f"elapsed_s={elapsed_s:.6f}")
+    print(f"elapsed_ms={elapsed_s * 1000.0:.6f}")
+    ms_per_step = float("nan") if steps == 0 else (elapsed_s * 1000.0) / steps
+    print(f"ms_per_step={ms_per_step:.6f}")
+    print(
+        "peak_memory_mb=0.000"
+        if sim.P.device.type != "cuda"
+        else f"peak_memory_mb={torch.cuda.max_memory_allocated() / 1024**2:.3f}"
+    )
+    print(f"cuda_graph_chunk_steps={1}")
+    print_common_metadata(
+        sim,
+        mesh_name=mesh_name,
+        record_receivers=record_receivers,
+        cuda_graph=cuda_graph,
+    )
 
 
 def run_exact_script():
@@ -155,6 +207,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--mesh-name", default="scenario1_coarser.msh")
+    parser.add_argument(
+        "--real-case-total-time",
+        type=float,
+        default=None,
+        help="Run full time_integration(total_time=...) instead of fixed steps.",
+    )
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--profile-row-limit", type=int, default=40)
     parser.add_argument("--cuda-graph", action="store_true")
@@ -247,6 +305,13 @@ def main():
 
     if args.exact_script:
         run_exact_script()
+    elif args.real_case_total_time is not None:
+        run_real_case(
+            args.real_case_total_time,
+            args.mesh_name,
+            args.cuda_graph,
+            not args.no_record_receivers,
+        )
     else:
         run_fixed_steps(
             args.steps,

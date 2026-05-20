@@ -204,6 +204,15 @@ python benchmarks/scenario1_benchmark.py --device cuda --steps 1000 --cuda-graph
 python benchmarks/scenario1_benchmark.py --device cuda --steps 1000 --cuda-graph --profile --profile-row-limit 30
 ```
 
+The benchmark also supports real-case `time_integration(total_time=...)` timing without postprocessing or result-file writes:
+
+```bash
+python benchmarks/scenario1_benchmark.py --device cpu --cpu-threads 8 --mesh-name scenario1_coarser.msh --real-case-total-time 0.005
+python benchmarks/scenario1_benchmark.py --device cuda --mesh-name scenario1_coarser.msh --real-case-total-time 0.005 --cuda-graph
+python benchmarks/scenario1_benchmark.py --device cpu --cpu-threads 8 --mesh-name scenario1_profile_lc0p20.msh --real-case-total-time 0.001
+python benchmarks/scenario1_benchmark.py --device cuda --mesh-name scenario1_profile_lc0p20.msh --real-case-total-time 0.001 --cuda-graph
+```
+
 The benchmark also supports A/B isolation of each optimization path:
 
 ```bash
@@ -441,6 +450,23 @@ All rows use `scenario1_profile_lc0p20.msh` (`45,285` tetrahedra, fp64, V100). T
 | `main.py`, `impulse_length=0.001`, current | CUDA + CUDA Graph | 205 | 1.49 s solver loop | 7.26 | 90.86x faster by step rate |
 
 The current `examples/scenario1/main.py` uses this profile mesh instead of the full `scenario1_fine.msh`, because the full fine mesh currently OOMs during CUDA initialization. The shorter `impulse_length=0.001` keeps iteration fast while preserving a representative 205-step fine-geometry run.
+
+### D. Current real-case CPU / GPU time-integration comparison
+
+The table below uses the new benchmark real-case mode, which times only `sim.time_integration(...)` with receiver sampling enabled and without postprocessing or result-file writes. CPU runs use 8 threads; GPU runs use the current CUDA path with CUDA Graph enabled.
+
+| Mesh | Total time | Device | Steps | Solver loop time | Solver ms/step | Relative to CPU |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| `scenario1_coarser.msh` | `0.005 s` | CPU, 8 threads | 164 | `0.856 s` | `5.22` | `1.00x` |
+| `scenario1_coarser.msh` | `0.005 s` | CUDA + CUDA Graph | 164 | `0.0364 s` | `0.222` | `23.50x faster` |
+| `scenario1_profile_lc0p20.msh` | `0.001 s` | CPU, 8 threads | 205 | `142.46 s` | `694.90` | `1.00x` |
+| `scenario1_profile_lc0p20.msh` | `0.001 s` | CUDA + CUDA Graph | 205 | `1.50 s` | `7.33` | `94.81x faster` |
+
+Interpretation:
+
+- on the small coarser mesh, GPU is already much faster than CPU for the full real case, but the speedup is lower than the lc0p20 mesh because fixed overheads still matter more;
+- on lc0p20, the solver is dominated by real fp64 element/face work and the optimized CUDA path is now about **94.8x** faster than the 8-thread CPU run for the same physical simulation window;
+- the real-case lc0p20 solver-loop timing (`1.50 s`) matches the previously observed `main.py` timing closely, confirming that the current CUDA Graph path is the practical speedup route for the actual scenario run.
 
 ## Files most relevant to the final design
 

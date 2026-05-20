@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-import numpy
+import os
+
 import pytest
 import torch
 
-from scenario1_utils import build_scenario1_simulation, clone_bcvar, tensor_to_numpy
+from scenario1_utils import (
+    assert_rhs_close,
+    assert_simulation_state_close,
+    build_scenario1_simulation,
+    clone_bcvar,
+)
 
 
 PROFILE_MESH = "scenario1_profile_lc0p20.msh"
@@ -19,15 +25,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def assert_close(name: str, actual, expected):
-    numpy.testing.assert_allclose(actual, expected, rtol=RTOL, atol=ATOL, err_msg=name)
-
-
 def build_profile_mesh_sim(
     monkeypatch: pytest.MonkeyPatch,
     *,
     compact_flux: bool,
     merged_derivatives: bool,
+    fused_state_accumulation: bool = False,
+    paired_interior_flux: bool = False,
 ):
     monkeypatch.setenv(
         "EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS", "1" if compact_flux else "0"
@@ -35,11 +39,19 @@ def build_profile_mesh_sim(
     monkeypatch.setenv(
         "EDG_ACOUSTICS_MERGED_DERIVATIVES", "1" if merged_derivatives else "0"
     )
-    monkeypatch.setenv("EDG_ACOUSTICS_PAIRED_INTERIOR_FLUX", "0")
-    return build_scenario1_simulation(mesh_name=PROFILE_MESH)
+    monkeypatch.setenv(
+        "EDG_ACOUSTICS_FUSED_STATE_ACCUMULATION",
+        "1" if fused_state_accumulation else "0",
+    )
+    monkeypatch.setenv(
+        "EDG_ACOUSTICS_PAIRED_INTERIOR_FLUX", "1" if paired_interior_flux else "0"
+    )
+    return build_scenario1_simulation(mesh_name=PROFILE_MESH, device="cuda")
 
 
-def test_profile_mesh_compact_flux_matches_baseline_rhs(monkeypatch):
+def test_profile_mesh_compact_flux_and_merged_derivatives_match_baseline_rhs(
+    monkeypatch,
+):
     baseline = build_profile_mesh_sim(
         monkeypatch, compact_flux=False, merged_derivatives=False
     )
@@ -58,27 +70,13 @@ def test_profile_mesh_compact_flux_matches_baseline_rhs(monkeypatch):
         optimized.P, optimized.Vx, optimized.Vy, optimized.Vz, optimized_bcvar
     )
 
-    for name, actual, expected in zip(
-        ("rhs_p", "rhs_vx", "rhs_vy", "rhs_vz"),
-        optimized_rhs[:4],
-        baseline_rhs[:4],
-    ):
-        assert actual.dtype == torch.float64
-        assert_close(name, tensor_to_numpy(actual), tensor_to_numpy(expected))
-
-    for index, (actual_state, expected_state) in enumerate(
-        zip(optimized_rhs[4], baseline_rhs[4])
-    ):
-        for key, actual in actual_state.items():
-            expected = expected_state[key]
-            if torch.is_tensor(actual):
-                assert_close(
-                    f"rhs_bc{index}_{key}",
-                    tensor_to_numpy(actual),
-                    tensor_to_numpy(expected),
-                )
+    assert_rhs_close(optimized_rhs, baseline_rhs, rtol=RTOL, atol=ATOL)
 
 
+@pytest.mark.skipif(
+    os.environ.get("EDG_ACOUSTICS_RUN_SLOW_TESTS") != "1",
+    reason="lc0p20 short integration is a slow opt-in regression test",
+)
 def test_profile_mesh_compact_flux_matches_baseline_short_integration(monkeypatch):
     baseline = build_profile_mesh_sim(
         monkeypatch, compact_flux=False, merged_derivatives=False
@@ -90,9 +88,4 @@ def test_profile_mesh_compact_flux_matches_baseline_short_integration(monkeypatc
     )
     optimized.time_integration(n_time_steps=2, progress=False, use_cuda_graph=True)
 
-    for name in ("P", "Vx", "Vy", "Vz", "prec"):
-        assert_close(
-            name,
-            tensor_to_numpy(getattr(optimized, name)),
-            tensor_to_numpy(getattr(baseline, name)),
-        )
+    assert_simulation_state_close(optimized, baseline, rtol=RTOL, atol=ATOL)
