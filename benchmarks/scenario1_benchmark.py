@@ -31,6 +31,7 @@ def synchronize():
 def run_fixed_steps(
     steps: int,
     profile: bool,
+    profile_row_limit: int,
     cuda_graph: bool,
     cuda_graph_chunk_steps: int,
     record_receivers: bool,
@@ -101,6 +102,19 @@ def run_fixed_steps(
     print(f"cuda_graph={cuda_graph and sim.P.device.type == 'cuda'}")
     print(f"cuda_graph_chunk_steps={cuda_graph_chunk_steps if cuda_graph else 1}")
     print(f"record_receivers={record_receivers}")
+    print(
+        "optimizations="
+        f"volume_rhs:{os.environ.get('EDG_ACOUSTICS_TRITON_VOLUME_RHS', '1')},"
+        f"interior_flux:{os.environ.get('EDG_ACOUSTICS_TRITON_INTERIOR_FLUX', '1')},"
+        f"boundary_ri:{os.environ.get('EDG_ACOUSTICS_TRITON_BOUNDARY_RI', '1')},"
+        f"boundary_ade:{os.environ.get('EDG_ACOUSTICS_TRITON_BOUNDARY_ADE', '1')},"
+        f"batched_derivatives:{os.environ.get('EDG_ACOUSTICS_BATCHED_DERIVATIVES', '1')},"
+        f"volume_surface_rhs:{os.environ.get('EDG_ACOUSTICS_TRITON_VOLUME_SURFACE_RHS', '1')},"
+        f"scaled_flux:{os.environ.get('EDG_ACOUSTICS_SCALED_FLUX_KERNELS', '1')},"
+        f"fused_state_accumulation:{os.environ.get('EDG_ACOUSTICS_FUSED_STATE_ACCUMULATION', '0')},"
+        f"derivative_volume:{os.environ.get('EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME', '0')},"
+        f"lift_surface:{os.environ.get('EDG_ACOUSTICS_TRITON_LIFT_SURFACE', '0')}"
+    )
     if sim.P.device.type == "cuda":
         print(f"cuda_name={torch.cuda.get_device_name(sim.P.device)}")
     else:
@@ -108,7 +122,7 @@ def run_fixed_steps(
 
     if prof is not None:
         sort_by = "cuda_time_total" if torch.cuda.is_available() else "cpu_time_total"
-        print(prof.key_averages().table(sort_by=sort_by, row_limit=40))
+        print(prof.key_averages().table(sort_by=sort_by, row_limit=profile_row_limit))
 
 
 def run_exact_script():
@@ -122,6 +136,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--profile-row-limit", type=int, default=40)
     parser.add_argument("--cuda-graph", action="store_true")
     parser.add_argument("--cuda-graph-chunk-steps", type=int, default=1)
     parser.add_argument(
@@ -146,12 +161,42 @@ def parse_args():
         action="store_true",
         help="Run examples/scenario1/main.py exactly instead of fixed-step benchmark.",
     )
+    parser.add_argument("--disable-triton-volume-rhs", action="store_true")
+    parser.add_argument("--disable-triton-interior-flux", action="store_true")
+    parser.add_argument("--disable-triton-boundary-ri", action="store_true")
+    parser.add_argument("--disable-triton-boundary-ade", action="store_true")
+    parser.add_argument("--disable-batched-derivatives", action="store_true")
+    parser.add_argument("--disable-triton-volume-surface-rhs", action="store_true")
+    parser.add_argument("--disable-scaled-flux-kernels", action="store_true")
+    parser.add_argument("--enable-fused-state-accumulation", action="store_true")
+    parser.add_argument("--enable-triton-derivative-volume", action="store_true")
+    parser.add_argument("--enable-triton-lift-surface", action="store_true")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     os.environ["EDG_ACOUSTICS_DEVICE"] = args.device
+    if args.disable_triton_volume_rhs:
+        os.environ["EDG_ACOUSTICS_TRITON_VOLUME_RHS"] = "0"
+    if args.disable_triton_interior_flux:
+        os.environ["EDG_ACOUSTICS_TRITON_INTERIOR_FLUX"] = "0"
+    if args.disable_triton_boundary_ri:
+        os.environ["EDG_ACOUSTICS_TRITON_BOUNDARY_RI"] = "0"
+    if args.disable_triton_boundary_ade:
+        os.environ["EDG_ACOUSTICS_TRITON_BOUNDARY_ADE"] = "0"
+    if args.disable_batched_derivatives:
+        os.environ["EDG_ACOUSTICS_BATCHED_DERIVATIVES"] = "0"
+    if args.disable_triton_volume_surface_rhs:
+        os.environ["EDG_ACOUSTICS_TRITON_VOLUME_SURFACE_RHS"] = "0"
+    if args.disable_scaled_flux_kernels:
+        os.environ["EDG_ACOUSTICS_SCALED_FLUX_KERNELS"] = "0"
+    if args.enable_fused_state_accumulation:
+        os.environ["EDG_ACOUSTICS_FUSED_STATE_ACCUMULATION"] = "1"
+    if args.enable_triton_derivative_volume:
+        os.environ["EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME"] = "1"
+    if args.enable_triton_lift_surface:
+        os.environ["EDG_ACOUSTICS_TRITON_LIFT_SURFACE"] = "1"
     if args.cpu_threads is not None:
         torch.set_num_threads(args.cpu_threads)
 
@@ -161,6 +206,7 @@ def main():
         run_fixed_steps(
             args.steps,
             args.profile,
+            args.profile_row_limit,
             args.cuda_graph,
             args.cuda_graph_chunk_steps,
             not args.no_record_receivers,

@@ -145,6 +145,277 @@ def volume_rhs_kernel(
 
 
 @triton.jit
+def volume_surface_rhs_kernel(
+    dQdr_ptr,
+    dQds_ptr,
+    dQdt_ptr,
+    metric_p_ptr,
+    metric_v_ptr,
+    surface_ptr,
+    rhs_ptr,
+    q_update_ptr,
+    total_nodes: tl.constexpr,
+    n_tets: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    coefficient: tl.constexpr,
+    UPDATE_STATE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_nodes
+    node = offsets // n_tets
+    tet = offsets - node * n_tets
+
+    p = node * n_var_tets + tet
+    vx = p + n_tets
+    vy = vx + n_tets
+    vz = vy + n_tets
+
+    dPdr = tl.load(dQdr_ptr + p, mask=mask)
+    dPds = tl.load(dQds_ptr + p, mask=mask)
+    dPdt = tl.load(dQdt_ptr + p, mask=mask)
+
+    dVxdr = tl.load(dQdr_ptr + vx, mask=mask)
+    dVxds = tl.load(dQds_ptr + vx, mask=mask)
+    dVxdt = tl.load(dQdt_ptr + vx, mask=mask)
+    dVydr = tl.load(dQdr_ptr + vy, mask=mask)
+    dVyds = tl.load(dQds_ptr + vy, mask=mask)
+    dVydt = tl.load(dQdt_ptr + vy, mask=mask)
+    dVzdr = tl.load(dQdr_ptr + vz, mask=mask)
+    dVzds = tl.load(dQds_ptr + vz, mask=mask)
+    dVzdt = tl.load(dQdt_ptr + vz, mask=mask)
+
+    m00 = node * n_tets + tet
+    m10 = 3 * total_nodes + m00
+    m20 = 6 * total_nodes + m00
+    m01 = total_nodes + m00
+    m11 = 4 * total_nodes + m00
+    m21 = 7 * total_nodes + m00
+    m02 = 2 * total_nodes + m00
+    m12 = 5 * total_nodes + m00
+    m22 = 8 * total_nodes + m00
+
+    rhs_vx = (
+        tl.load(metric_v_ptr + m00, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m10, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m20, mask=mask) * dPdt
+        + tl.load(surface_ptr + vx, mask=mask)
+    )
+    rhs_vy = (
+        tl.load(metric_v_ptr + m01, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m11, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m21, mask=mask) * dPdt
+        + tl.load(surface_ptr + vy, mask=mask)
+    )
+    rhs_vz = (
+        tl.load(metric_v_ptr + m02, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m12, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m22, mask=mask) * dPdt
+        + tl.load(surface_ptr + vz, mask=mask)
+    )
+
+    rhs_p = (
+        tl.load(metric_p_ptr + m00, mask=mask) * dVxdr
+        + tl.load(metric_p_ptr + m10, mask=mask) * dVxds
+        + tl.load(metric_p_ptr + m20, mask=mask) * dVxdt
+        + tl.load(metric_p_ptr + m01, mask=mask) * dVydr
+        + tl.load(metric_p_ptr + m11, mask=mask) * dVyds
+        + tl.load(metric_p_ptr + m21, mask=mask) * dVydt
+        + tl.load(metric_p_ptr + m02, mask=mask) * dVzdr
+        + tl.load(metric_p_ptr + m12, mask=mask) * dVzds
+        + tl.load(metric_p_ptr + m22, mask=mask) * dVzdt
+        + tl.load(surface_ptr + p, mask=mask)
+    )
+
+    tl.store(rhs_ptr + p, rhs_p, mask=mask)
+    tl.store(rhs_ptr + vx, rhs_vx, mask=mask)
+    tl.store(rhs_ptr + vy, rhs_vy, mask=mask)
+    tl.store(rhs_ptr + vz, rhs_vz, mask=mask)
+    if UPDATE_STATE:
+        tl.store(
+            q_update_ptr + p,
+            tl.load(q_update_ptr + p, mask=mask) + coefficient * rhs_p,
+            mask=mask,
+        )
+        tl.store(
+            q_update_ptr + vx,
+            tl.load(q_update_ptr + vx, mask=mask) + coefficient * rhs_vx,
+            mask=mask,
+        )
+        tl.store(
+            q_update_ptr + vy,
+            tl.load(q_update_ptr + vy, mask=mask) + coefficient * rhs_vy,
+            mask=mask,
+        )
+        tl.store(
+            q_update_ptr + vz,
+            tl.load(q_update_ptr + vz, mask=mask) + coefficient * rhs_vz,
+            mask=mask,
+        )
+
+
+@triton.jit
+def derivative_volume_surface_rhs_kernel(
+    q_ptr,
+    dr_ptr,
+    ds_ptr,
+    dt_ptr,
+    metric_p_ptr,
+    metric_v_ptr,
+    surface_ptr,
+    rhs_ptr,
+    q_update_ptr,
+    total_nodes: tl.constexpr,
+    n_tets: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    n_p: tl.constexpr,
+    coefficient: tl.constexpr,
+    UPDATE_STATE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_nodes
+    node = offsets // n_tets
+    tet = offsets - node * n_tets
+
+    dPdr = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dPds = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dPdt = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVxdr = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVxds = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVxdt = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVydr = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVyds = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVydt = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVzdr = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVzds = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVzdt = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+
+    for k in range(n_p):
+        d_index = node * n_p + k
+        q_base = k * n_var_tets + tet
+        p = q_base
+        vx = q_base + n_tets
+        vy = q_base + 2 * n_tets
+        vz = q_base + 3 * n_tets
+        dr = tl.load(dr_ptr + d_index, mask=mask)
+        ds = tl.load(ds_ptr + d_index, mask=mask)
+        dt = tl.load(dt_ptr + d_index, mask=mask)
+        q_p = tl.load(q_ptr + p, mask=mask)
+        q_vx = tl.load(q_ptr + vx, mask=mask)
+        q_vy = tl.load(q_ptr + vy, mask=mask)
+        q_vz = tl.load(q_ptr + vz, mask=mask)
+        dPdr += dr * q_p
+        dPds += ds * q_p
+        dPdt += dt * q_p
+        dVxdr += dr * q_vx
+        dVxds += ds * q_vx
+        dVxdt += dt * q_vx
+        dVydr += dr * q_vy
+        dVyds += ds * q_vy
+        dVydt += dt * q_vy
+        dVzdr += dr * q_vz
+        dVzds += ds * q_vz
+        dVzdt += dt * q_vz
+
+    out_p = node * n_var_tets + tet
+    out_vx = out_p + n_tets
+    out_vy = out_p + 2 * n_tets
+    out_vz = out_p + 3 * n_tets
+
+    m00 = node * n_tets + tet
+    m10 = 3 * total_nodes + m00
+    m20 = 6 * total_nodes + m00
+    m01 = total_nodes + m00
+    m11 = 4 * total_nodes + m00
+    m21 = 7 * total_nodes + m00
+    m02 = 2 * total_nodes + m00
+    m12 = 5 * total_nodes + m00
+    m22 = 8 * total_nodes + m00
+
+    rhs_vx = (
+        tl.load(metric_v_ptr + m00, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m10, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m20, mask=mask) * dPdt
+        + tl.load(surface_ptr + out_vx, mask=mask)
+    )
+    rhs_vy = (
+        tl.load(metric_v_ptr + m01, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m11, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m21, mask=mask) * dPdt
+        + tl.load(surface_ptr + out_vy, mask=mask)
+    )
+    rhs_vz = (
+        tl.load(metric_v_ptr + m02, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m12, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m22, mask=mask) * dPdt
+        + tl.load(surface_ptr + out_vz, mask=mask)
+    )
+
+    rhs_p = (
+        tl.load(metric_p_ptr + m00, mask=mask) * dVxdr
+        + tl.load(metric_p_ptr + m10, mask=mask) * dVxds
+        + tl.load(metric_p_ptr + m20, mask=mask) * dVxdt
+        + tl.load(metric_p_ptr + m01, mask=mask) * dVydr
+        + tl.load(metric_p_ptr + m11, mask=mask) * dVyds
+        + tl.load(metric_p_ptr + m21, mask=mask) * dVydt
+        + tl.load(metric_p_ptr + m02, mask=mask) * dVzdr
+        + tl.load(metric_p_ptr + m12, mask=mask) * dVzds
+        + tl.load(metric_p_ptr + m22, mask=mask) * dVzdt
+        + tl.load(surface_ptr + out_p, mask=mask)
+    )
+
+    tl.store(rhs_ptr + out_p, rhs_p, mask=mask)
+    tl.store(rhs_ptr + out_vx, rhs_vx, mask=mask)
+    tl.store(rhs_ptr + out_vy, rhs_vy, mask=mask)
+    tl.store(rhs_ptr + out_vz, rhs_vz, mask=mask)
+    if UPDATE_STATE:
+        tl.store(
+            q_update_ptr + out_p,
+            tl.load(q_update_ptr + out_p, mask=mask) + coefficient * rhs_p,
+            mask=mask,
+        )
+        tl.store(
+            q_update_ptr + out_vx,
+            tl.load(q_update_ptr + out_vx, mask=mask) + coefficient * rhs_vx,
+            mask=mask,
+        )
+        tl.store(
+            q_update_ptr + out_vy,
+            tl.load(q_update_ptr + out_vy, mask=mask) + coefficient * rhs_vy,
+            mask=mask,
+        )
+        tl.store(
+            q_update_ptr + out_vz,
+            tl.load(q_update_ptr + out_vz, mask=mask) + coefficient * rhs_vz,
+            mask=mask,
+        )
+
+
+@triton.jit
+def lift_surface_kernel(
+    lift_ptr,
+    flux_ptr,
+    surface_ptr,
+    total_outputs: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    n_faces: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_outputs
+    node = offsets // n_var_tets
+    col = offsets - node * n_var_tets
+    acc = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    for face_node in range(n_faces):
+        acc += (
+            tl.load(lift_ptr + node * n_faces + face_node, mask=mask)
+            * tl.load(flux_ptr + face_node * n_var_tets + col, mask=mask)
+        )
+    tl.store(surface_ptr + offsets, acc, mask=mask)
+
+
+@triton.jit
 def interior_flux_kernel(
     q_ptr,
     vmapM_q_ptr,
@@ -161,11 +432,13 @@ def interior_flux_kernel(
     csn1rho_ptr,
     csn2rho_ptr,
     csn3rho_ptr,
+    fscale_ptr,
     flux_ptr,
     total_faces: tl.constexpr,
     n_tets: tl.constexpr,
     n_var_tets: tl.constexpr,
     c0: tl.constexpr,
+    SCALE_FLUX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -211,6 +484,12 @@ def interior_flux_kernel(
         + tl.load(csn2rho_ptr + offsets, mask=mask) * dvy
         + tl.load(csn3rho_ptr + offsets, mask=mask) * dvz
     )
+    if SCALE_FLUX:
+        fscale = tl.load(fscale_ptr + offsets, mask=mask)
+        flux_p *= fscale
+        flux_vx *= fscale
+        flux_vy *= fscale
+        flux_vz *= fscale
 
     out_base = face * n_var_tets + tet
     tl.store(flux_ptr + out_base, flux_p, mask=mask)
@@ -227,6 +506,7 @@ def boundary_ri_flux_kernel(
     nx_ptr,
     ny_ptr,
     nz_ptr,
+    fscale_ptr,
     flux_ptr,
     vn_ptr,
     ou_ptr,
@@ -235,6 +515,7 @@ def boundary_ri_flux_kernel(
     rho0: tl.constexpr,
     c0: tl.constexpr,
     ri: tl.constexpr,
+    SCALE_FLUX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -258,6 +539,177 @@ def boundary_ri_flux_kernel(
     incoming = ri * ou
     velocity_flux = p / rho0 - 0.5 * c0 * (ou + incoming)
     pressure_flux = (vn - 0.5 * ou + 0.5 * incoming) * (c0 * c0 * rho0)
+    if SCALE_FLUX:
+        fscale = tl.load(fscale_ptr + offsets, mask=mask)
+        pressure_flux *= fscale
+        velocity_flux *= fscale
+
+    tl.store(vn_ptr + offsets, vn, mask=mask)
+    tl.store(ou_ptr + offsets, ou, mask=mask)
+    tl.store(in_ptr + offsets, incoming, mask=mask)
+
+    out_p = tl.load(flux_map_q_ptr + offsets, mask=mask, other=0)
+    out_vx = tl.load(flux_map_q_ptr + n_boundary + offsets, mask=mask, other=0)
+    out_vy = tl.load(flux_map_q_ptr + 2 * n_boundary + offsets, mask=mask, other=0)
+    out_vz = tl.load(flux_map_q_ptr + 3 * n_boundary + offsets, mask=mask, other=0)
+    tl.store(flux_ptr + out_p, pressure_flux, mask=mask)
+    tl.store(flux_ptr + out_vx, nx * velocity_flux, mask=mask)
+    tl.store(flux_ptr + out_vy, ny * velocity_flux, mask=mask)
+    tl.store(flux_ptr + out_vz, nz * velocity_flux, mask=mask)
+
+
+@triton.jit
+def boundary_rp_flux_kernel(
+    q_ptr,
+    vmap_q_ptr,
+    flux_map_q_ptr,
+    nx_ptr,
+    ny_ptr,
+    nz_ptr,
+    fscale_ptr,
+    rp_a_ptr,
+    rp_zeta_ptr,
+    flux_ptr,
+    vn_ptr,
+    ou_ptr,
+    in_ptr,
+    phi_ptr,
+    n_boundary: tl.constexpr,
+    rho0: tl.constexpr,
+    c0: tl.constexpr,
+    ri: tl.constexpr,
+    RP_COUNT: tl.constexpr,
+    SCALE_FLUX: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_boundary
+
+    idx_p = tl.load(vmap_q_ptr + offsets, mask=mask, other=0)
+    idx_vx = tl.load(vmap_q_ptr + n_boundary + offsets, mask=mask, other=0)
+    idx_vy = tl.load(vmap_q_ptr + 2 * n_boundary + offsets, mask=mask, other=0)
+    idx_vz = tl.load(vmap_q_ptr + 3 * n_boundary + offsets, mask=mask, other=0)
+
+    p = tl.load(q_ptr + idx_p, mask=mask)
+    vx = tl.load(q_ptr + idx_vx, mask=mask)
+    vy = tl.load(q_ptr + idx_vy, mask=mask)
+    vz = tl.load(q_ptr + idx_vz, mask=mask)
+    nx = tl.load(nx_ptr + offsets, mask=mask)
+    ny = tl.load(ny_ptr + offsets, mask=mask)
+    nz = tl.load(nz_ptr + offsets, mask=mask)
+
+    vn = nx * vx + ny * vy + nz * vz
+    ou = vn + p / (rho0 * c0)
+    incoming = ri * ou
+
+    for pole in range(RP_COUNT):
+        phi_index = pole * n_boundary + offsets
+        phi_value = tl.load(phi_ptr + phi_index, mask=mask)
+        incoming += tl.load(rp_a_ptr + pole) * phi_value
+        tl.store(
+            phi_ptr + phi_index,
+            ou - tl.load(rp_zeta_ptr + pole) * phi_value,
+            mask=mask,
+        )
+
+    velocity_flux = p / rho0 - 0.5 * c0 * (ou + incoming)
+    pressure_flux = (vn - 0.5 * ou + 0.5 * incoming) * (c0 * c0 * rho0)
+    if SCALE_FLUX:
+        fscale = tl.load(fscale_ptr + offsets, mask=mask)
+        pressure_flux *= fscale
+        velocity_flux *= fscale
+
+    tl.store(vn_ptr + offsets, vn, mask=mask)
+    tl.store(ou_ptr + offsets, ou, mask=mask)
+    tl.store(in_ptr + offsets, incoming, mask=mask)
+
+    out_p = tl.load(flux_map_q_ptr + offsets, mask=mask, other=0)
+    out_vx = tl.load(flux_map_q_ptr + n_boundary + offsets, mask=mask, other=0)
+    out_vy = tl.load(flux_map_q_ptr + 2 * n_boundary + offsets, mask=mask, other=0)
+    out_vz = tl.load(flux_map_q_ptr + 3 * n_boundary + offsets, mask=mask, other=0)
+    tl.store(flux_ptr + out_p, pressure_flux, mask=mask)
+    tl.store(flux_ptr + out_vx, nx * velocity_flux, mask=mask)
+    tl.store(flux_ptr + out_vy, ny * velocity_flux, mask=mask)
+    tl.store(flux_ptr + out_vz, nz * velocity_flux, mask=mask)
+
+
+@triton.jit
+def boundary_rp_cp_flux_kernel(
+    q_ptr,
+    vmap_q_ptr,
+    flux_map_q_ptr,
+    nx_ptr,
+    ny_ptr,
+    nz_ptr,
+    fscale_ptr,
+    rp_a_ptr,
+    rp_zeta_ptr,
+    cp_b_ptr,
+    cp_c_ptr,
+    cp_alpha_ptr,
+    cp_beta_ptr,
+    flux_ptr,
+    vn_ptr,
+    ou_ptr,
+    in_ptr,
+    phi_ptr,
+    kexi1_ptr,
+    kexi2_ptr,
+    n_boundary: tl.constexpr,
+    rho0: tl.constexpr,
+    c0: tl.constexpr,
+    ri: tl.constexpr,
+    RP_COUNT: tl.constexpr,
+    CP_COUNT: tl.constexpr,
+    SCALE_FLUX: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_boundary
+
+    idx_p = tl.load(vmap_q_ptr + offsets, mask=mask, other=0)
+    idx_vx = tl.load(vmap_q_ptr + n_boundary + offsets, mask=mask, other=0)
+    idx_vy = tl.load(vmap_q_ptr + 2 * n_boundary + offsets, mask=mask, other=0)
+    idx_vz = tl.load(vmap_q_ptr + 3 * n_boundary + offsets, mask=mask, other=0)
+
+    p = tl.load(q_ptr + idx_p, mask=mask)
+    vx = tl.load(q_ptr + idx_vx, mask=mask)
+    vy = tl.load(q_ptr + idx_vy, mask=mask)
+    vz = tl.load(q_ptr + idx_vz, mask=mask)
+    nx = tl.load(nx_ptr + offsets, mask=mask)
+    ny = tl.load(ny_ptr + offsets, mask=mask)
+    nz = tl.load(nz_ptr + offsets, mask=mask)
+
+    vn = nx * vx + ny * vy + nz * vz
+    ou = vn + p / (rho0 * c0)
+    incoming = ri * ou
+
+    for pole in range(RP_COUNT):
+        phi_index = pole * n_boundary + offsets
+        phi_value = tl.load(phi_ptr + phi_index, mask=mask)
+        incoming += tl.load(rp_a_ptr + pole) * phi_value
+        tl.store(
+            phi_ptr + phi_index,
+            ou - tl.load(rp_zeta_ptr + pole) * phi_value,
+            mask=mask,
+        )
+
+    for pole in range(CP_COUNT):
+        cp_index = pole * n_boundary + offsets
+        kexi1 = tl.load(kexi1_ptr + cp_index, mask=mask)
+        kexi2 = tl.load(kexi2_ptr + cp_index, mask=mask)
+        alpha = tl.load(cp_alpha_ptr + pole)
+        beta = tl.load(cp_beta_ptr + pole)
+        incoming += tl.load(cp_b_ptr + pole) * kexi1 + tl.load(cp_c_ptr + pole) * kexi2
+        tl.store(kexi1_ptr + cp_index, ou - alpha * kexi1 - beta * kexi2, mask=mask)
+        tl.store(kexi2_ptr + cp_index, -alpha * kexi2 + beta * kexi1, mask=mask)
+
+    velocity_flux = p / rho0 - 0.5 * c0 * (ou + incoming)
+    pressure_flux = (vn - 0.5 * ou + 0.5 * incoming) * (c0 * c0 * rho0)
+    if SCALE_FLUX:
+        fscale = tl.load(fscale_ptr + offsets, mask=mask)
+        pressure_flux *= fscale
+        velocity_flux *= fscale
 
     tl.store(vn_ptr + offsets, vn, mask=mask)
     tl.store(ou_ptr + offsets, ou, mask=mask)
@@ -554,9 +1006,39 @@ class AcousticsSimulation:
             self.device.type == "cuda"
             and os.environ.get("EDG_ACOUSTICS_TRITON_BOUNDARY_RI", "1") != "0"
         )
+        self._use_triton_boundary_ade = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_TRITON_BOUNDARY_ADE", "1") != "0"
+        )
         self._use_batched_derivatives = (
             self.device.type == "cuda"
             and os.environ.get("EDG_ACOUSTICS_BATCHED_DERIVATIVES", "1") != "0"
+        )
+        self._use_triton_volume_surface_rhs = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_TRITON_VOLUME_SURFACE_RHS", "1")
+            != "0"
+        )
+        self._use_scaled_flux_kernels = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_SCALED_FLUX_KERNELS", "1") != "0"
+            and self._use_triton_interior_flux
+            and self._use_triton_boundary_ri
+            and self._use_triton_boundary_ade
+        )
+        self._use_fused_state_accumulation = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_FUSED_STATE_ACCUMULATION", "0")
+            != "0"
+        )
+        self._use_triton_derivative_volume = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME", "0")
+            != "0"
+        )
+        self._use_triton_lift_surface = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_TRITON_LIFT_SURFACE", "0") != "0"
         )
         self._flux_by_face = torch.empty((4 * self.Nfp, 4 * self.N_tets), **kwargs)
         self._flux_by_face_view = self._flux_by_face.view(4 * self.Nfp, 4, self.N_tets)
@@ -591,6 +1073,7 @@ class AcousticsSimulation:
             node["nx"] = self._nx_flat[node["map"]]
             node["ny"] = self._ny_flat[node["map"]]
             node["nz"] = self._nz_flat[node["map"]]
+            node["fscale"] = self.Fscale.reshape(-1)[node["map"]]
 
     def cache_boundary_parameters(self):
         """Cache boundary parameters as tensors without changing saved BC metadata."""
@@ -757,11 +1240,13 @@ class AcousticsSimulation:
                 self.flux.csn1rho,
                 self.flux.csn2rho,
                 self.flux.csn3rho,
+                self.Fscale.reshape(-1),
                 self._flux_by_face.reshape(-1),
                 total_faces,
                 self.N_tets,
                 4 * self.N_tets,
                 self.c0,
+                self._use_scaled_flux_kernels,
                 BLOCK_SIZE=block_size,
             )
             return
@@ -821,7 +1306,34 @@ class AcousticsSimulation:
         self._divV.addcmul_(sz, self._dQds_view[:, 3, :])
         self._divV.addcmul_(tz, self._dQdt_view[:, 3, :])
 
-    def _compute_volume_rhs(self, rhs_view: torch.tensor):
+    def _compute_volume_rhs(
+        self,
+        rhs_view: torch.tensor,
+        surface_by_node: torch.tensor | None = None,
+        q_update: torch.tensor | None = None,
+        coefficient: float = 0.0,
+    ):
+        if self._use_triton_volume_rhs and surface_by_node is not None:
+            total_nodes = self.Np * self.N_tets
+            block_size = 256
+            volume_surface_rhs_kernel[(triton.cdiv(total_nodes, block_size),)](
+                self._dQdr_by_node,
+                self._dQds_by_node,
+                self._dQdt_by_node,
+                self._metric_p,
+                self._metric_v,
+                surface_by_node,
+                rhs_view.reshape(self.Np, 4 * self.N_tets),
+                q_update if q_update is not None else rhs_view.reshape(self.Np, 4 * self.N_tets),
+                total_nodes,
+                self.N_tets,
+                4 * self.N_tets,
+                coefficient,
+                q_update is not None,
+                BLOCK_SIZE=block_size,
+            )
+            return
+
         if self._use_triton_volume_rhs:
             total_nodes = self.Np * self.N_tets
             block_size = 256
@@ -866,8 +1378,199 @@ class AcousticsSimulation:
         rhs_p.addcmul_(self._metric_p[1, 2], self._dQds_view[:, 3, :])
         rhs_p.addcmul_(self._metric_p[2, 2], self._dQdt_view[:, 3, :])
 
+    def _compute_derivative_volume_rhs(
+        self,
+        q_by_node: torch.tensor,
+        rhs_view: torch.tensor,
+        surface_by_node: torch.tensor,
+        q_update: torch.tensor | None = None,
+        coefficient: float = 0.0,
+    ):
+        total_nodes = self.Np * self.N_tets
+        block_size = 128
+        derivative_volume_surface_rhs_kernel[(triton.cdiv(total_nodes, block_size),)](
+            q_by_node,
+            self.Dr,
+            self.Ds,
+            self.Dt,
+            self._metric_p,
+            self._metric_v,
+            surface_by_node,
+            rhs_view.reshape(self.Np, 4 * self.N_tets),
+            q_update if q_update is not None else rhs_view.reshape(self.Np, 4 * self.N_tets),
+            total_nodes,
+            self.N_tets,
+            4 * self.N_tets,
+            self.Np,
+            coefficient,
+            q_update is not None,
+            BLOCK_SIZE=block_size,
+        )
+
     def _compute_lift_surface(self):
+        if self._use_triton_lift_surface:
+            total_outputs = self.Np * 4 * self.N_tets
+            block_size = 128
+            lift_surface_kernel[(triton.cdiv(total_outputs, block_size),)](
+                self.lift,
+                self._flux_by_face,
+                self._surface_by_node,
+                total_outputs,
+                4 * self.N_tets,
+                4 * self.Nfp,
+                BLOCK_SIZE=block_size,
+            )
+            return
+
         torch.mm(self.lift, self._flux_by_face, out=self._surface_by_node)
+
+    def _compute_boundary_flux(
+        self,
+        bc_cache: dict,
+        node: dict,
+        bcvar: dict,
+        q_flat: torch.tensor,
+        flux_flat: torch.tensor,
+    ):
+        n_boundary = bcvar["vn"].numel()
+        block_size = 256
+        if self._use_triton_boundary_ri and bc_cache["simple_RI"]:
+            boundary_ri_flux_kernel[(triton.cdiv(n_boundary, block_size),)](
+                q_flat,
+                node["vmap_q"],
+                node["flux_map_q"],
+                node["nx"],
+                node["ny"],
+                node["nz"],
+                node["fscale"],
+                flux_flat,
+                bcvar["vn"],
+                bcvar["ou"],
+                bcvar["in"],
+                n_boundary,
+                self.rho0,
+                self.c0,
+                bc_cache["RI_value"],
+                self._use_scaled_flux_kernels,
+                BLOCK_SIZE=block_size,
+            )
+            return
+
+        if self._use_triton_boundary_ade and "CP_B" in bc_cache:
+            boundary_rp_cp_flux_kernel[(triton.cdiv(n_boundary, block_size),)](
+                q_flat,
+                node["vmap_q"],
+                node["flux_map_q"],
+                node["nx"],
+                node["ny"],
+                node["nz"],
+                node["fscale"],
+                bc_cache["RP_A"],
+                bc_cache["RP_zeta"],
+                bc_cache["CP_B"],
+                bc_cache["CP_C"],
+                bc_cache["CP_alpha"],
+                bc_cache["CP_beta"],
+                flux_flat,
+                bcvar["vn"],
+                bcvar["ou"],
+                bcvar["in"],
+                bcvar["phi"],
+                bcvar["kexi1"],
+                bcvar["kexi2"],
+                n_boundary,
+                self.rho0,
+                self.c0,
+                bc_cache["RI_value"],
+                bcvar["phi"].shape[0],
+                bcvar["kexi1"].shape[0],
+                self._use_scaled_flux_kernels,
+                BLOCK_SIZE=block_size,
+            )
+            return
+
+        if self._use_triton_boundary_ade and "RP_A" in bc_cache:
+            boundary_rp_flux_kernel[(triton.cdiv(n_boundary, block_size),)](
+                q_flat,
+                node["vmap_q"],
+                node["flux_map_q"],
+                node["nx"],
+                node["ny"],
+                node["nz"],
+                node["fscale"],
+                bc_cache["RP_A"],
+                bc_cache["RP_zeta"],
+                flux_flat,
+                bcvar["vn"],
+                bcvar["ou"],
+                bcvar["in"],
+                bcvar["phi"],
+                n_boundary,
+                self.rho0,
+                self.c0,
+                bc_cache["RI_value"],
+                bcvar["phi"].shape[0],
+                self._use_scaled_flux_kernels,
+                BLOCK_SIZE=block_size,
+            )
+            return
+
+        boundary_q = bc_cache["boundary_q"]
+        torch.index_select(
+            q_flat,
+            0,
+            node["vmap_q"],
+            out=boundary_q.reshape(-1),
+        )
+        boundary_p = boundary_q[0]
+        boundary_temp = bc_cache["boundary_temp"]
+        boundary_flux = bc_cache["boundary_flux"]
+        incoming_outgoing = bc_cache["incoming_outgoing"]
+        torch.mul(node["nx"], boundary_q[1], out=bcvar["vn"])
+        bcvar["vn"].addcmul_(node["ny"], boundary_q[2])
+        bcvar["vn"].addcmul_(node["nz"], boundary_q[3])
+        torch.mul(boundary_p, 1.0 / (self.rho0 * self.c0), out=boundary_temp)
+        torch.add(bcvar["vn"], boundary_temp, out=bcvar["ou"])
+        torch.mul(bcvar["ou"], bc_cache["RI"], out=bcvar["in"])
+
+        if "RP_A" in bc_cache:
+            phi = bcvar["phi"]
+            torch.mul(bc_cache["RP_A"], phi, out=bc_cache["RP_terms"])
+            torch.sum(bc_cache["RP_terms"], dim=0, out=bc_cache["RP_sum"])
+            bcvar["in"].add_(bc_cache["RP_sum"])
+            phi.copy_(bcvar["ou"].unsqueeze(0) - bc_cache["RP_zeta"] * phi)
+
+        if "CP_B" in bc_cache:
+            kexi1 = bcvar["kexi1"]
+            kexi2 = bcvar["kexi2"]
+            torch.mul(bc_cache["CP_B"], kexi1, out=bc_cache["CP_terms"])
+            bc_cache["CP_terms"].addcmul_(bc_cache["CP_C"], kexi2)
+            torch.sum(bc_cache["CP_terms"], dim=0, out=bc_cache["CP_sum"])
+            bcvar["in"].add_(bc_cache["CP_sum"])
+            bc_cache["kexi1_temp"].copy_(kexi1)
+            kexi1.copy_(
+                bcvar["ou"].unsqueeze(0)
+                - bc_cache["CP_alpha"] * kexi1
+                - bc_cache["CP_beta"] * kexi2
+            )
+            kexi2.copy_(
+                -bc_cache["CP_alpha"] * kexi2
+                + bc_cache["CP_beta"] * bc_cache["kexi1_temp"]
+            )
+
+        torch.add(bcvar["ou"], bcvar["in"], out=incoming_outgoing)
+        torch.mul(boundary_p, 1.0 / self.rho0, out=boundary_temp)
+        boundary_temp.add_(incoming_outgoing, alpha=-0.5 * self.c0)
+        torch.mul(node["nx"], boundary_temp, out=boundary_flux[1])
+        torch.mul(node["ny"], boundary_temp, out=boundary_flux[2])
+        torch.mul(node["nz"], boundary_temp, out=boundary_flux[3])
+
+        boundary_temp.copy_(bcvar["vn"])
+        boundary_temp.add_(bcvar["ou"], alpha=-0.5)
+        boundary_temp.add_(bcvar["in"], alpha=0.5)
+        boundary_temp.mul_((self.c0**2) * self.rho0)
+        boundary_flux[0].copy_(boundary_temp)
+        flux_flat[node["flux_map_q"]] = boundary_flux.reshape(-1)
 
     def _snapshot_time_state(self):
         return (
@@ -1786,6 +2489,8 @@ class AcousticsSimulation:
         self,
         q_by_node: torch.tensor,
         BCvar: list[dict],
+        q_accumulate: torch.tensor | None = None,
+        accumulate_coefficient: float = 0.0,
     ):
         """Compute packed RHS for ``q_by_node`` shaped ``[Np, 4 * N_tets]``."""
 
@@ -1794,111 +2499,65 @@ class AcousticsSimulation:
         RHS_Vx = RHS_Q_view[:, 1, :]
         RHS_Vy = RHS_Q_view[:, 2, :]
         RHS_Vz = RHS_Q_view[:, 3, :]
-        self._compute_packed_derivatives(q_by_node)
+        if not self._use_triton_derivative_volume:
+            self._compute_packed_derivatives(q_by_node)
         self._compute_interior_flux(q_by_node)
 
         flux_flat = self._flux_by_face.reshape(-1)
         flux_view = self._flux_by_face_view
 
+        q_flat = q_by_node.reshape(-1)
         for index, bc_cache in enumerate(self._BC_cache):
-            # 'RI' refers to the limit value of the reflection coefficient as the frequency approaches infinity, i.e., :math:`R_\\inf`.
-            # 'RP' refers to real pole pairs, i.e., :math:`A` (stored in 1st row), :math:`\\zeta` (stored in 2nd row).
-            #     'CP' refers to complex pole pairs, i.e., :math:`B` (stored in 1st row), :math:`C` (stored in 2nd row),
-            #          :math:`\\alpha` (stored in 3rd row), :math:`\\beta`(stored in 4th row).
-            node = self.BCnode[index]
-            bcvar = BCvar[index]
-            if self._use_triton_boundary_ri and bc_cache["simple_RI"]:
-                n_boundary = bcvar["vn"].numel()
-                block_size = 256
-                boundary_ri_flux_kernel[(triton.cdiv(n_boundary, block_size),)](
-                    q_by_node.reshape(-1),
-                    node["vmap_q"],
-                    node["flux_map_q"],
-                    node["nx"],
-                    node["ny"],
-                    node["nz"],
-                    flux_flat,
-                    bcvar["vn"],
-                    bcvar["ou"],
-                    bcvar["in"],
-                    n_boundary,
-                    self.rho0,
-                    self.c0,
-                    bc_cache["RI_value"],
-                    BLOCK_SIZE=block_size,
-                )
-                continue
-
-            boundary_q = bc_cache["boundary_q"]
-            torch.index_select(
-                q_by_node.reshape(-1),
-                0,
-                node["vmap_q"],
-                out=boundary_q.reshape(-1),
+            self._compute_boundary_flux(
+                bc_cache,
+                self.BCnode[index],
+                BCvar[index],
+                q_flat,
+                flux_flat,
             )
-            boundary_p = boundary_q[0]
-            boundary_temp = bc_cache["boundary_temp"]
-            boundary_temp2 = bc_cache["boundary_temp2"]
-            boundary_flux = bc_cache["boundary_flux"]
-            incoming_outgoing = bc_cache["incoming_outgoing"]
-            torch.mul(node["nx"], boundary_q[1], out=bcvar["vn"])
-            bcvar["vn"].addcmul_(node["ny"], boundary_q[2])
-            bcvar["vn"].addcmul_(node["nz"], boundary_q[3])
-            torch.mul(boundary_p, 1.0 / (self.rho0 * self.c0), out=boundary_temp)
-            torch.add(bcvar["vn"], boundary_temp, out=bcvar["ou"])
-            torch.mul(bcvar["ou"], bc_cache["RI"], out=bcvar["in"])
 
-            if "RP_A" in bc_cache:
-                phi = bcvar["phi"]
-                torch.mul(bc_cache["RP_A"], phi, out=bc_cache["RP_terms"])
-                torch.sum(bc_cache["RP_terms"], dim=0, out=bc_cache["RP_sum"])
-                bcvar["in"].add_(bc_cache["RP_sum"])
-                phi.copy_(bcvar["ou"].unsqueeze(0) - bc_cache["RP_zeta"] * phi)
+        if not self._use_scaled_flux_kernels:
+            flux_view.mul_(self.Fscale.unsqueeze(1))
 
-            if "CP_B" in bc_cache:
-                kexi1 = bcvar["kexi1"]
-                kexi2 = bcvar["kexi2"]
-                torch.mul(bc_cache["CP_B"], kexi1, out=bc_cache["CP_terms"])
-                bc_cache["CP_terms"].addcmul_(bc_cache["CP_C"], kexi2)
-                torch.sum(bc_cache["CP_terms"], dim=0, out=bc_cache["CP_sum"])
-                bcvar["in"].add_(bc_cache["CP_sum"])
-                bc_cache["kexi1_temp"].copy_(kexi1)
-                kexi1.copy_(
-                    bcvar["ou"].unsqueeze(0)
-                    - bc_cache["CP_alpha"] * kexi1
-                    - bc_cache["CP_beta"] * kexi2
-                )
-                kexi2.copy_(
-                    -bc_cache["CP_alpha"] * kexi2
-                    + bc_cache["CP_beta"] * bc_cache["kexi1_temp"]
-                )
-
-            torch.add(bcvar["ou"], bcvar["in"], out=incoming_outgoing)
-            torch.mul(boundary_p, 1.0 / self.rho0, out=boundary_temp)
-            boundary_temp.add_(incoming_outgoing, alpha=-0.5 * self.c0)
-            torch.mul(node["nx"], boundary_temp, out=boundary_flux[1])
-            torch.mul(node["ny"], boundary_temp, out=boundary_flux[2])
-            torch.mul(node["nz"], boundary_temp, out=boundary_flux[3])
-
-            boundary_temp.copy_(bcvar["vn"])
-            boundary_temp.add_(bcvar["ou"], alpha=-0.5)
-            boundary_temp.add_(bcvar["in"], alpha=0.5)
-            boundary_temp.mul_((self.c0**2) * self.rho0)
-            boundary_flux[0].copy_(boundary_temp)
-            flux_flat[node["flux_map_q"]] = boundary_flux.reshape(-1)
-
-        flux_view.mul_(self.Fscale.unsqueeze(1))
-
-        self._compute_volume_rhs(RHS_Q_view)
         self._compute_lift_surface()
-        surface = self._surface_view
-
-        RHS_P.add_(surface[:, 0, :])
-        RHS_Vx.add_(surface[:, 1, :])
-        RHS_Vy.add_(surface[:, 2, :])
-        RHS_Vz.add_(surface[:, 3, :])
+        if self._use_triton_volume_surface_rhs and self._use_triton_volume_rhs:
+            if self._use_triton_derivative_volume:
+                self._compute_derivative_volume_rhs(
+                    q_by_node,
+                    RHS_Q_view,
+                    self._surface_by_node,
+                    q_accumulate,
+                    accumulate_coefficient,
+                )
+            else:
+                self._compute_volume_rhs(
+                    RHS_Q_view,
+                    self._surface_by_node,
+                    q_accumulate,
+                    accumulate_coefficient,
+                )
+        else:
+            self._compute_volume_rhs(RHS_Q_view)
+            surface = self._surface_view
+            RHS_P.add_(surface[:, 0, :])
+            RHS_Vx.add_(surface[:, 1, :])
+            RHS_Vy.add_(surface[:, 2, :])
+            RHS_Vz.add_(surface[:, 3, :])
+            if q_accumulate is not None:
+                q_accumulate.add_(RHS_Q, alpha=accumulate_coefficient)
 
         return RHS_Q, BCvar
+
+    def RHS_operator_packed_accumulate(
+        self,
+        q_by_node: torch.tensor,
+        BCvar: list[dict],
+        q_accumulate: torch.tensor,
+        coefficient: float,
+    ):
+        return self.RHS_operator_packed(
+            q_by_node, BCvar, q_accumulate, coefficient
+        )
 
     def time_integration(self, **kwargs):
         """Perform time integration for the acoustics simulation. Additional keyword arguments are optional and can vary:

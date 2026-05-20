@@ -94,6 +94,11 @@ class TSI_TI(TimeIntegrator):
         ]
         owner = getattr(L_operator, "__self__", None)
         self.L_operator_packed = getattr(owner, "RHS_operator_packed", None)
+        self.L_operator_packed_accumulate = getattr(
+            owner, "RHS_operator_packed_accumulate", None
+        )
+        if not getattr(owner, "_use_fused_state_accumulation", False):
+            self.L_operator_packed_accumulate = None
         self._state_buffers = None
         self._packed_state_buffer = None
         print("TSI_TI initialized.")
@@ -174,8 +179,13 @@ class TSI_TI(TimeIntegrator):
         self._copy_boundary_derivatives(BC)
 
         for coefficient in self.taylor_coefficients:
-            Q0, BC.BCvar = self.L_operator_packed(Q0, BC.BCvar)
-            Q_flat.add_(Q0, alpha=coefficient)
+            if self.L_operator_packed_accumulate is not None:
+                Q0, BC.BCvar = self.L_operator_packed_accumulate(
+                    Q0, BC.BCvar, Q_flat, coefficient
+                )
+            else:
+                Q0, BC.BCvar = self.L_operator_packed(Q0, BC.BCvar)
+                Q_flat.add_(Q0, alpha=coefficient)
             self._accumulate_boundary_derivatives(BC, coefficient)
 
     def step_dt(
