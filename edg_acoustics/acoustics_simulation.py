@@ -14,6 +14,7 @@ import edg_acoustics
 import time
 import torch
 import sys
+import os
 import triton
 import triton.language as tl
 
@@ -60,6 +61,216 @@ def build_maps_kernel(
                 nodeid = tl.load(nodeids_ptr + fmask_idx * N_tets + tet_idx)
                 # 存储到vmapM
                 tl.store(vmapM_ptr + (face * Nfp + node) * N_tets + tet_idx, nodeid)
+
+
+@triton.jit
+def volume_rhs_kernel(
+    dQdr_ptr,
+    dQds_ptr,
+    dQdt_ptr,
+    metric_p_ptr,
+    metric_v_ptr,
+    rhs_ptr,
+    total_nodes: tl.constexpr,
+    n_tets: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_nodes
+    node = offsets // n_tets
+    tet = offsets - node * n_tets
+
+    p = node * n_var_tets + tet
+    vx = p + n_tets
+    vy = vx + n_tets
+    vz = vy + n_tets
+
+    dPdr = tl.load(dQdr_ptr + p, mask=mask)
+    dPds = tl.load(dQds_ptr + p, mask=mask)
+    dPdt = tl.load(dQdt_ptr + p, mask=mask)
+
+    dVxdr = tl.load(dQdr_ptr + vx, mask=mask)
+    dVxds = tl.load(dQds_ptr + vx, mask=mask)
+    dVxdt = tl.load(dQdt_ptr + vx, mask=mask)
+    dVydr = tl.load(dQdr_ptr + vy, mask=mask)
+    dVyds = tl.load(dQds_ptr + vy, mask=mask)
+    dVydt = tl.load(dQdt_ptr + vy, mask=mask)
+    dVzdr = tl.load(dQdr_ptr + vz, mask=mask)
+    dVzds = tl.load(dQds_ptr + vz, mask=mask)
+    dVzdt = tl.load(dQdt_ptr + vz, mask=mask)
+
+    m00 = node * n_tets + tet
+    m10 = 3 * total_nodes + m00
+    m20 = 6 * total_nodes + m00
+    m01 = total_nodes + m00
+    m11 = 4 * total_nodes + m00
+    m21 = 7 * total_nodes + m00
+    m02 = 2 * total_nodes + m00
+    m12 = 5 * total_nodes + m00
+    m22 = 8 * total_nodes + m00
+
+    rhs_vx = (
+        tl.load(metric_v_ptr + m00, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m10, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m20, mask=mask) * dPdt
+    )
+    rhs_vy = (
+        tl.load(metric_v_ptr + m01, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m11, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m21, mask=mask) * dPdt
+    )
+    rhs_vz = (
+        tl.load(metric_v_ptr + m02, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m12, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m22, mask=mask) * dPdt
+    )
+
+    rhs_p = (
+        tl.load(metric_p_ptr + m00, mask=mask) * dVxdr
+        + tl.load(metric_p_ptr + m10, mask=mask) * dVxds
+        + tl.load(metric_p_ptr + m20, mask=mask) * dVxdt
+        + tl.load(metric_p_ptr + m01, mask=mask) * dVydr
+        + tl.load(metric_p_ptr + m11, mask=mask) * dVyds
+        + tl.load(metric_p_ptr + m21, mask=mask) * dVydt
+        + tl.load(metric_p_ptr + m02, mask=mask) * dVzdr
+        + tl.load(metric_p_ptr + m12, mask=mask) * dVzds
+        + tl.load(metric_p_ptr + m22, mask=mask) * dVzdt
+    )
+
+    tl.store(rhs_ptr + p, rhs_p, mask=mask)
+    tl.store(rhs_ptr + vx, rhs_vx, mask=mask)
+    tl.store(rhs_ptr + vy, rhs_vy, mask=mask)
+    tl.store(rhs_ptr + vz, rhs_vz, mask=mask)
+
+
+@triton.jit
+def interior_flux_kernel(
+    q_ptr,
+    vmapM_q_ptr,
+    vmapP_q_ptr,
+    cn1s_ptr,
+    cn2s_ptr,
+    cn3s_ptr,
+    cn1n2_ptr,
+    cn1n3_ptr,
+    cn2n3_ptr,
+    n1rho_ptr,
+    n2rho_ptr,
+    n3rho_ptr,
+    csn1rho_ptr,
+    csn2rho_ptr,
+    csn3rho_ptr,
+    flux_ptr,
+    total_faces: tl.constexpr,
+    n_tets: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    c0: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_faces
+    tet = offsets % n_tets
+    face = offsets // n_tets
+
+    pM = tl.load(q_ptr + tl.load(vmapM_q_ptr + offsets, mask=mask), mask=mask)
+    pP = tl.load(q_ptr + tl.load(vmapP_q_ptr + offsets, mask=mask), mask=mask)
+    vxM = tl.load(q_ptr + tl.load(vmapM_q_ptr + total_faces + offsets, mask=mask), mask=mask)
+    vxP = tl.load(q_ptr + tl.load(vmapP_q_ptr + total_faces + offsets, mask=mask), mask=mask)
+    vyM = tl.load(q_ptr + tl.load(vmapM_q_ptr + 2 * total_faces + offsets, mask=mask), mask=mask)
+    vyP = tl.load(q_ptr + tl.load(vmapP_q_ptr + 2 * total_faces + offsets, mask=mask), mask=mask)
+    vzM = tl.load(q_ptr + tl.load(vmapM_q_ptr + 3 * total_faces + offsets, mask=mask), mask=mask)
+    vzP = tl.load(q_ptr + tl.load(vmapP_q_ptr + 3 * total_faces + offsets, mask=mask), mask=mask)
+
+    dp = pM - pP
+    dvx = vxM - vxP
+    dvy = vyM - vyP
+    dvz = vzM - vzP
+
+    flux_vx = (
+        tl.load(n1rho_ptr + offsets, mask=mask) * dp
+        + tl.load(cn1s_ptr + offsets, mask=mask) * dvx
+        + tl.load(cn1n2_ptr + offsets, mask=mask) * dvy
+        + tl.load(cn1n3_ptr + offsets, mask=mask) * dvz
+    )
+    flux_vy = (
+        tl.load(n2rho_ptr + offsets, mask=mask) * dp
+        + tl.load(cn1n2_ptr + offsets, mask=mask) * dvx
+        + tl.load(cn2s_ptr + offsets, mask=mask) * dvy
+        + tl.load(cn2n3_ptr + offsets, mask=mask) * dvz
+    )
+    flux_vz = (
+        tl.load(n3rho_ptr + offsets, mask=mask) * dp
+        + tl.load(cn1n3_ptr + offsets, mask=mask) * dvx
+        + tl.load(cn2n3_ptr + offsets, mask=mask) * dvy
+        + tl.load(cn3s_ptr + offsets, mask=mask) * dvz
+    )
+    flux_p = (
+        -0.5 * c0 * dp
+        + tl.load(csn1rho_ptr + offsets, mask=mask) * dvx
+        + tl.load(csn2rho_ptr + offsets, mask=mask) * dvy
+        + tl.load(csn3rho_ptr + offsets, mask=mask) * dvz
+    )
+
+    out_base = face * n_var_tets + tet
+    tl.store(flux_ptr + out_base, flux_p, mask=mask)
+    tl.store(flux_ptr + out_base + n_tets, flux_vx, mask=mask)
+    tl.store(flux_ptr + out_base + 2 * n_tets, flux_vy, mask=mask)
+    tl.store(flux_ptr + out_base + 3 * n_tets, flux_vz, mask=mask)
+
+
+@triton.jit
+def boundary_ri_flux_kernel(
+    q_ptr,
+    vmap_q_ptr,
+    flux_map_q_ptr,
+    nx_ptr,
+    ny_ptr,
+    nz_ptr,
+    flux_ptr,
+    vn_ptr,
+    ou_ptr,
+    in_ptr,
+    n_boundary: tl.constexpr,
+    rho0: tl.constexpr,
+    c0: tl.constexpr,
+    ri: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_boundary
+
+    idx_p = tl.load(vmap_q_ptr + offsets, mask=mask, other=0)
+    idx_vx = tl.load(vmap_q_ptr + n_boundary + offsets, mask=mask, other=0)
+    idx_vy = tl.load(vmap_q_ptr + 2 * n_boundary + offsets, mask=mask, other=0)
+    idx_vz = tl.load(vmap_q_ptr + 3 * n_boundary + offsets, mask=mask, other=0)
+
+    p = tl.load(q_ptr + idx_p, mask=mask)
+    vx = tl.load(q_ptr + idx_vx, mask=mask)
+    vy = tl.load(q_ptr + idx_vy, mask=mask)
+    vz = tl.load(q_ptr + idx_vz, mask=mask)
+    nx = tl.load(nx_ptr + offsets, mask=mask)
+    ny = tl.load(ny_ptr + offsets, mask=mask)
+    nz = tl.load(nz_ptr + offsets, mask=mask)
+
+    vn = nx * vx + ny * vy + nz * vz
+    ou = vn + p / (rho0 * c0)
+    incoming = ri * ou
+    velocity_flux = p / rho0 - 0.5 * c0 * (ou + incoming)
+    pressure_flux = (vn - 0.5 * ou + 0.5 * incoming) * (c0 * c0 * rho0)
+
+    tl.store(vn_ptr + offsets, vn, mask=mask)
+    tl.store(ou_ptr + offsets, ou, mask=mask)
+    tl.store(in_ptr + offsets, incoming, mask=mask)
+
+    out_p = tl.load(flux_map_q_ptr + offsets, mask=mask, other=0)
+    out_vx = tl.load(flux_map_q_ptr + n_boundary + offsets, mask=mask, other=0)
+    out_vy = tl.load(flux_map_q_ptr + 2 * n_boundary + offsets, mask=mask, other=0)
+    out_vz = tl.load(flux_map_q_ptr + 3 * n_boundary + offsets, mask=mask, other=0)
+    tl.store(flux_ptr + out_p, pressure_flux, mask=mask)
+    tl.store(flux_ptr + out_vx, nx * velocity_flux, mask=mask)
+    tl.store(flux_ptr + out_vy, ny * velocity_flux, mask=mask)
+    tl.store(flux_ptr + out_vz, nz * velocity_flux, mask=mask)
 
 
 class AcousticsSimulation:
@@ -315,9 +526,13 @@ class AcousticsSimulation:
         self._jump_right = torch.empty(self.vmapP.shape, **kwargs)
         self._q_by_node = torch.empty((self.Np, 4 * self.N_tets), **kwargs)
         self._q_by_node_view = self._q_by_node.view(self.Np, 4, self.N_tets)
-        self._dQdr_by_node = torch.empty_like(self._q_by_node)
-        self._dQds_by_node = torch.empty_like(self._q_by_node)
-        self._dQdt_by_node = torch.empty_like(self._q_by_node)
+        self._D_stack = torch.stack((self.Dr, self.Ds, self.Dt), dim=0).contiguous()
+        self._dQ_by_derivative = torch.empty(
+            (3, self.Np, 4 * self.N_tets), **kwargs
+        )
+        self._dQdr_by_node = self._dQ_by_derivative[0]
+        self._dQds_by_node = self._dQ_by_derivative[1]
+        self._dQdt_by_node = self._dQ_by_derivative[2]
         self._dQdr_view = self._dQdr_by_node.view(self.Np, 4, self.N_tets)
         self._dQds_view = self._dQds_by_node.view(self.Np, 4, self.N_tets)
         self._dQdt_view = self._dQdt_by_node.view(self.Np, 4, self.N_tets)
@@ -327,6 +542,22 @@ class AcousticsSimulation:
         self._divV = torch.empty(node_shape, **kwargs)
         self._metric_p = self.rst_xyz * (-(self.c0**2) * self.rho0)
         self._metric_v = self.rst_xyz * (-1.0 / self.rho0)
+        self._use_triton_volume_rhs = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_TRITON_VOLUME_RHS", "1") != "0"
+        )
+        self._use_triton_interior_flux = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_TRITON_INTERIOR_FLUX", "1") != "0"
+        )
+        self._use_triton_boundary_ri = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_TRITON_BOUNDARY_RI", "1") != "0"
+        )
+        self._use_batched_derivatives = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_BATCHED_DERIVATIVES", "1") != "0"
+        )
         self._flux_by_face = torch.empty((4 * self.Nfp, 4 * self.N_tets), **kwargs)
         self._flux_by_face_view = self._flux_by_face.view(4 * self.Nfp, 4, self.N_tets)
         self._surface_by_node = torch.empty((self.Np, 4 * self.N_tets), **kwargs)
@@ -340,7 +571,7 @@ class AcousticsSimulation:
             rhs.view(self.Np, 4, self.N_tets) for rhs in self._rhs_by_node_buffers
         )
         self._rhs_buffer_index = 0
-        self._cuda_step_graph = None
+        self._cuda_step_graphs = {}
 
     def cache_static_indices(self):
         """Cache immutable flattened indices and boundary normals."""
@@ -370,6 +601,8 @@ class AcousticsSimulation:
                 "RI": torch.as_tensor(
                     paras["RI"], device=self.device, dtype=device_ini.dtype
                 ),
+                "RI_value": float(paras["RI"]),
+                "simple_RI": "RP" not in paras and "CP" not in paras,
                 "boundary_q": torch.empty(
                     (4, bcvar["vn"].numel()),
                     device=self.device,
@@ -463,6 +696,14 @@ class AcousticsSimulation:
         return self._q_by_node
 
     def _compute_packed_derivatives(self, q_by_node: torch.tensor):
+        if self._use_batched_derivatives:
+            torch.bmm(
+                self._D_stack,
+                q_by_node.unsqueeze(0).expand(3, -1, -1),
+                out=self._dQ_by_derivative,
+            )
+            return
+
         torch.mm(self.Dr, q_by_node, out=self._dQdr_by_node)
         torch.mm(self.Ds, q_by_node, out=self._dQds_by_node)
         torch.mm(self.Dt, q_by_node, out=self._dQdt_by_node)
@@ -494,6 +735,48 @@ class AcousticsSimulation:
             self._face_left_packed[0],
             self._face_right_packed[0],
             out=self._dP.reshape(-1),
+        )
+
+    def _compute_interior_flux(self, q_by_node: torch.tensor):
+        if self._use_triton_interior_flux:
+            total_faces = 4 * self.Nfp * self.N_tets
+            block_size = 256
+            interior_flux_kernel[(triton.cdiv(total_faces, block_size),)](
+                q_by_node.reshape(-1),
+                self._vmapM_q,
+                self._vmapP_q,
+                self.flux.cn1s,
+                self.flux.cn2s,
+                self.flux.cn3s,
+                self.flux.cn1n2,
+                self.flux.cn1n3,
+                self.flux.cn2n3,
+                self.flux.n1rho,
+                self.flux.n2rho,
+                self.flux.n3rho,
+                self.flux.csn1rho,
+                self.flux.csn2rho,
+                self.flux.csn3rho,
+                self._flux_by_face.reshape(-1),
+                total_faces,
+                self.N_tets,
+                4 * self.N_tets,
+                self.c0,
+                BLOCK_SIZE=block_size,
+            )
+            return
+
+        self._compute_packed_jump(q_by_node)
+        flux_view = self._flux_by_face_view
+        self.flux.compute_all(
+            self._dVx,
+            self._dVy,
+            self._dVz,
+            self._dP,
+            flux_view[:, 1, :],
+            flux_view[:, 2, :],
+            flux_view[:, 3, :],
+            flux_view[:, 0, :],
         )
 
     def _combine_derivative(
@@ -539,6 +822,23 @@ class AcousticsSimulation:
         self._divV.addcmul_(tz, self._dQdt_view[:, 3, :])
 
     def _compute_volume_rhs(self, rhs_view: torch.tensor):
+        if self._use_triton_volume_rhs:
+            total_nodes = self.Np * self.N_tets
+            block_size = 256
+            volume_rhs_kernel[(triton.cdiv(total_nodes, block_size),)](
+                self._dQdr_by_node,
+                self._dQds_by_node,
+                self._dQdt_by_node,
+                self._metric_p,
+                self._metric_v,
+                rhs_view.reshape(self.Np, 4 * self.N_tets),
+                total_nodes,
+                self.N_tets,
+                4 * self.N_tets,
+                BLOCK_SIZE=block_size,
+            )
+            return
+
         rhs_p = rhs_view[:, 0, :]
         rhs_vx = rhs_view[:, 1, :]
         rhs_vy = rhs_view[:, 2, :]
@@ -589,23 +889,40 @@ class AcousticsSimulation:
             for key, value in state_snapshot.items():
                 state[key].copy_(value)
 
-    def _ensure_cuda_step_graph(self):
-        if self._cuda_step_graph is not None:
-            return self._cuda_step_graph
+    def _ensure_cuda_step_graph(
+        self, chunk_steps: int = 1, record_receivers: bool = False
+    ):
+        key = (chunk_steps, record_receivers)
+        if key in self._cuda_step_graphs:
+            return self._cuda_step_graphs[key]
         if not torch.cuda.is_available() or self.Q_flat.device.type != "cuda":
             raise RuntimeError("CUDA graph time stepping requires CUDA tensors.")
 
+        sample_chunk = None
+        if record_receivers:
+            sample_chunk = torch.empty(
+                (chunk_steps, self.rec.shape[1]),
+                device=self.device,
+                dtype=device_ini.dtype,
+            )
+
         snapshot = self._snapshot_time_state()
-        self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
+        for step_index in range(chunk_steps):
+            self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
+            if sample_chunk is not None:
+                self._sample_receivers(sample_chunk[step_index])
         torch.cuda.synchronize()
         self._restore_time_state(snapshot)
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
+            for step_index in range(chunk_steps):
+                self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
+                if sample_chunk is not None:
+                    self._sample_receivers(sample_chunk[step_index])
         self._restore_time_state(snapshot)
-        self._cuda_step_graph = graph
-        return graph
+        self._cuda_step_graphs[key] = (graph, sample_chunk)
+        return self._cuda_step_graphs[key]
 
     # Static methods ---------------------------------------------------------------------------------------------------
     @staticmethod
@@ -1402,6 +1719,20 @@ class AcousticsSimulation:
         """
         self.rec = rec
         self.sampleWeight, self.nodeindex = self.sample3D(methodLocate)
+        normalized_nodeindex = numpy.mod(self.nodeindex, self.N_tets)
+        self._nodeindex_tensor = torch.as_tensor(
+            normalized_nodeindex, device=self.device, dtype=torch.long
+        )
+        self._sample_values = torch.empty(
+            (self.Np, self.rec.shape[1]), device=self.device, dtype=device_ini.dtype
+        )
+        self._sample_output = torch.empty(
+            (self.rec.shape[1],), device=self.device, dtype=device_ini.dtype
+        )
+
+    def _sample_receivers(self, out: torch.tensor):
+        torch.index_select(self.P, 1, self._nodeindex_tensor, out=self._sample_values)
+        torch.sum(self.sampleWeight * self._sample_values.T, dim=1, out=out)
 
     def init_Flux(self, Flux):
         """load the interior flux  calculation and save it to the :class:`AcousticsSimulation` class.
@@ -1464,21 +1795,10 @@ class AcousticsSimulation:
         RHS_Vy = RHS_Q_view[:, 2, :]
         RHS_Vz = RHS_Q_view[:, 3, :]
         self._compute_packed_derivatives(q_by_node)
-        dVx = self._dVx
-        dVy = self._dVy
-        dVz = self._dVz
-        dP = self._dP
-
-        self._compute_packed_jump(q_by_node)
-
-        flux_view = self._flux_by_face_view
-        fluxP = flux_view[:, 0, :]
-        fluxVx = flux_view[:, 1, :]
-        fluxVy = flux_view[:, 2, :]
-        fluxVz = flux_view[:, 3, :]
-        self.flux.compute_all(dVx, dVy, dVz, dP, fluxVx, fluxVy, fluxVz, fluxP)
+        self._compute_interior_flux(q_by_node)
 
         flux_flat = self._flux_by_face.reshape(-1)
+        flux_view = self._flux_by_face_view
 
         for index, bc_cache in enumerate(self._BC_cache):
             # 'RI' refers to the limit value of the reflection coefficient as the frequency approaches infinity, i.e., :math:`R_\\inf`.
@@ -1487,6 +1807,28 @@ class AcousticsSimulation:
             #          :math:`\\alpha` (stored in 3rd row), :math:`\\beta`(stored in 4th row).
             node = self.BCnode[index]
             bcvar = BCvar[index]
+            if self._use_triton_boundary_ri and bc_cache["simple_RI"]:
+                n_boundary = bcvar["vn"].numel()
+                block_size = 256
+                boundary_ri_flux_kernel[(triton.cdiv(n_boundary, block_size),)](
+                    q_by_node.reshape(-1),
+                    node["vmap_q"],
+                    node["flux_map_q"],
+                    node["nx"],
+                    node["ny"],
+                    node["nz"],
+                    flux_flat,
+                    bcvar["vn"],
+                    bcvar["ou"],
+                    bcvar["in"],
+                    n_boundary,
+                    self.rho0,
+                    self.c0,
+                    bc_cache["RI_value"],
+                    BLOCK_SIZE=block_size,
+                )
+                continue
+
             boundary_q = bc_cache["boundary_q"]
             torch.index_select(
                 q_by_node.reshape(-1),
@@ -1570,6 +1912,8 @@ class AcousticsSimulation:
             progress (bool): print progress and timing information. The default is True.
             synchronize_timing (bool): synchronize CUDA before final timing. The default is False.
             use_cuda_graph (bool): replay a captured CUDA graph for each packed time step. The default is False.
+            cuda_graph_chunk_steps (int): number of consecutive steps captured in one graph replay. The default is 1.
+            record_receivers (bool): sample receiver pressure every time step. The default is True.
 
         Returns:
             prec (torch.tensor): Pressure field at the microphone locations.
@@ -1595,6 +1939,8 @@ class AcousticsSimulation:
 
         progress = kwargs.get("progress", True)
         synchronize_timing = kwargs.get("synchronize_timing", False)
+        record_receivers = kwargs.get("record_receivers", True)
+        cuda_graph_chunk_steps = max(1, int(kwargs.get("cuda_graph_chunk_steps", 1)))
         use_cuda_graph = (
             kwargs.get("use_cuda_graph", False)
             and torch.cuda.is_available()
@@ -1602,6 +1948,10 @@ class AcousticsSimulation:
             and self.Q_flat.device.type == "cuda"
             and hasattr(self.time_integrator, "step_dt_packed")
         )
+        if use_cuda_graph and cuda_graph_chunk_steps > 1 and (
+            progress or "save_step" in kwargs
+        ):
+            cuda_graph_chunk_steps = 1
         if progress:
             print(f"Total simulation time is {total_time}")
             print(f"Total number of simulation steps is {self.Ntimesteps}")
@@ -1612,16 +1962,39 @@ class AcousticsSimulation:
             dtype=device_ini.dtype,
         )
 
-        cuda_step_graph = self._ensure_cuda_step_graph() if use_cuda_graph else None
+        cuda_step_graph = None
+        cuda_sample_chunk = None
+        if use_cuda_graph:
+            cuda_step_graph, cuda_sample_chunk = self._ensure_cuda_step_graph(
+                cuda_graph_chunk_steps, record_receivers
+            )
         startTime = time.time()
         curTime = startTime
         prevEstimated = 0
         # Step the solution
-        for StepIndex in range(self.Ntimesteps):
+        StepIndex = 0
+        while StepIndex < self.Ntimesteps:
             # for StepIndex in range(1):
 
+            if (
+                cuda_step_graph is not None
+                and cuda_graph_chunk_steps > 1
+                and StepIndex + cuda_graph_chunk_steps <= self.Ntimesteps
+            ):
+                cuda_step_graph.replay()
+                if cuda_sample_chunk is not None:
+                    self.prec[
+                        :, StepIndex : StepIndex + cuda_graph_chunk_steps
+                    ].copy_(cuda_sample_chunk.T)
+                StepIndex += cuda_graph_chunk_steps
+                continue
+
+            receiver_sampled_by_graph = False
             if cuda_step_graph is not None:
                 cuda_step_graph.replay()
+                if cuda_sample_chunk is not None:
+                    self.prec[:, StepIndex].copy_(cuda_sample_chunk[0])
+                    receiver_sampled_by_graph = True
             elif hasattr(self, "Q_flat") and hasattr(
                 self.time_integrator, "step_dt_packed"
             ):
@@ -1634,9 +2007,9 @@ class AcousticsSimulation:
                     self.Vz,
                     self.BC,
                 )  # by changing the value in place, the ID of the object is not changed (no new object is created), but the previous value is lost, which is not important here, because the previous value is not used anymore``
-            self.prec[:, StepIndex] = (
-                self.sampleWeight * self.P[:, self.nodeindex].T
-            ).sum(dim=1)
+            if record_receivers and not receiver_sampled_by_graph:
+                self._sample_receivers(self._sample_output)
+                self.prec[:, StepIndex].copy_(self._sample_output)
 
             if (
                 progress
@@ -1669,6 +2042,7 @@ class AcousticsSimulation:
 
             if "save_step" in kwargs and StepIndex % kwargs["save_step"] == 0:
                 self.save_results_on_the_run(format=kwargs.get("format", "mat"))
+            StepIndex += 1
         if synchronize_timing and torch.cuda.is_available():
             torch.cuda.synchronize()
         end_time = time.time()

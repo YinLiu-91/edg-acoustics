@@ -28,7 +28,13 @@ def synchronize():
         torch.cuda.synchronize()
 
 
-def run_fixed_steps(steps: int, profile: bool, cuda_graph: bool):
+def run_fixed_steps(
+    steps: int,
+    profile: bool,
+    cuda_graph: bool,
+    cuda_graph_chunk_steps: int,
+    record_receivers: bool,
+):
     from scenario1_utils import build_scenario1_simulation
 
     sim = build_scenario1_simulation()
@@ -38,6 +44,8 @@ def run_fixed_steps(steps: int, profile: bool, cuda_graph: bool):
         n_time_steps=min(5, steps),
         progress=False,
         use_cuda_graph=cuda_graph,
+        cuda_graph_chunk_steps=cuda_graph_chunk_steps,
+        record_receivers=record_receivers,
     )
     synchronize()
 
@@ -62,6 +70,8 @@ def run_fixed_steps(steps: int, profile: bool, cuda_graph: bool):
                 n_time_steps=steps,
                 progress=False,
                 use_cuda_graph=cuda_graph,
+                cuda_graph_chunk_steps=cuda_graph_chunk_steps,
+                record_receivers=record_receivers,
             )
     else:
         prof = None
@@ -69,6 +79,8 @@ def run_fixed_steps(steps: int, profile: bool, cuda_graph: bool):
             n_time_steps=steps,
             progress=False,
             use_cuda_graph=cuda_graph,
+            cuda_graph_chunk_steps=cuda_graph_chunk_steps,
+            record_receivers=record_receivers,
         )
 
     if torch.cuda.is_available():
@@ -87,6 +99,8 @@ def run_fixed_steps(steps: int, profile: bool, cuda_graph: bool):
     print(f"dtype={sim.P.dtype}")
     print(f"device={sim.P.device}")
     print(f"cuda_graph={cuda_graph and sim.P.device.type == 'cuda'}")
+    print(f"cuda_graph_chunk_steps={cuda_graph_chunk_steps if cuda_graph else 1}")
+    print(f"record_receivers={record_receivers}")
     if sim.P.device.type == "cuda":
         print(f"cuda_name={torch.cuda.get_device_name(sim.P.device)}")
     else:
@@ -109,6 +123,12 @@ def parse_args():
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--cuda-graph", action="store_true")
+    parser.add_argument("--cuda-graph-chunk-steps", type=int, default=1)
+    parser.add_argument(
+        "--no-record-receivers",
+        action="store_true",
+        help="Skip per-step receiver sampling to measure solver-only time.",
+    )
     parser.add_argument(
         "--device",
         choices=("auto", "cpu", "cuda"),
@@ -138,7 +158,13 @@ def main():
     if args.exact_script:
         run_exact_script()
     else:
-        run_fixed_steps(args.steps, args.profile, args.cuda_graph)
+        run_fixed_steps(
+            args.steps,
+            args.profile,
+            args.cuda_graph,
+            args.cuda_graph_chunk_steps,
+            not args.no_record_receivers,
+        )
 
 
 if __name__ == "__main__":
