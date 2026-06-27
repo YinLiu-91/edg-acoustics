@@ -2405,55 +2405,50 @@ class AcousticsSimulation:
         vmapP = torch.zeros(
             [4, Nfp, N_tets], device=device_ini.device, dtype=torch.int32
         )
-        tmp = torch.ones(Nfp, device=device_ini.device, dtype=torch.int32)
-        D = torch.zeros([Nfp, Nfp], device=device_ini.device, dtype=device_ini.dtype)
 
         xV = xyz[0].reshape(-1)  # flatten the x-coordinates
         yV = xyz[1].reshape(-1)
         zV = xyz[2].reshape(-1)
 
-        # 配置grid和block大小
-        BLOCK_SIZE = 32
-        grid = lambda meta: (triton.cdiv(N_tets, BLOCK_SIZE),)
+        # --- vmapM: batch indexing (single GPU op replaces N_tets*4 kernel launches) ---
+        vmapM = nodeids[Fmask.reshape(-1)].reshape(4, Nfp, N_tets)
 
-        # 调用triton kernel
-        # build_maps_kernel[grid](
-        #     nodeids.contiguous(),
-        #     Fmask.contiguous(),
-        #     vmapM.contiguous(),
-        #     N_tets,
-        #     Nfp,
-        #     BLOCK_SIZE,
-        # )
-        for ke in range(N_tets):
-            for face in range(4):
-                vmapM[face, :, ke] = nodeids[
-                    Fmask[face], ke
-                ]  # find index of face nodes with respect to volume node ordering
+        # --- vmapP: batched distance-matrix matching ---
+        # Neighbor tet and face indices for each (face, tet) pair.
+        ke2 = EToE  # [4, N_tets]
+        face2 = EToF  # [4, N_tets]
 
-        for ke in range(N_tets):
-            for face in range(4):
-                # find neighbor
-                ke2 = EToE[face, ke]
-                face2 = EToF[face, ke]
+        # Gather neighbour-face node indices.
+        # vmapM has shape [4, Nfp, N_tets]; flatten the (face, tet) dims to [4*N_tets, Nfp].
+        vmapM_2d = vmapM.permute(0, 2, 1).reshape(-1, Nfp)  # [4*N_tets, Nfp]
+        neighbor_idx = (face2 * N_tets + ke2).to(torch.long)  # [4, N_tets]
+        vidP = vmapM_2d[neighbor_idx]  # [4, N_tets, Nfp]
 
-                # find find volume node numbers of left and right nodes
-                vidM = vmapM[face, :, ke]
-                vidP = vmapM[face2, :, ke2]
+        # Gather coordinates for this face and its neighbour.
+        vidM_flat = vmapM.permute(0, 2, 1).reshape(-1)  # [4*N_tets*Nfp]
+        vidP_flat = vidP.reshape(-1)  # [4*N_tets*Nfp]
 
-                xM = torch.outer(xV[vidM], tmp)  # viewing
-                yM = torch.outer(yV[vidM], tmp)  # viewing
-                zM = torch.outer(zV[vidM], tmp)  # viewing
+        xM = xV[vidM_flat].reshape(4, N_tets, Nfp)
+        yM = yV[vidM_flat].reshape(4, N_tets, Nfp)
+        zM = zV[vidM_flat].reshape(4, N_tets, Nfp)
+        xP = xV[vidP_flat].reshape(4, N_tets, Nfp)
+        yP = yV[vidP_flat].reshape(4, N_tets, Nfp)
+        zP = zV[vidP_flat].reshape(4, N_tets, Nfp)
 
-                xP = torch.outer(xV[vidP], tmp).t()  # viewing
-                yP = torch.outer(yV[vidP], tmp).t()  # viewing
-                zP = torch.outer(zV[vidP], tmp).t()  # viewing
+        # Pairwise squared-distance matrix: [4, N_tets, Nfp, Nfp]
+        dx = xM.unsqueeze(-1) - xP.unsqueeze(-2)
+        dy = yM.unsqueeze(-1) - yP.unsqueeze(-2)
+        dz = zM.unsqueeze(-1) - zP.unsqueeze(-2)
+        D_all = dx * dx + dy * dy + dz * dz
 
-                D = (xM - xP) ** 2 + (yM - yP) ** 2 + (zM - zP) ** 2
+        # For each (face, tet, this_node), find the closest neighbour node.
+        matches = torch.argmin(D_all, dim=-1)  # [4, N_tets, Nfp]
 
-                idMP = torch.nonzero(torch.abs(D) < node_tol).t()
-
-                vmapP[face, idMP[0], ke] = vmapM[face2, idMP[1], ke2]
+        # Build vmapP from vidP using the matches.
+        vidP_gather = vidP.reshape(-1, Nfp)  # [4*N_tets, Nfp]
+        matches_gather = matches.reshape(-1, Nfp).to(torch.long)  # [4*N_tets, Nfp]
+        vmapP_perm = torch.gather(vidP_gather, dim=1, index=matches_gather)  # [4*N_tets, Nfp]
+        vmapP = vmapP_perm.reshape(4, N_tets, Nfp).permute(0, 2, 1).to(torch.int32)
 
         return vmapM.reshape(-1), vmapP.reshape(-1)
 
