@@ -157,7 +157,7 @@ def volume_surface_rhs_kernel(
     total_nodes: tl.constexpr,
     n_tets: tl.constexpr,
     n_var_tets: tl.constexpr,
-    coefficient: tl.constexpr,
+    coefficient_ptr,
     UPDATE_STATE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -165,6 +165,8 @@ def volume_surface_rhs_kernel(
     mask = offsets < total_nodes
     node = offsets // n_tets
     tet = offsets - node * n_tets
+
+    coefficient = tl.load(coefficient_ptr)
 
     p = node * n_var_tets + tet
     vx = p + n_tets
@@ -269,7 +271,7 @@ def derivative_volume_surface_rhs_kernel(
     n_tets: tl.constexpr,
     n_var_tets: tl.constexpr,
     n_p: tl.constexpr,
-    coefficient: tl.constexpr,
+    coefficient_ptr,
     UPDATE_STATE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -277,6 +279,8 @@ def derivative_volume_surface_rhs_kernel(
     mask = offsets < total_nodes
     node = offsets // n_tets
     tet = offsets - node * n_tets
+
+    coefficient = tl.load(coefficient_ptr)
 
     dPdr = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
     dPds = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
@@ -437,7 +441,7 @@ def interior_flux_kernel(
     total_faces: tl.constexpr,
     n_tets: tl.constexpr,
     n_var_tets: tl.constexpr,
-    c0: tl.constexpr,
+    c0_ptr,
     SCALE_FLUX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -445,6 +449,8 @@ def interior_flux_kernel(
     mask = offsets < total_faces
     tet = offsets % n_tets
     face = offsets // n_tets
+
+    c0 = tl.load(c0_ptr)
 
     node_m = tl.load(face_node_ids_ptr + face, mask=mask)
     base_m = node_m * n_var_tets + tet
@@ -515,8 +521,8 @@ def compact_interior_flux_kernel(
     total_faces: tl.constexpr,
     n_tets: tl.constexpr,
     n_var_tets: tl.constexpr,
-    rho0: tl.constexpr,
-    c0: tl.constexpr,
+    rho0_ptr,
+    c0_ptr,
     SCALE_FLUX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -524,6 +530,9 @@ def compact_interior_flux_kernel(
     mask = offsets < total_faces
     tet = offsets % n_tets
     face_node = offsets // n_tets
+
+    rho0 = tl.load(rho0_ptr)
+    c0 = tl.load(c0_ptr)
 
     node_m = tl.load(face_node_ids_ptr + face_node, mask=mask)
     base_m = node_m * n_var_tets + tet
@@ -582,12 +591,14 @@ def paired_interior_flux_kernel(
     n_pairs: tl.constexpr,
     n_tets: tl.constexpr,
     n_var_tets: tl.constexpr,
-    rho0: tl.constexpr,
-    c0: tl.constexpr,
+    rho0_ptr,
+    c0_ptr,
     SCALE_FLUX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pair_ids = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    rho0 = tl.load(rho0_ptr)
+    c0 = tl.load(c0_ptr)
     mask = pair_ids < n_pairs
     offsets_m = tl.load(pair_offsets_ptr + pair_ids, mask=mask)
     offsets_p = tl.load(pair_partner_offsets_ptr + pair_ids, mask=mask)
@@ -676,14 +687,18 @@ def boundary_ri_flux_kernel(
     ou_ptr,
     in_ptr,
     n_boundary: tl.constexpr,
-    rho0: tl.constexpr,
-    c0: tl.constexpr,
-    ri: tl.constexpr,
+    rho0_ptr,
+    c0_ptr,
+    ri_ptr,
     SCALE_FLUX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_boundary
+
+    rho0 = tl.load(rho0_ptr)
+    c0 = tl.load(c0_ptr)
+    ri = tl.load(ri_ptr)
 
     idx_p = tl.load(vmap_q_ptr + offsets, mask=mask, other=0)
     idx_vx = tl.load(vmap_q_ptr + n_boundary + offsets, mask=mask, other=0)
@@ -739,15 +754,19 @@ def boundary_rp_flux_kernel(
     in_ptr,
     phi_ptr,
     n_boundary: tl.constexpr,
-    rho0: tl.constexpr,
-    c0: tl.constexpr,
-    ri: tl.constexpr,
+    rho0_ptr,
+    c0_ptr,
+    ri_ptr,
     RP_COUNT: tl.constexpr,
     SCALE_FLUX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_boundary
+
+    rho0 = tl.load(rho0_ptr)
+    c0 = tl.load(c0_ptr)
+    ri = tl.load(ri_ptr)
 
     idx_p = tl.load(vmap_q_ptr + offsets, mask=mask, other=0)
     idx_vx = tl.load(vmap_q_ptr + n_boundary + offsets, mask=mask, other=0)
@@ -820,9 +839,9 @@ def boundary_rp_cp_flux_kernel(
     kexi1_ptr,
     kexi2_ptr,
     n_boundary: tl.constexpr,
-    rho0: tl.constexpr,
-    c0: tl.constexpr,
-    ri: tl.constexpr,
+    rho0_ptr,
+    c0_ptr,
+    ri_ptr,
     RP_COUNT: tl.constexpr,
     CP_COUNT: tl.constexpr,
     SCALE_FLUX: tl.constexpr,
@@ -830,6 +849,10 @@ def boundary_rp_cp_flux_kernel(
 ):
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_boundary
+
+    rho0 = tl.load(rho0_ptr)
+    c0 = tl.load(c0_ptr)
+    ri = tl.load(ri_ptr)
 
     idx_p = tl.load(vmap_q_ptr + offsets, mask=mask, other=0)
     idx_vx = tl.load(vmap_q_ptr + n_boundary + offsets, mask=mask, other=0)
@@ -1162,6 +1185,11 @@ class AcousticsSimulation:
         self._divV = torch.empty(node_shape, **kwargs)
         self._metric_p = self.rst_xyz * (-(self.c0**2) * self.rho0)
         self._metric_v = self.rst_xyz * (-1.0 / self.rho0)
+        # Scalar fp64 tensors to avoid tl.constexpr fp32 truncation in kernels
+        self._rho0_tensor = torch.tensor([self.rho0], dtype=kwargs["dtype"], device=kwargs["device"])
+        self._c0_tensor = torch.tensor([self.c0], dtype=kwargs["dtype"], device=kwargs["device"])
+        self._coefficient_tensor = torch.tensor([0.0], dtype=kwargs["dtype"], device=kwargs["device"])
+        self._ri_tensor = torch.tensor([0.0], dtype=kwargs["dtype"], device=kwargs["device"])
         self._use_triton_volume_rhs = (
             self.device.type == "cuda"
             and os.environ.get("EDG_ACOUSTICS_TRITON_VOLUME_RHS", "1") != "0"
@@ -1470,8 +1498,8 @@ class AcousticsSimulation:
                     n_pairs,
                     self.N_tets,
                     4 * self.N_tets,
-                    self.rho0,
-                    self.c0,
+                    self._rho0_tensor,
+                    self._c0_tensor,
                     self._use_scaled_flux_kernels,
                     BLOCK_SIZE=block_size,
                 )
@@ -1492,8 +1520,8 @@ class AcousticsSimulation:
                     total_faces,
                     self.N_tets,
                     4 * self.N_tets,
-                    self.rho0,
-                    self.c0,
+                    self._rho0_tensor,
+                    self._c0_tensor,
                     self._use_scaled_flux_kernels,
                     BLOCK_SIZE=block_size,
                 )
@@ -1520,7 +1548,7 @@ class AcousticsSimulation:
                 total_faces,
                 self.N_tets,
                 4 * self.N_tets,
-                self.c0,
+                self._c0_tensor,
                 self._use_scaled_flux_kernels,
                 BLOCK_SIZE=block_size,
             )
@@ -1591,6 +1619,7 @@ class AcousticsSimulation:
         if self._use_triton_volume_rhs and surface_by_node is not None:
             total_nodes = self.Np * self.N_tets
             block_size = 256
+            self._coefficient_tensor.fill_(coefficient)
             volume_surface_rhs_kernel[(triton.cdiv(total_nodes, block_size),)](
                 self._dQdr_by_node,
                 self._dQds_by_node,
@@ -1603,7 +1632,7 @@ class AcousticsSimulation:
                 total_nodes,
                 self.N_tets,
                 4 * self.N_tets,
-                coefficient,
+                self._coefficient_tensor,
                 q_update is not None,
                 BLOCK_SIZE=block_size,
             )
@@ -1663,6 +1692,7 @@ class AcousticsSimulation:
     ):
         total_nodes = self.Np * self.N_tets
         block_size = 128
+        self._coefficient_tensor.fill_(coefficient)
         derivative_volume_surface_rhs_kernel[(triton.cdiv(total_nodes, block_size),)](
             q_by_node,
             self.Dr,
@@ -1677,7 +1707,7 @@ class AcousticsSimulation:
             self.N_tets,
             4 * self.N_tets,
             self.Np,
-            coefficient,
+            self._coefficient_tensor,
             q_update is not None,
             BLOCK_SIZE=block_size,
         )
@@ -1710,6 +1740,7 @@ class AcousticsSimulation:
         n_boundary = bcvar["vn"].numel()
         block_size = 256
         if self._use_triton_boundary_ri and bc_cache["simple_RI"]:
+            self._ri_tensor.fill_(bc_cache["RI_value"])
             boundary_ri_flux_kernel[(triton.cdiv(n_boundary, block_size),)](
                 q_flat,
                 node["vmap_q"],
@@ -1723,15 +1754,16 @@ class AcousticsSimulation:
                 bcvar["ou"],
                 bcvar["in"],
                 n_boundary,
-                self.rho0,
-                self.c0,
-                bc_cache["RI_value"],
+                self._rho0_tensor,
+                self._c0_tensor,
+                self._ri_tensor,
                 self._use_scaled_flux_kernels,
                 BLOCK_SIZE=block_size,
             )
             return
 
         if self._use_triton_boundary_ade and "CP_B" in bc_cache:
+            self._ri_tensor.fill_(bc_cache["RI_value"])
             boundary_rp_cp_flux_kernel[(triton.cdiv(n_boundary, block_size),)](
                 q_flat,
                 node["vmap_q"],
@@ -1754,9 +1786,9 @@ class AcousticsSimulation:
                 bcvar["kexi1"],
                 bcvar["kexi2"],
                 n_boundary,
-                self.rho0,
-                self.c0,
-                bc_cache["RI_value"],
+                self._rho0_tensor,
+                self._c0_tensor,
+                self._ri_tensor,
                 bcvar["phi"].shape[0],
                 bcvar["kexi1"].shape[0],
                 self._use_scaled_flux_kernels,
@@ -1765,6 +1797,7 @@ class AcousticsSimulation:
             return
 
         if self._use_triton_boundary_ade and "RP_A" in bc_cache:
+            self._ri_tensor.fill_(bc_cache["RI_value"])
             boundary_rp_flux_kernel[(triton.cdiv(n_boundary, block_size),)](
                 q_flat,
                 node["vmap_q"],
@@ -1781,9 +1814,9 @@ class AcousticsSimulation:
                 bcvar["in"],
                 bcvar["phi"],
                 n_boundary,
-                self.rho0,
-                self.c0,
-                bc_cache["RI_value"],
+                self._rho0_tensor,
+                self._c0_tensor,
+                self._ri_tensor,
                 bcvar["phi"].shape[0],
                 self._use_scaled_flux_kernels,
                 BLOCK_SIZE=block_size,
