@@ -46,6 +46,7 @@ def build_profile_mesh_sim(
     monkeypatch.setenv(
         "EDG_ACOUSTICS_PAIRED_INTERIOR_FLUX", "1" if paired_interior_flux else "0"
     )
+    monkeypatch.setenv("EDG_ACOUSTICS_AOS_STATE_LAYOUT", "0")
     return build_scenario1_simulation(mesh_name=PROFILE_MESH, device="cuda")
 
 

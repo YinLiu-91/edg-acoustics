@@ -509,6 +509,74 @@ def interior_flux_kernel(
 
 
 @triton.jit
+def compact_interior_flux_aos_kernel(
+    q_aos_ptr,
+    face_node_ids_ptr,
+    vmapP_q_ptr,
+    nx_ptr,
+    ny_ptr,
+    nz_ptr,
+    fscale_ptr,
+    flux_ptr,
+    total_faces: tl.constexpr,
+    n_tets: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    rho0_ptr,
+    c0_ptr,
+    SCALE_FLUX: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """AoS compact flux: q is [Np,N_tets,4], reads vec4-adjacent, writes SoA output."""
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_faces
+    tet = offsets % n_tets
+    face_node = offsets // n_tets
+
+    rho0 = tl.load(rho0_ptr)
+    c0 = tl.load(c0_ptr)
+
+    node_m = tl.load(face_node_ids_ptr + face_node, mask=mask)
+    base_m = node_m * n_var_tets + tet * 4
+    base_p = tl.load(vmapP_q_ptr + offsets, mask=mask)
+
+    pM = tl.load(q_aos_ptr + base_m, mask=mask)
+    pP = tl.load(q_aos_ptr + base_p, mask=mask, cache_modifier=".cg")
+    vxM = tl.load(q_aos_ptr + base_m + 1, mask=mask)
+    vxP = tl.load(q_aos_ptr + base_p + 1, mask=mask, cache_modifier=".cg")
+    vyM = tl.load(q_aos_ptr + base_m + 2, mask=mask)
+    vyP = tl.load(q_aos_ptr + base_p + 2, mask=mask, cache_modifier=".cg")
+    vzM = tl.load(q_aos_ptr + base_m + 3, mask=mask)
+    vzP = tl.load(q_aos_ptr + base_p + 3, mask=mask, cache_modifier=".cg")
+
+    nx = tl.load(nx_ptr + offsets, mask=mask)
+    ny = tl.load(ny_ptr + offsets, mask=mask)
+    nz = tl.load(nz_ptr + offsets, mask=mask)
+
+    dp = pM - pP
+    dvn = nx * (vxM - vxP) + ny * (vyM - vyP) + nz * (vzM - vzP)
+
+    velocity_flux = 0.5 * (dp / rho0 - c0 * dvn)
+    flux_p = -0.5 * c0 * dp + 0.5 * c0 * c0 * rho0 * dvn
+    flux_vx = nx * velocity_flux
+    flux_vy = ny * velocity_flux
+    flux_vz = nz * velocity_flux
+
+    if SCALE_FLUX:
+        fscale = tl.load(fscale_ptr + offsets, mask=mask)
+        flux_p *= fscale
+        flux_vx *= fscale
+        flux_vy *= fscale
+        flux_vz *= fscale
+
+    # SoA output: field*K+tet (compatible with downstream SoA flux buffer)
+    out_p = face_node * n_var_tets + tet
+    tl.store(flux_ptr + out_p, flux_p, mask=mask)
+    tl.store(flux_ptr + out_p + n_tets, flux_vx, mask=mask)
+    tl.store(flux_ptr + out_p + 2 * n_tets, flux_vy, mask=mask)
+    tl.store(flux_ptr + out_p + 3 * n_tets, flux_vz, mask=mask)
+
+
+@triton.jit
 def compact_interior_flux_kernel(
     q_ptr,
     face_node_ids_ptr,
@@ -640,7 +708,7 @@ def paired_interior_flux_kernel(
     nx_p = tl.load(nx_ptr + offsets_p, mask=mask)
     ny_p = tl.load(ny_ptr + offsets_p, mask=mask)
     nz_p = tl.load(nz_ptr + offsets_p, mask=mask)
-    dvn_p = -(nx_p * dvx_m + ny_p * dvy_m + nz_p * dvz_m)
+    dvn_p = nx_p * (-dvx_m) + ny_p * (-dvy_m) + nz_p * (-dvz_m)
     velocity_flux_p = 0.5 * (-dp_m / rho0 - c0 * dvn_p)
     flux_p_p = 0.5 * c0 * dp_m + 0.5 * c0 * c0 * rho0 * dvn_p
     flux_vx_p = nx_p * velocity_flux_p
@@ -1148,8 +1216,32 @@ class AcousticsSimulation:
         self.init_runtime_buffers()
         self.cache_static_indices()
 
+    def _state_view(self, packed: torch.tensor):
+        """Return a `[Np, 4, K]` field view for the active packed layout."""
+        if getattr(self, "_use_aos_state_layout", False):
+            return packed.view(self.Np, self.N_tets, 4).permute(0, 2, 1)
+        return packed.view(self.Np, 4, self.N_tets)
+
+    def _flux_state_view(self, packed: torch.tensor):
+        """Return a `[4*Nfp, 4, K]` field view for face-flux storage.
+        AoS kernel writes SoA flux output, so this is always a SoA view."""
+        return packed.view(4 * self.Nfp, 4, self.N_tets)
+
     def init_runtime_buffers(self):
         """Preallocate buffers reused by RHS computations."""
+        # AoS layout: only _q_by_node is AoS [Np,N_tets,4]; all other buffers SoA.
+        cc_env = os.environ.get("EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS", "1")
+        want_cc = self.device.type == "cuda" and cc_env != "0"
+        if want_cc:
+            aos_env = os.environ.get("EDG_ACOUSTICS_AOS_STATE_LAYOUT")
+            metric_ref = self.rst_xyz[:, :, :1, :]
+            metric_delta = (self.rst_xyz - metric_ref).abs().max()
+            default_aos = self.N_tets >= 10_000 and bool(metric_delta <= 1.0e-9)
+            self._use_aos_state_layout = (
+                default_aos if aos_env is None else aos_env not in {"", "0", "false", "False"}
+            )
+        else:
+            self._use_aos_state_layout = False
         face_shape = self.Fscale.shape
         node_shape = (self.Np, self.N_tets)
         kwargs = {"device": self.device, "dtype": device_ini.dtype}
@@ -1163,8 +1255,11 @@ class AcousticsSimulation:
         self._fluxP = torch.empty(face_shape, **kwargs)
         self._jump_left = torch.empty(self.vmapM.shape, **kwargs)
         self._jump_right = torch.empty(self.vmapP.shape, **kwargs)
-        self._q_by_node = torch.empty((self.Np, 4 * self.N_tets), **kwargs)
-        self._q_by_node_view = self._q_by_node.view(self.Np, 4, self.N_tets)
+        if self._use_aos_state_layout:
+            self._q_by_node = torch.empty((self.Np, self.N_tets, 4), **kwargs)
+        else:
+            self._q_by_node = torch.empty((self.Np, 4 * self.N_tets), **kwargs)
+        self._q_by_node_view = self._state_view(self._q_by_node)
         self._D_stack = torch.stack((self.Dr, self.Ds, self.Dt), dim=0).contiguous()
         self._dQ_by_derivative = torch.empty(
             (3, self.Np, 4 * self.N_tets), **kwargs
@@ -1273,6 +1368,12 @@ class AcousticsSimulation:
         self._vmapP = self.vmapP.to(device=self.device, dtype=torch.long)
         self._vmapM_q = self._build_packed_face_indices(self._vmapM)
         self._vmapP_q = self._build_packed_face_indices(self._vmapP)
+        if self._use_aos_state_layout:
+            # AoS kernel reads AoS q, needs AoS-format vmapP indices.
+            # SoA kernels (boundary, etc.) still use SoA-format _vmapP_q.
+            self._vmapP_q_aos = self._build_packed_face_indices_aos(self._vmapP)
+        else:
+            self._vmapP_q_aos = self._vmapP_q
         self._face_node_ids = self.Fmask.reshape(-1).to(
             device=self.device, dtype=torch.long
         )
@@ -1394,6 +1495,18 @@ class AcousticsSimulation:
         )
         return packed_indices.reshape(-1)
 
+    def _build_packed_face_indices_aos(self, field_indices: torch.tensor):
+        """AoS-format packed indices for q[node, tet, field] interleaved layout."""
+        node_ids = torch.div(field_indices, self.N_tets, rounding_mode="floor")
+        tet_ids = torch.remainder(field_indices, self.N_tets)
+        variable_offsets = torch.arange(4, device=self.device, dtype=torch.long).reshape(4, 1)
+        packed_indices = (
+            node_ids.reshape(1, -1) * (4 * self.N_tets)
+            + tet_ids.reshape(1, -1) * 4
+            + variable_offsets
+        )
+        return packed_indices.reshape(-1)
+
     def _build_packed_flux_indices(self, face_indices: torch.tensor):
         face_ids = torch.div(face_indices, self.N_tets, rounding_mode="floor")
         tet_ids = torch.remainder(face_indices, self.N_tets)
@@ -1430,21 +1543,23 @@ class AcousticsSimulation:
         return self._q_by_node
 
     def _compute_packed_derivatives(self, q_by_node: torch.tensor):
+        # AoS q → SoA permute for BLAS (ndim==3 → AoS layout)
+        q_mm = q_by_node.permute(0, 2, 1).reshape(self.Np, 4 * self.N_tets) if q_by_node.ndim == 3 else q_by_node
         if self._use_merged_derivatives:
-            torch.mm(self._D_merged, q_by_node, out=self._dQ_merged_by_node)
+            torch.mm(self._D_merged, q_mm, out=self._dQ_merged_by_node)
             return
 
         if self._use_batched_derivatives:
             torch.bmm(
                 self._D_stack,
-                q_by_node.unsqueeze(0).expand(3, -1, -1),
+                q_mm.unsqueeze(0).expand(3, -1, -1),
                 out=self._dQ_by_derivative,
             )
             return
 
-        torch.mm(self.Dr, q_by_node, out=self._dQdr_by_node)
-        torch.mm(self.Ds, q_by_node, out=self._dQds_by_node)
-        torch.mm(self.Dt, q_by_node, out=self._dQdt_by_node)
+        torch.mm(self.Dr, q_mm, out=self._dQdr_by_node)
+        torch.mm(self.Ds, q_mm, out=self._dQds_by_node)
+        torch.mm(self.Dt, q_mm, out=self._dQdt_by_node)
 
     def _compute_packed_jump(self, q_by_node: torch.tensor):
         q_flat = q_by_node.reshape(-1)
@@ -1508,10 +1623,18 @@ class AcousticsSimulation:
             if (
                 self._use_compact_flux_coefficients
             ):
-                compact_interior_flux_kernel[(triton.cdiv(total_faces, block_size),)](
-                    q_by_node.reshape(-1),
+                if self._use_aos_state_layout:
+                    q_ptr = self._q_by_node.reshape(-1)
+                    kernel = compact_interior_flux_aos_kernel
+                    vmap_ptr = self._vmapP_q_aos
+                else:
+                    q_ptr = q_by_node.reshape(-1)
+                    kernel = compact_interior_flux_kernel
+                    vmap_ptr = self._vmapP_q
+                kernel[(triton.cdiv(total_faces, block_size),)](
+                    q_ptr,
                     self._face_node_ids,
-                    self._vmapP_q,
+                    vmap_ptr,
                     self._nx_flat,
                     self._ny_flat,
                     self._nz_flat,
