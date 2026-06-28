@@ -23,6 +23,20 @@ TESTS_DIR = REPO_ROOT / "tests"
 sys.path.insert(0, str(TESTS_DIR))
 
 
+def format_order_stats(stats) -> str:
+    if not stats:
+        return "edges=0,max=0,mean=0.000,p50=0.0,p90=0.0,p99=0.0,p999=0.0"
+    return (
+        f"edges={int(stats.get('edges', 0))},"
+        f"max={int(stats.get('max', 0))},"
+        f"mean={float(stats.get('mean', 0.0)):.3f},"
+        f"p50={float(stats.get('p50', 0.0)):.1f},"
+        f"p90={float(stats.get('p90', 0.0)):.1f},"
+        f"p99={float(stats.get('p99', 0.0)):.1f},"
+        f"p999={float(stats.get('p999', 0.0)):.1f}"
+    )
+
+
 def synchronize():
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -44,6 +58,43 @@ def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_g
     print(f"unique_interior_face_nodes={interior_face_nodes // 2}")
     print(f"paired_interior_face_nodes={paired_interior_face_nodes}")
     print(f"affine_face_geometry={int(sim._face_geometry_is_affine)}")
+    print(f"affine_face_delta={getattr(sim, '_face_geometry_delta', float('nan')):.6e}")
+    print(
+        f"affine_metric_geometry={int(getattr(sim, '_metric_geometry_is_affine', False))}"
+    )
+    print(
+        f"affine_metric_delta={getattr(sim, '_metric_affine_delta', float('nan')):.6e}"
+    )
+    print(f"interior_face_order={getattr(sim, '_interior_face_order_method', 'natural')}")
+    print(
+        f"face_order_tile_size={getattr(sim, '_interior_face_order_tile_size', -1)}"
+    )
+    print(
+        f"face_order_block_size={getattr(sim, '_interior_face_order_block_size', -1)}"
+    )
+    print(f"face_order_enabled={int(getattr(sim, '_use_ordered_aos_flux', False))}")
+    print(
+        f"face_order_storage={getattr(sim, '_interior_face_order_storage', 'disabled')}"
+    )
+    print(
+        f"ordered_aos_variant={getattr(sim, '_ordered_aos_variant_label', lambda: 'base')()}"
+    )
+    print(
+        "ordered_aos_state_load_mode="
+        f"{getattr(sim, '_ordered_aos_state_load_mode', 'scalar')}"
+    )
+    print(
+        "face_order_delta_before="
+        f"{format_order_stats(getattr(sim, '_interior_face_order_stats_before', None))}"
+    )
+    print(
+        "face_order_delta_after="
+        f"{format_order_stats(getattr(sim, '_interior_face_order_stats_after', None))}"
+    )
+    print(
+        "face_order_work_offset_delta_after="
+        f"{format_order_stats(getattr(sim, '_interior_face_work_offset_stats_after', None))}"
+    )
     print(f"dtype={sim.P.dtype}")
     print(f"device={sim.P.device}")
     print(f"cuda_graph={cuda_graph and sim.P.device.type == 'cuda'}")
@@ -61,6 +112,10 @@ def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_g
         f"derivative_volume:{int(sim._use_triton_derivative_volume)},"
         f"lift_surface:{int(sim._use_triton_lift_surface)},"
         f"compact_flux:{int(sim._use_compact_flux_coefficients)},"
+        f"aos_state_layout:{int(getattr(sim, '_use_aos_state_layout', False))},"
+        f"aos_volume_vector_loads:{int(getattr(sim, '_use_aos_volume_vector_loads', False))},"
+        f"ordered_aos_state_vec4:{int(getattr(sim, '_use_ordered_aos_state_vec4', False))},"
+        f"affine_metric_rhs:{int(getattr(sim, '_use_affine_metric_rhs', False))},"
         f"paired_interior_flux:{int(sim._use_paired_interior_flux)},"
         f"merged_derivatives:{int(sim._use_merged_derivatives)}"
     )

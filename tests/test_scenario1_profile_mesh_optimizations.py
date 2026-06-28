@@ -32,7 +32,8 @@ def build_profile_mesh_sim(
     merged_derivatives: bool,
     fused_state_accumulation: bool = False,
     paired_interior_flux: bool = False,
-    aos_state_layout: bool = False,
+    aos_state_layout: bool | None = False,
+    interior_face_order: str | None = "natural",
 ):
     monkeypatch.setenv(
         "EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS", "1" if compact_flux else "0"
@@ -47,9 +48,16 @@ def build_profile_mesh_sim(
     monkeypatch.setenv(
         "EDG_ACOUSTICS_PAIRED_INTERIOR_FLUX", "1" if paired_interior_flux else "0"
     )
-    monkeypatch.setenv(
-        "EDG_ACOUSTICS_AOS_STATE_LAYOUT", "1" if aos_state_layout else "0"
-    )
+    if aos_state_layout is None:
+        monkeypatch.delenv("EDG_ACOUSTICS_AOS_STATE_LAYOUT", raising=False)
+    else:
+        monkeypatch.setenv(
+            "EDG_ACOUSTICS_AOS_STATE_LAYOUT", "1" if aos_state_layout else "0"
+        )
+    if interior_face_order is None:
+        monkeypatch.delenv("EDG_ACOUSTICS_INTERIOR_FACE_ORDER", raising=False)
+    else:
+        monkeypatch.setenv("EDG_ACOUSTICS_INTERIOR_FACE_ORDER", interior_face_order)
     return build_scenario1_simulation(mesh_name=PROFILE_MESH, device="cuda")
 
 
@@ -77,27 +85,48 @@ def test_profile_mesh_compact_flux_and_merged_derivatives_match_baseline_rhs(
     assert_rhs_close(optimized_rhs, baseline_rhs, rtol=RTOL, atol=ATOL)
 
 
-def test_profile_mesh_aos_state_layout_matches_baseline_rhs(monkeypatch):
+def test_profile_mesh_default_aos_path_matches_baseline_rhs(monkeypatch):
     baseline = build_profile_mesh_sim(
-        monkeypatch, compact_flux=True, merged_derivatives=True
+        monkeypatch,
+        compact_flux=True,
+        merged_derivatives=True,
+        aos_state_layout=False,
+        interior_face_order="natural",
     )
-    baseline_bcvar = clone_bcvar(baseline.BC.BCvar)
     baseline_rhs = baseline.RHS_operator(
-        baseline.P, baseline.Vx, baseline.Vy, baseline.Vz, baseline_bcvar
+        baseline.P,
+        baseline.Vx,
+        baseline.Vy,
+        baseline.Vz,
+        clone_bcvar(baseline.BC.BCvar),
     )
 
     optimized = build_profile_mesh_sim(
         monkeypatch,
         compact_flux=True,
         merged_derivatives=True,
-        aos_state_layout=True,
+        aos_state_layout=None,
+        interior_face_order=None,
     )
-    optimized_bcvar = clone_bcvar(optimized.BC.BCvar)
     optimized_rhs = optimized.RHS_operator(
-        optimized.P, optimized.Vx, optimized.Vy, optimized.Vz, optimized_bcvar
+        optimized.P,
+        optimized.Vx,
+        optimized.Vy,
+        optimized.Vz,
+        clone_bcvar(optimized.BC.BCvar),
     )
 
     assert optimized._use_aos_state_layout
+    assert optimized._metric_geometry_is_affine
+    assert optimized._use_affine_metric_rhs
+    assert optimized._use_aos_volume_vector_loads
+    assert optimized._use_ordered_aos_flux
+    assert optimized._interior_face_order_method == "tile_plus_packed"
+    assert optimized._interior_face_order_tile_size == 128
+    assert optimized._interior_face_order_block_size == 128
+    assert optimized._interior_face_order_storage == "tile_local_u8"
+    assert optimized._ordered_aos_variant_label() == "vec4_scheduled"
+    assert optimized._ordered_aos_state_load_mode == "vec4_scheduled"
     assert_rhs_close(optimized_rhs, baseline_rhs, rtol=RTOL, atol=ATOL)
 
 
@@ -105,14 +134,22 @@ def test_profile_mesh_aos_state_layout_matches_baseline_rhs(monkeypatch):
     os.environ.get("EDG_ACOUSTICS_RUN_SLOW_TESTS") != "1",
     reason="lc0p20 short integration is a slow opt-in regression test",
 )
-def test_profile_mesh_compact_flux_matches_baseline_short_integration(monkeypatch):
+def test_profile_mesh_default_aos_matches_baseline_short_integration(monkeypatch):
     baseline = build_profile_mesh_sim(
-        monkeypatch, compact_flux=False, merged_derivatives=False
+        monkeypatch,
+        compact_flux=True,
+        merged_derivatives=True,
+        aos_state_layout=False,
+        interior_face_order="natural",
     )
     baseline.time_integration(n_time_steps=2, progress=False, use_cuda_graph=True)
 
     optimized = build_profile_mesh_sim(
-        monkeypatch, compact_flux=True, merged_derivatives=True
+        monkeypatch,
+        compact_flux=True,
+        merged_derivatives=True,
+        aos_state_layout=None,
+        interior_face_order=None,
     )
     optimized.time_integration(n_time_steps=2, progress=False, use_cuda_graph=True)
 

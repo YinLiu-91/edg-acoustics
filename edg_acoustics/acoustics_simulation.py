@@ -33,8 +33,68 @@ __all__ = ["AcousticsSimulation", "NODETOL"]
 NODETOL = 1.0e-7
 """float: Tolerance used to determine if a node lies on a facet."""
 
+INTERIOR_FACE_ORDER_METHODS = frozenset({"natural", "tile_plus_packed"})
+DEFAULT_INTERIOR_FACE_ORDER = "tile_plus_packed"
+DEFAULT_ORDERED_AOS_STATE_LOAD_MODE = "vec4_scheduled"
+
 # device = "cuda" if torch.cuda.is_available() else "cpu"
 device = device_ini.device
+
+
+def _normalize_interior_face_order_method(method: str | None) -> str:
+    if method is None:
+        return DEFAULT_INTERIOR_FACE_ORDER
+    normalized = method.strip().lower()
+    if normalized == "":
+        return DEFAULT_INTERIOR_FACE_ORDER
+    if normalized not in INTERIOR_FACE_ORDER_METHODS:
+        allowed = ", ".join(sorted(INTERIOR_FACE_ORDER_METHODS))
+        raise ValueError(
+            f"EDG_ACOUSTICS_INTERIOR_FACE_ORDER must be one of {allowed}."
+        )
+    return normalized
+
+
+def _parse_positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    value = int(raw)
+    if value <= 0:
+        raise ValueError(f"{name} must be positive.")
+    return value
+
+
+def _default_interior_face_order_block_size(method: str, tile_size: int) -> int:
+    if method == "tile_plus_packed":
+        return tile_size
+    return 256
+
+
+def _sequence_delta_stats(values, order=None) -> dict[str, float | int]:
+    values = numpy.asarray(values, dtype=numpy.int64)
+    if order is not None:
+        values = values[numpy.asarray(order, dtype=numpy.int64)]
+    if values.size <= 1:
+        return {
+            "edges": 0,
+            "max": 0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p90": 0.0,
+            "p99": 0.0,
+            "p999": 0.0,
+        }
+    distances = numpy.abs(numpy.diff(values))
+    return {
+        "edges": int(distances.size),
+        "max": int(distances.max(initial=0)),
+        "mean": float(distances.mean()),
+        "p50": float(numpy.percentile(distances, 50)),
+        "p90": float(numpy.percentile(distances, 90)),
+        "p99": float(numpy.percentile(distances, 99)),
+        "p999": float(numpy.percentile(distances, 99.9)),
+    }
 
 
 @triton.jit
@@ -126,6 +186,85 @@ def volume_rhs_kernel(
         + tl.load(metric_v_ptr + m22, mask=mask) * dPdt
     )
 
+    rhs_p = (
+        tl.load(metric_p_ptr + m00, mask=mask) * dVxdr
+        + tl.load(metric_p_ptr + m10, mask=mask) * dVxds
+        + tl.load(metric_p_ptr + m20, mask=mask) * dVxdt
+        + tl.load(metric_p_ptr + m01, mask=mask) * dVydr
+        + tl.load(metric_p_ptr + m11, mask=mask) * dVyds
+        + tl.load(metric_p_ptr + m21, mask=mask) * dVydt
+        + tl.load(metric_p_ptr + m02, mask=mask) * dVzdr
+        + tl.load(metric_p_ptr + m12, mask=mask) * dVzds
+        + tl.load(metric_p_ptr + m22, mask=mask) * dVzdt
+    )
+
+    tl.store(rhs_ptr + p, rhs_p, mask=mask)
+    tl.store(rhs_ptr + vx, rhs_vx, mask=mask)
+    tl.store(rhs_ptr + vy, rhs_vy, mask=mask)
+    tl.store(rhs_ptr + vz, rhs_vz, mask=mask)
+
+
+@triton.jit
+def volume_rhs_aos_kernel(
+    dQdr_ptr,
+    dQds_ptr,
+    dQdt_ptr,
+    metric_p_ptr,
+    metric_v_ptr,
+    rhs_ptr,
+    total_nodes: tl.constexpr,
+    n_tets: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_nodes
+    node = offsets // n_tets
+    tet = offsets - node * n_tets
+
+    p = node * n_var_tets + tet * 4
+    vx = p + 1
+    vy = p + 2
+    vz = p + 3
+
+    dPdr = tl.load(dQdr_ptr + p, mask=mask)
+    dPds = tl.load(dQds_ptr + p, mask=mask)
+    dPdt = tl.load(dQdt_ptr + p, mask=mask)
+    dVxdr = tl.load(dQdr_ptr + vx, mask=mask)
+    dVxds = tl.load(dQds_ptr + vx, mask=mask)
+    dVxdt = tl.load(dQdt_ptr + vx, mask=mask)
+    dVydr = tl.load(dQdr_ptr + vy, mask=mask)
+    dVyds = tl.load(dQds_ptr + vy, mask=mask)
+    dVydt = tl.load(dQdt_ptr + vy, mask=mask)
+    dVzdr = tl.load(dQdr_ptr + vz, mask=mask)
+    dVzds = tl.load(dQds_ptr + vz, mask=mask)
+    dVzdt = tl.load(dQdt_ptr + vz, mask=mask)
+
+    m00 = node * n_tets + tet
+    m10 = 3 * total_nodes + m00
+    m20 = 6 * total_nodes + m00
+    m01 = total_nodes + m00
+    m11 = 4 * total_nodes + m00
+    m21 = 7 * total_nodes + m00
+    m02 = 2 * total_nodes + m00
+    m12 = 5 * total_nodes + m00
+    m22 = 8 * total_nodes + m00
+
+    rhs_vx = (
+        tl.load(metric_v_ptr + m00, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m10, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m20, mask=mask) * dPdt
+    )
+    rhs_vy = (
+        tl.load(metric_v_ptr + m01, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m11, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m21, mask=mask) * dPdt
+    )
+    rhs_vz = (
+        tl.load(metric_v_ptr + m02, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m12, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m22, mask=mask) * dPdt
+    )
     rhs_p = (
         tl.load(metric_p_ptr + m00, mask=mask) * dVxdr
         + tl.load(metric_p_ptr + m10, mask=mask) * dVxds
@@ -253,6 +392,224 @@ def volume_surface_rhs_kernel(
             q_update_ptr + vz,
             tl.load(q_update_ptr + vz, mask=mask) + coefficient * rhs_vz,
             mask=mask,
+        )
+
+
+@triton.jit
+def volume_surface_rhs_aos_kernel(
+    dQdr_ptr,
+    dQds_ptr,
+    dQdt_ptr,
+    metric_p_ptr,
+    metric_v_ptr,
+    surface_ptr,
+    rhs_ptr,
+    q_update_ptr,
+    total_nodes: tl.constexpr,
+    n_tets: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    coefficient: tl.constexpr,
+    UPDATE_STATE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_nodes
+    node = offsets // n_tets
+    tet = offsets - node * n_tets
+
+    p = node * n_var_tets + tet * 4
+    vx = p + 1
+    vy = p + 2
+    vz = p + 3
+
+    dPdr = tl.load(dQdr_ptr + p, mask=mask)
+    dPds = tl.load(dQds_ptr + p, mask=mask)
+    dPdt = tl.load(dQdt_ptr + p, mask=mask)
+    dVxdr = tl.load(dQdr_ptr + vx, mask=mask)
+    dVxds = tl.load(dQds_ptr + vx, mask=mask)
+    dVxdt = tl.load(dQdt_ptr + vx, mask=mask)
+    dVydr = tl.load(dQdr_ptr + vy, mask=mask)
+    dVyds = tl.load(dQds_ptr + vy, mask=mask)
+    dVydt = tl.load(dQdt_ptr + vy, mask=mask)
+    dVzdr = tl.load(dQdr_ptr + vz, mask=mask)
+    dVzds = tl.load(dQds_ptr + vz, mask=mask)
+    dVzdt = tl.load(dQdt_ptr + vz, mask=mask)
+
+    m00 = node * n_tets + tet
+    m10 = 3 * total_nodes + m00
+    m20 = 6 * total_nodes + m00
+    m01 = total_nodes + m00
+    m11 = 4 * total_nodes + m00
+    m21 = 7 * total_nodes + m00
+    m02 = 2 * total_nodes + m00
+    m12 = 5 * total_nodes + m00
+    m22 = 8 * total_nodes + m00
+
+    rhs_vx = (
+        tl.load(metric_v_ptr + m00, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m10, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m20, mask=mask) * dPdt
+        + tl.load(surface_ptr + vx, mask=mask)
+    )
+    rhs_vy = (
+        tl.load(metric_v_ptr + m01, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m11, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m21, mask=mask) * dPdt
+        + tl.load(surface_ptr + vy, mask=mask)
+    )
+    rhs_vz = (
+        tl.load(metric_v_ptr + m02, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m12, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m22, mask=mask) * dPdt
+        + tl.load(surface_ptr + vz, mask=mask)
+    )
+    rhs_p = (
+        tl.load(metric_p_ptr + m00, mask=mask) * dVxdr
+        + tl.load(metric_p_ptr + m10, mask=mask) * dVxds
+        + tl.load(metric_p_ptr + m20, mask=mask) * dVxdt
+        + tl.load(metric_p_ptr + m01, mask=mask) * dVydr
+        + tl.load(metric_p_ptr + m11, mask=mask) * dVyds
+        + tl.load(metric_p_ptr + m21, mask=mask) * dVydt
+        + tl.load(metric_p_ptr + m02, mask=mask) * dVzdr
+        + tl.load(metric_p_ptr + m12, mask=mask) * dVzds
+        + tl.load(metric_p_ptr + m22, mask=mask) * dVzdt
+        + tl.load(surface_ptr + p, mask=mask)
+    )
+
+    tl.store(rhs_ptr + p, rhs_p, mask=mask)
+    tl.store(rhs_ptr + vx, rhs_vx, mask=mask)
+    tl.store(rhs_ptr + vy, rhs_vy, mask=mask)
+    tl.store(rhs_ptr + vz, rhs_vz, mask=mask)
+    if UPDATE_STATE:
+        tl.store(
+            q_update_ptr + p,
+            tl.load(q_update_ptr + p, mask=mask) + coefficient * rhs_p,
+            mask=mask,
+        )
+        tl.store(
+            q_update_ptr + vx,
+            tl.load(q_update_ptr + vx, mask=mask) + coefficient * rhs_vx,
+            mask=mask,
+        )
+        tl.store(
+            q_update_ptr + vy,
+            tl.load(q_update_ptr + vy, mask=mask) + coefficient * rhs_vy,
+            mask=mask,
+        )
+        tl.store(
+            q_update_ptr + vz,
+            tl.load(q_update_ptr + vz, mask=mask) + coefficient * rhs_vz,
+            mask=mask,
+        )
+
+
+@triton.jit
+def volume_surface_rhs_affine_metric_aos_vector_kernel(
+    dQdr_ptr,
+    dQds_ptr,
+    dQdt_ptr,
+    metric_p_ptr,
+    metric_v_ptr,
+    surface_ptr,
+    rhs_ptr,
+    q_update_ptr,
+    total_nodes: tl.constexpr,
+    n_tets: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    coefficient: tl.constexpr,
+    UPDATE_STATE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_nodes
+    node = offsets // n_tets
+    tet = offsets - node * n_tets
+    base = node * n_var_tets + tet * 4
+
+    field_offsets = tl.arange(0, 4)[:, None]
+    field_mask = mask[None, :]
+    field_index = base[None, :] + field_offsets
+    d_dr = tl.load(dQdr_ptr + field_index, mask=field_mask, other=0.0)
+    d_ds = tl.load(dQds_ptr + field_index, mask=field_mask, other=0.0)
+    d_dt = tl.load(dQdt_ptr + field_index, mask=field_mask, other=0.0)
+    surface = tl.load(surface_ptr + field_index, mask=field_mask, other=0.0)
+
+    selector = tl.arange(0, 4)[:, None]
+    selector_p = (selector == 0).to(tl.float64)
+    selector_vx = (selector == 1).to(tl.float64)
+    selector_vy = (selector == 2).to(tl.float64)
+    selector_vz = (selector == 3).to(tl.float64)
+    dPdr = tl.sum(d_dr * selector_p, axis=0)
+    dPds = tl.sum(d_ds * selector_p, axis=0)
+    dPdt = tl.sum(d_dt * selector_p, axis=0)
+    dVxdr = tl.sum(d_dr * selector_vx, axis=0)
+    dVxds = tl.sum(d_ds * selector_vx, axis=0)
+    dVxdt = tl.sum(d_dt * selector_vx, axis=0)
+    dVydr = tl.sum(d_dr * selector_vy, axis=0)
+    dVyds = tl.sum(d_ds * selector_vy, axis=0)
+    dVydt = tl.sum(d_dt * selector_vy, axis=0)
+    dVzdr = tl.sum(d_dr * selector_vz, axis=0)
+    dVzds = tl.sum(d_ds * selector_vz, axis=0)
+    dVzdt = tl.sum(d_dt * selector_vz, axis=0)
+    surface_p = tl.sum(surface * selector_p, axis=0)
+    surface_vx = tl.sum(surface * selector_vx, axis=0)
+    surface_vy = tl.sum(surface * selector_vy, axis=0)
+    surface_vz = tl.sum(surface * selector_vz, axis=0)
+
+    m00 = tet
+    m10 = 3 * n_tets + tet
+    m20 = 6 * n_tets + tet
+    m01 = n_tets + tet
+    m11 = 4 * n_tets + tet
+    m21 = 7 * n_tets + tet
+    m02 = 2 * n_tets + tet
+    m12 = 5 * n_tets + tet
+    m22 = 8 * n_tets + tet
+
+    rhs_vx = (
+        tl.load(metric_v_ptr + m00, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m10, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m20, mask=mask) * dPdt
+        + surface_vx
+    )
+    rhs_vy = (
+        tl.load(metric_v_ptr + m01, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m11, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m21, mask=mask) * dPdt
+        + surface_vy
+    )
+    rhs_vz = (
+        tl.load(metric_v_ptr + m02, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m12, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m22, mask=mask) * dPdt
+        + surface_vz
+    )
+    rhs_p = (
+        tl.load(metric_p_ptr + m00, mask=mask) * dVxdr
+        + tl.load(metric_p_ptr + m10, mask=mask) * dVxds
+        + tl.load(metric_p_ptr + m20, mask=mask) * dVxdt
+        + tl.load(metric_p_ptr + m01, mask=mask) * dVydr
+        + tl.load(metric_p_ptr + m11, mask=mask) * dVyds
+        + tl.load(metric_p_ptr + m21, mask=mask) * dVydt
+        + tl.load(metric_p_ptr + m02, mask=mask) * dVzdr
+        + tl.load(metric_p_ptr + m12, mask=mask) * dVzds
+        + tl.load(metric_p_ptr + m22, mask=mask) * dVzdt
+        + surface_p
+    )
+
+    rhs_pack = (
+        rhs_p[None, :] * selector_p
+        + rhs_vx[None, :] * selector_vx
+        + rhs_vy[None, :] * selector_vy
+        + rhs_vz[None, :] * selector_vz
+    )
+    tl.store(rhs_ptr + field_index, rhs_pack, mask=field_mask)
+    if UPDATE_STATE:
+        q_old = tl.load(q_update_ptr + field_index, mask=field_mask, other=0.0)
+        tl.store(
+            q_update_ptr + field_index,
+            q_old + coefficient * rhs_pack,
+            mask=field_mask,
         )
 
 
@@ -526,7 +883,7 @@ def compact_interior_flux_aos_kernel(
     SCALE_FLUX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """AoS compact flux: q is [Np,N_tets,4], reads vec4-adjacent, writes SoA output."""
+    """AoS compact flux: q/flux are packed in active `[node, tet, field]` order."""
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < total_faces
     tet = offsets % n_tets
@@ -568,12 +925,94 @@ def compact_interior_flux_aos_kernel(
         flux_vy *= fscale
         flux_vz *= fscale
 
-    # SoA output: field*K+tet (compatible with downstream SoA flux buffer)
-    out_p = face_node * n_var_tets + tet
-    tl.store(flux_ptr + out_p, flux_p, mask=mask)
-    tl.store(flux_ptr + out_p + n_tets, flux_vx, mask=mask)
-    tl.store(flux_ptr + out_p + 2 * n_tets, flux_vy, mask=mask)
-    tl.store(flux_ptr + out_p + 3 * n_tets, flux_vz, mask=mask)
+    out_base = face_node * n_var_tets + tet * 4
+    tl.store(flux_ptr + out_base, flux_p, mask=mask)
+    tl.store(flux_ptr + out_base + 1, flux_vx, mask=mask)
+    tl.store(flux_ptr + out_base + 2, flux_vy, mask=mask)
+    tl.store(flux_ptr + out_base + 3, flux_vz, mask=mask)
+
+
+@triton.jit
+def compact_interior_flux_aos_tile_local_u8_variant_kernel(
+    q_ptr,
+    local_perm_ptr,
+    face_node_ids_ptr,
+    vmapP_q_ptr,
+    nx_ptr,
+    ny_ptr,
+    nz_ptr,
+    fscale_ptr,
+    flux_ptr,
+    total_faces: tl.constexpr,
+    n_tets: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    rho0: tl.constexpr,
+    c0: tl.constexpr,
+    SCALE_FLUX: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
+):
+    work_ids = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = work_ids < total_faces
+    work_ids_i64 = tl.cast(work_ids, tl.int64)
+    tile_start = (work_ids_i64 // TILE_SIZE) * TILE_SIZE
+    local_perm = tl.cast(
+        tl.load(local_perm_ptr + work_ids, mask=mask, other=0), tl.int64
+    )
+    offsets = tile_start + local_perm
+    tet = offsets % n_tets
+    face_node = offsets // n_tets
+
+    node_m = tl.cast(tl.load(face_node_ids_ptr + face_node, mask=mask), tl.int64)
+    base_m = node_m * n_var_tets + tet * 4
+    base_p = tl.cast(tl.load(vmapP_q_ptr + offsets, mask=mask), tl.int64)
+    nx = tl.load(nx_ptr + offsets, mask=mask)
+    ny = tl.load(ny_ptr + offsets, mask=mask)
+    nz = tl.load(nz_ptr + offsets, mask=mask)
+
+    field_offsets = tl.arange(0, 4)[:, None]
+    tl.multiple_of(base_m, 4)
+    tl.multiple_of(base_p, 4)
+    state_delta = tl.load(
+        q_ptr + base_m[None, :] + field_offsets,
+        mask=mask[None, :],
+        other=0.0,
+    ) - tl.load(
+        q_ptr + base_p[None, :] + field_offsets,
+        mask=mask[None, :],
+        other=0.0,
+        cache_modifier=".cg",
+    )
+    selector = tl.arange(0, 4)[:, None]
+    selector_p = (selector == 0).to(tl.float64)
+    selector_vx = (selector == 1).to(tl.float64)
+    selector_vy = (selector == 2).to(tl.float64)
+    selector_vz = (selector == 3).to(tl.float64)
+    dp = tl.sum(state_delta * selector_p, axis=0)
+    dvn = (
+        nx * tl.sum(state_delta * selector_vx, axis=0)
+        + ny * tl.sum(state_delta * selector_vy, axis=0)
+        + nz * tl.sum(state_delta * selector_vz, axis=0)
+    )
+
+    velocity_flux = (0.5 / rho0) * dp - (0.5 * c0) * dvn
+    flux_p = (0.5 * c0 * c0 * rho0) * dvn - (0.5 * c0) * dp
+    flux_vx = nx * velocity_flux
+    flux_vy = ny * velocity_flux
+    flux_vz = nz * velocity_flux
+
+    if SCALE_FLUX:
+        fscale = tl.load(fscale_ptr + offsets, mask=mask)
+        flux_p *= fscale
+        flux_vx *= fscale
+        flux_vy *= fscale
+        flux_vz *= fscale
+
+    out_base = face_node * n_var_tets + tet * 4
+    tl.store(flux_ptr + out_base, flux_p, mask=mask)
+    tl.store(flux_ptr + out_base + 1, flux_vx, mask=mask)
+    tl.store(flux_ptr + out_base + 2, flux_vy, mask=mask)
+    tl.store(flux_ptr + out_base + 3, flux_vz, mask=mask)
 
 
 @triton.jit
@@ -1223,25 +1662,36 @@ class AcousticsSimulation:
         return packed.view(self.Np, 4, self.N_tets)
 
     def _flux_state_view(self, packed: torch.tensor):
-        """Return a `[4*Nfp, 4, K]` field view for face-flux storage.
-        AoS kernel writes SoA flux output, so this is always a SoA view."""
+        """Return a `[4*Nfp, 4, K]` field view for the active flux layout."""
+        if getattr(self, "_use_aos_state_layout", False):
+            return packed.view(4 * self.Nfp, self.N_tets, 4).permute(0, 2, 1)
         return packed.view(4 * self.Nfp, 4, self.N_tets)
+
+    def _packed_rhs_buffer_for_view(self, rhs_view: torch.tensor):
+        """Map an RHS view back to its contiguous packed buffer."""
+        if not getattr(self, "_use_aos_state_layout", False):
+            return rhs_view.reshape(self.Np, 4 * self.N_tets)
+        for buffer, view in zip(self._rhs_by_node_buffers, self._rhs_by_node_views):
+            if rhs_view is view:
+                return buffer
+        raise ValueError("Unknown RHS view for AoS packed layout.")
 
     def init_runtime_buffers(self):
         """Preallocate buffers reused by RHS computations."""
-        # AOS keeps the primary packed buffers in one 2D tensor; views expose field order.
-        cc_env = os.environ.get("EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS", "1")
-        want_cc = self.device.type == "cuda" and cc_env != "0"
-        if want_cc:
-            aos_env = os.environ.get("EDG_ACOUSTICS_AOS_STATE_LAYOUT")
-            metric_ref = self.rst_xyz[:, :, :1, :]
-            metric_delta = (self.rst_xyz - metric_ref).abs().max()
-            default_aos = self.N_tets >= 10_000 and bool(metric_delta <= 1.0e-9)
-            self._use_aos_state_layout = (
-                default_aos if aos_env is None else aos_env not in {"", "0", "false", "False"}
-            )
-        else:
-            self._use_aos_state_layout = False
+        aos_env = os.environ.get("EDG_ACOUSTICS_AOS_STATE_LAYOUT")
+        metric_ref = self.rst_xyz[:, :, :1, :]
+        metric_delta = (self.rst_xyz - metric_ref).abs().max()
+        default_aos = (
+            self.device.type == "cuda"
+            and self.N_tets >= 10_000
+            and bool(metric_delta <= 1.0e-9)
+        )
+        self._use_aos_state_layout = default_aos if aos_env is None else aos_env not in {
+            "",
+            "0",
+            "false",
+            "False",
+        }
         face_shape = self.Fscale.shape
         node_shape = (self.Np, self.N_tets)
         kwargs = {"device": self.device, "dtype": device_ini.dtype}
@@ -1275,13 +1725,32 @@ class AcousticsSimulation:
         self._dPdy = torch.empty(node_shape, **kwargs)
         self._dPdz = torch.empty(node_shape, **kwargs)
         self._divV = torch.empty(node_shape, **kwargs)
-        self._metric_p = self.rst_xyz * (-(self.c0**2) * self.rho0)
-        self._metric_v = self.rst_xyz * (-1.0 / self.rho0)
         # Scalar fp64 tensors to avoid tl.constexpr fp32 truncation in kernels
         self._rho0_tensor = torch.tensor([self.rho0], dtype=kwargs["dtype"], device=kwargs["device"])
         self._c0_tensor = torch.tensor([self.c0], dtype=kwargs["dtype"], device=kwargs["device"])
         self._coefficient_tensor = torch.tensor([0.0], dtype=kwargs["dtype"], device=kwargs["device"])
         self._ri_tensor = torch.tensor([0.0], dtype=kwargs["dtype"], device=kwargs["device"])
+        self._use_compact_flux_coefficients = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS", "1")
+            != "0"
+        )
+        if not self._use_compact_flux_coefficients:
+            self._use_aos_state_layout = False
+        aos_volume_vector_env = os.environ.get(
+            "EDG_ACOUSTICS_AOS_VOLUME_VECTOR_LOADS"
+        )
+        self._use_aos_volume_vector_loads = self._use_aos_state_layout and (
+            aos_volume_vector_env not in {"0", "false", "False"}
+        )
+        derivative_volume_requested = (
+            self.device.type == "cuda"
+            and os.environ.get("EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME", "0")
+            != "0"
+        )
+        if self._use_aos_state_layout:
+            derivative_volume_requested = False
+        self._cache_affine_volume_metrics(derivative_volume_requested)
         self._use_triton_volume_rhs = (
             self.device.type == "cuda"
             and os.environ.get("EDG_ACOUSTICS_TRITON_VOLUME_RHS", "1") != "0"
@@ -1320,20 +1789,10 @@ class AcousticsSimulation:
             if fused_state_env is None
             else fused_state_env != "0"
         )
-        self._use_triton_derivative_volume = (
-            self.device.type == "cuda"
-            and os.environ.get("EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME", "0")
-            != "0"
-            and not self._use_aos_state_layout
-        )
+        self._use_triton_derivative_volume = derivative_volume_requested
         self._use_triton_lift_surface = (
             self.device.type == "cuda"
             and os.environ.get("EDG_ACOUSTICS_TRITON_LIFT_SURFACE", "0") != "0"
-        )
-        self._use_compact_flux_coefficients = (
-            self.device.type == "cuda"
-            and os.environ.get("EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS", "1")
-            != "0"
         )
         self._use_paired_interior_flux = (
             self.device.type == "cuda"
@@ -1347,15 +1806,51 @@ class AcousticsSimulation:
             if merged_derivatives_env is None
             else merged_derivatives_env != "0"
         )
-        if self._use_aos_state_layout:
-            self._use_triton_volume_rhs = False
-            self._use_triton_volume_surface_rhs = False
+        self._interior_face_order_method = _normalize_interior_face_order_method(
+            os.environ.get("EDG_ACOUSTICS_INTERIOR_FACE_ORDER")
+        )
+        self._interior_face_order_tile_size = _parse_positive_int_env(
+            "EDG_ACOUSTICS_INTERIOR_FACE_ORDER_TILE_SIZE", 128
+        )
+        self._interior_face_order_block_size = _parse_positive_int_env(
+            "EDG_ACOUSTICS_INTERIOR_FACE_ORDER_BLOCK_SIZE",
+            _default_interior_face_order_block_size(
+                self._interior_face_order_method,
+                self._interior_face_order_tile_size,
+            ),
+        )
+        if (
+            self._interior_face_order_method == "tile_plus_packed"
+            and self._interior_face_order_tile_size > 256
+        ):
+            raise ValueError(
+                "Only tile-local uint8 ordered AoS is supported; tile size must be <= 256."
+            )
+        self._use_ordered_aos_flux = (
+            self.device.type == "cuda"
+            and self._use_aos_state_layout
+            and self._use_compact_flux_coefficients
+            and self._interior_face_order_method == "tile_plus_packed"
+        )
+        self._ordered_aos_state_load_mode = (
+            DEFAULT_ORDERED_AOS_STATE_LOAD_MODE
+            if self._use_ordered_aos_flux
+            else "scalar"
+        )
+        self._use_ordered_aos_state_vec4 = (
+            self._ordered_aos_state_load_mode == DEFAULT_ORDERED_AOS_STATE_LOAD_MODE
+        )
+        self._use_ordered_aos_affine_face = False
+        self._ordered_face_geom_aos = None
+        self._interior_face_work_offsets = None
+        self._interior_face_local_perm_u8 = None
+        self._interior_face_order_storage = "disabled"
+        self._interior_face_order_stats_before = None
+        self._interior_face_order_stats_after = None
+        self._interior_face_work_offset_stats_after = None
         self._flux_by_face = torch.empty((4 * self.Nfp, 4 * self.N_tets), **kwargs)
         self._flux_by_face_view = self._flux_state_view(self._flux_by_face)
         self._surface_by_node = torch.empty((self.Np, 4 * self.N_tets), **kwargs)
-        self._surface_by_node_soa = (
-            torch.empty_like(self._surface_by_node) if self._use_aos_state_layout else None
-        )
         self._surface_view = self._state_view(self._surface_by_node)
         self._face_left_packed = torch.empty((4, face_shape[0] * face_shape[1]), **kwargs)
         self._face_right_packed = torch.empty_like(self._face_left_packed)
@@ -1368,16 +1863,44 @@ class AcousticsSimulation:
         self._rhs_buffer_index = 0
         self._cuda_step_graphs = {}
 
+    def _cache_affine_volume_metrics(self, derivative_volume_requested: bool):
+        """Cache full and element-affine metric coefficients for volume RHS kernels."""
+        metric_reference = self.rst_xyz[:, :, :1, :]
+        metric_delta = (self.rst_xyz - metric_reference).abs().max()
+        self._metric_affine_delta = float(metric_delta.detach().cpu())
+        self._metric_geometry_is_affine = bool(metric_delta <= 1.0e-9)
+        affine_metric_env = os.environ.get("EDG_ACOUSTICS_AFFINE_METRIC_RHS")
+        self._use_affine_metric_rhs = (
+            self.device.type == "cuda"
+            and self._metric_geometry_is_affine
+            and not derivative_volume_requested
+            and (
+                (self.N_tets >= 10_000)
+                if affine_metric_env is None
+                else affine_metric_env != "0"
+            )
+        )
+        self._metric_p = self.rst_xyz * (-(self.c0**2) * self.rho0)
+        self._metric_v = self.rst_xyz * (-1.0 / self.rho0)
+        metric_by_element = self.rst_xyz[:, :, 0, :].contiguous()
+        self._metric_p_affine = metric_by_element * (-(self.c0**2) * self.rho0)
+        self._metric_v_affine = metric_by_element * (-1.0 / self.rho0)
+
+    def _ensure_full_metric_buffers(self):
+        """The current implementation keeps full metric buffers materialized."""
+        return
+
+    def _ordered_aos_variant_label(self) -> str:
+        if self._use_ordered_aos_flux:
+            return self._ordered_aos_state_load_mode
+        return "base"
+
     def cache_static_indices(self):
         """Cache immutable flattened indices and boundary normals."""
         self._vmapM = self.vmapM.to(device=self.device, dtype=torch.long)
         self._vmapP = self.vmapP.to(device=self.device, dtype=torch.long)
         self._vmapM_q = self._build_packed_face_indices(self._vmapM)
         self._vmapP_q = self._build_packed_face_indices(self._vmapP)
-        if self._use_aos_state_layout:
-            self._vmapP_q_aos = self._vmapP_q
-        else:
-            self._vmapP_q_aos = self._build_packed_face_indices_aos(self._vmapP)
         self._face_node_ids = self.Fmask.reshape(-1).to(
             device=self.device, dtype=torch.long
         )
@@ -1386,6 +1909,7 @@ class AcousticsSimulation:
         self._nx_flat = self.n_xyz[0].reshape(-1)
         self._ny_flat = self.n_xyz[1].reshape(-1)
         self._nz_flat = self.n_xyz[2].reshape(-1)
+        self._cache_ordered_interior_face_work_offsets()
 
         for node in self.BCnode:
             node["map"] = node["map"].to(device=self.device, dtype=torch.long)
@@ -1404,6 +1928,9 @@ class AcousticsSimulation:
         scale_delta = (face_scales - face_scales[:, :1, :]).abs().max()
         self._face_geometry_is_affine = bool(
             normal_delta <= 1.0e-9 and scale_delta <= 1.0e-9
+        )
+        self._face_geometry_delta = float(
+            torch.maximum(normal_delta, scale_delta).detach().cpu()
         )
         self._nx_by_face = face_normals[0, :, 0, :].contiguous()
         self._ny_by_face = face_normals[1, :, 0, :].contiguous()
@@ -1430,6 +1957,40 @@ class AcousticsSimulation:
         self._interior_pair_partner_offsets = partner_offsets[
             interior_pair_mask
         ].contiguous()
+
+    def _cache_ordered_interior_face_work_offsets(self):
+        self._interior_face_work_offsets = None
+        self._interior_face_local_perm_u8 = None
+        self._interior_face_order_storage = "disabled"
+        self._interior_face_order_stats_before = None
+        self._interior_face_order_stats_after = None
+        self._interior_face_work_offset_stats_after = None
+        if not self._use_ordered_aos_flux:
+            return
+
+        total_face_nodes = int(self._vmapM.numel())
+        natural_order = numpy.arange(total_face_nodes, dtype=numpy.int64)
+        plus_base = (
+            self._vmapP_q[:total_face_nodes]
+            .detach()
+            .to(device="cpu", dtype=torch.long)
+            .numpy()
+        )
+        self._interior_face_order_stats_before = _sequence_delta_stats(plus_base)
+        tile_size = self._interior_face_order_tile_size
+        order = numpy.empty_like(natural_order)
+        local_perm_u8 = numpy.empty(total_face_nodes, dtype=numpy.uint8)
+        for start in range(0, total_face_nodes, tile_size):
+            end = min(start + tile_size, total_face_nodes)
+            local_sort = numpy.argsort(plus_base[start:end], kind="stable")
+            order[start:end] = natural_order[start:end][local_sort]
+            local_perm_u8[start:end] = local_sort.astype(numpy.uint8, copy=False)
+        self._interior_face_order_stats_after = _sequence_delta_stats(plus_base, order)
+        self._interior_face_work_offset_stats_after = _sequence_delta_stats(order)
+        self._interior_face_local_perm_u8 = torch.from_numpy(
+            numpy.ascontiguousarray(local_perm_u8)
+        ).to(device=self.device, dtype=torch.uint8)
+        self._interior_face_order_storage = "tile_local_u8"
 
     def cache_boundary_parameters(self):
         """Cache boundary parameters as tensors without changing saved BC metadata."""
@@ -1509,30 +2070,28 @@ class AcousticsSimulation:
             )
         return packed_indices.reshape(-1)
 
-    def _build_packed_face_indices_aos(self, field_indices: torch.tensor):
-        """AoS-format packed indices for q[node, tet, field] interleaved layout."""
-        node_ids = torch.div(field_indices, self.N_tets, rounding_mode="floor")
-        tet_ids = torch.remainder(field_indices, self.N_tets)
-        variable_offsets = torch.arange(4, device=self.device, dtype=torch.long).reshape(4, 1)
-        packed_indices = (
-            node_ids.reshape(1, -1) * (4 * self.N_tets)
-            + tet_ids.reshape(1, -1) * 4
-            + variable_offsets
-        )
-        return packed_indices.reshape(-1)
-
     def _build_packed_flux_indices(self, face_indices: torch.tensor):
         face_ids = torch.div(face_indices, self.N_tets, rounding_mode="floor")
         tet_ids = torch.remainder(face_indices, self.N_tets)
-        variable_offsets = (
-            torch.arange(4, device=self.device, dtype=torch.long).reshape(4, 1)
-            * self.N_tets
-        )
-        packed_indices = (
-            face_ids.reshape(1, -1) * (4 * self.N_tets)
-            + variable_offsets
-            + tet_ids.reshape(1, -1)
-        )
+        if self._use_aos_state_layout:
+            variable_offsets = torch.arange(
+                4, device=self.device, dtype=torch.long
+            ).reshape(4, 1)
+            packed_indices = (
+                face_ids.reshape(1, -1) * (4 * self.N_tets)
+                + tet_ids.reshape(1, -1) * 4
+                + variable_offsets
+            )
+        else:
+            variable_offsets = (
+                torch.arange(4, device=self.device, dtype=torch.long).reshape(4, 1)
+                * self.N_tets
+            )
+            packed_indices = (
+                face_ids.reshape(1, -1) * (4 * self.N_tets)
+                + variable_offsets
+                + tet_ids.reshape(1, -1)
+            )
         return packed_indices.reshape(-1)
 
     def _next_rhs_buffers(self):
@@ -1636,9 +2195,36 @@ class AcousticsSimulation:
                 self._use_compact_flux_coefficients
             ):
                 if self._use_aos_state_layout:
+                    if (
+                        self._use_ordered_aos_flux
+                        and self._interior_face_local_perm_u8 is not None
+                    ):
+                        ordered_block_size = self._interior_face_order_block_size
+                        compact_interior_flux_aos_tile_local_u8_variant_kernel[
+                            (triton.cdiv(total_faces, ordered_block_size),)
+                        ](
+                            q_by_node.reshape(-1),
+                            self._interior_face_local_perm_u8,
+                            self._face_node_ids,
+                            self._vmapP_q,
+                            self._nx_flat,
+                            self._ny_flat,
+                            self._nz_flat,
+                            self.Fscale.reshape(-1),
+                            self._flux_by_face.reshape(-1),
+                            total_faces,
+                            self.N_tets,
+                            4 * self.N_tets,
+                            self.rho0,
+                            self.c0,
+                            self._use_scaled_flux_kernels,
+                            BLOCK_SIZE=ordered_block_size,
+                            TILE_SIZE=self._interior_face_order_tile_size,
+                        )
+                        return
                     q_ptr = q_by_node.reshape(-1)
                     kernel = compact_interior_flux_aos_kernel
-                    vmap_ptr = self._vmapP_q_aos
+                    vmap_ptr = self._vmapP_q
                 else:
                     q_ptr = q_by_node.reshape(-1)
                     kernel = compact_interior_flux_kernel
@@ -1751,6 +2337,80 @@ class AcousticsSimulation:
         q_update: torch.tensor | None = None,
         coefficient: float = 0.0,
     ):
+        rhs_by_node = self._packed_rhs_buffer_for_view(rhs_view)
+        if (
+            self._use_aos_state_layout
+            and self._use_triton_volume_rhs
+            and self._use_affine_metric_rhs
+            and self._use_aos_volume_vector_loads
+            and surface_by_node is not None
+        ):
+            total_nodes = self.Np * self.N_tets
+            block_size = 128
+            volume_surface_rhs_affine_metric_aos_vector_kernel[
+                (triton.cdiv(total_nodes, block_size),)
+            ](
+                self._dQdr_by_node,
+                self._dQds_by_node,
+                self._dQdt_by_node,
+                self._metric_p_affine,
+                self._metric_v_affine,
+                surface_by_node,
+                rhs_by_node,
+                q_update if q_update is not None else rhs_by_node,
+                total_nodes,
+                self.N_tets,
+                4 * self.N_tets,
+                coefficient,
+                q_update is not None,
+                BLOCK_SIZE=block_size,
+            )
+            return
+
+        if (
+            self._use_aos_state_layout
+            and self._use_triton_volume_rhs
+            and surface_by_node is not None
+        ):
+            self._ensure_full_metric_buffers()
+            total_nodes = self.Np * self.N_tets
+            block_size = 256
+            volume_surface_rhs_aos_kernel[(triton.cdiv(total_nodes, block_size),)](
+                self._dQdr_by_node,
+                self._dQds_by_node,
+                self._dQdt_by_node,
+                self._metric_p,
+                self._metric_v,
+                surface_by_node,
+                rhs_by_node,
+                q_update if q_update is not None else rhs_by_node,
+                total_nodes,
+                self.N_tets,
+                4 * self.N_tets,
+                coefficient,
+                q_update is not None,
+                BLOCK_SIZE=block_size,
+            )
+            return
+
+        if self._use_aos_state_layout and self._use_triton_volume_rhs:
+            self._ensure_full_metric_buffers()
+            total_nodes = self.Np * self.N_tets
+            block_size = 256
+            volume_rhs_aos_kernel[(triton.cdiv(total_nodes, block_size),)](
+                self._dQdr_by_node,
+                self._dQds_by_node,
+                self._dQdt_by_node,
+                self._metric_p,
+                self._metric_v,
+                rhs_by_node,
+                total_nodes,
+                self.N_tets,
+                4 * self.N_tets,
+                BLOCK_SIZE=block_size,
+            )
+            return
+
         if self._use_triton_volume_rhs and surface_by_node is not None:
             total_nodes = self.Np * self.N_tets
             block_size = 256
@@ -1762,8 +2422,8 @@ class AcousticsSimulation:
                 self._metric_p,
                 self._metric_v,
                 surface_by_node,
-                rhs_view.reshape(self.Np, 4 * self.N_tets),
-                q_update if q_update is not None else rhs_view.reshape(self.Np, 4 * self.N_tets),
+                rhs_by_node,
+                q_update if q_update is not None else rhs_by_node,
                 total_nodes,
                 self.N_tets,
                 4 * self.N_tets,
@@ -1782,7 +2442,7 @@ class AcousticsSimulation:
                 self._dQdt_by_node,
                 self._metric_p,
                 self._metric_v,
-                rhs_view.reshape(self.Np, 4 * self.N_tets),
+                rhs_by_node,
                 total_nodes,
                 self.N_tets,
                 4 * self.N_tets,
@@ -1848,32 +2508,20 @@ class AcousticsSimulation:
         )
 
     def _compute_lift_surface(self):
-        lift_output = (
-            self._surface_by_node_soa
-            if self._surface_by_node_soa is not None
-            else self._surface_by_node
-        )
         if self._use_triton_lift_surface:
             total_outputs = self.Np * 4 * self.N_tets
             block_size = 128
             lift_surface_kernel[(triton.cdiv(total_outputs, block_size),)](
                 self.lift,
                 self._flux_by_face,
-                lift_output,
+                self._surface_by_node,
                 total_outputs,
                 4 * self.N_tets,
                 4 * self.Nfp,
                 BLOCK_SIZE=block_size,
             )
         else:
-            torch.mm(self.lift, self._flux_by_face, out=lift_output)
-
-        if self._surface_by_node_soa is not None:
-            surface_soa = self._surface_by_node_soa.view(self.Np, 4, self.N_tets)
-            self._surface_view[:, 0, :].copy_(surface_soa[:, 0, :])
-            self._surface_view[:, 1, :].copy_(surface_soa[:, 1, :])
-            self._surface_view[:, 2, :].copy_(surface_soa[:, 2, :])
-            self._surface_view[:, 3, :].copy_(surface_soa[:, 3, :])
+            torch.mm(self.lift, self._flux_by_face, out=self._surface_by_node)
 
     def _compute_boundary_flux(
         self,
