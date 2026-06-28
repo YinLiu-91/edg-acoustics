@@ -28,6 +28,7 @@ def build_cuda_variant(
     merged_derivatives: bool = False,
     fused_state_accumulation: bool = False,
     paired_interior_flux: bool = False,
+    aos_state_layout: bool = False,
 ):
     monkeypatch.setenv(
         "EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS", "1" if compact_flux else "0"
@@ -41,6 +42,9 @@ def build_cuda_variant(
     )
     monkeypatch.setenv(
         "EDG_ACOUSTICS_PAIRED_INTERIOR_FLUX", "1" if paired_interior_flux else "0"
+    )
+    monkeypatch.setenv(
+        "EDG_ACOUSTICS_AOS_STATE_LAYOUT", "1" if aos_state_layout else "0"
     )
     return build_scenario1_simulation(device="cuda")
 
@@ -67,6 +71,11 @@ def build_cuda_variant(
             "paired_interior_flux",
             {"compact_flux": True, "paired_interior_flux": True},
             id="paired-interior-flux",
+        ),
+        pytest.param(
+            "aos_state_layout",
+            {"compact_flux": True, "aos_state_layout": True},
+            id="aos-state-layout",
         ),
     ),
 )
@@ -96,6 +105,22 @@ def test_cuda_optimization_variant_rhs_matches_baseline(monkeypatch, name, optio
         raise AssertionError(name) from exc
 
 
+def test_cuda_aos_state_layout_exposes_expected_views(monkeypatch):
+    optimized = build_cuda_variant(
+        monkeypatch,
+        compact_flux=True,
+        aos_state_layout=True,
+    )
+
+    assert optimized._use_aos_state_layout
+    assert optimized.Q_flat.shape == (optimized.Np, 4 * optimized.N_tets)
+    assert optimized._q_by_node.shape == optimized.Q_flat.shape
+    assert optimized.Q.stride()[1] == 1
+    assert optimized._q_by_node_view.stride()[1] == 1
+    assert optimized._flux_by_face_view.stride()[2] == 1
+    assert optimized._flux_by_face_view.stride()[1] == optimized.N_tets
+
+
 def test_cuda_fused_state_accumulation_matches_baseline(monkeypatch):
     baseline = build_cuda_variant(
         monkeypatch, compact_flux=True, merged_derivatives=True
@@ -112,4 +137,25 @@ def test_cuda_fused_state_accumulation_matches_baseline(monkeypatch):
     torch.cuda.synchronize()
 
     assert optimized._use_fused_state_accumulation
+    assert_simulation_state_close(optimized, baseline, rtol=RTOL, atol=ATOL)
+
+
+def test_cuda_aos_state_layout_short_integration_matches_baseline(monkeypatch):
+    baseline = build_cuda_variant(
+        monkeypatch, compact_flux=True, merged_derivatives=True
+    )
+    baseline.time_integration(n_time_steps=2, progress=False, use_cuda_graph=True)
+
+    optimized = build_cuda_variant(
+        monkeypatch,
+        compact_flux=True,
+        merged_derivatives=True,
+        aos_state_layout=True,
+    )
+    optimized.time_integration(n_time_steps=2, progress=False, use_cuda_graph=True)
+    torch.cuda.synchronize()
+
+    assert optimized._use_aos_state_layout
+    assert not optimized._use_triton_volume_rhs
+    assert not optimized._use_triton_volume_surface_rhs
     assert_simulation_state_close(optimized, baseline, rtol=RTOL, atol=ATOL)

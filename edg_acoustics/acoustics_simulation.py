@@ -1229,7 +1229,7 @@ class AcousticsSimulation:
 
     def init_runtime_buffers(self):
         """Preallocate buffers reused by RHS computations."""
-        # AoS layout: only _q_by_node is AoS [Np,N_tets,4]; all other buffers SoA.
+        # AOS keeps the primary packed buffers in one 2D tensor; views expose field order.
         cc_env = os.environ.get("EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS", "1")
         want_cc = self.device.type == "cuda" and cc_env != "0"
         if want_cc:
@@ -1255,10 +1255,7 @@ class AcousticsSimulation:
         self._fluxP = torch.empty(face_shape, **kwargs)
         self._jump_left = torch.empty(self.vmapM.shape, **kwargs)
         self._jump_right = torch.empty(self.vmapP.shape, **kwargs)
-        if self._use_aos_state_layout:
-            self._q_by_node = torch.empty((self.Np, self.N_tets, 4), **kwargs)
-        else:
-            self._q_by_node = torch.empty((self.Np, 4 * self.N_tets), **kwargs)
+        self._q_by_node = torch.empty((self.Np, 4 * self.N_tets), **kwargs)
         self._q_by_node_view = self._state_view(self._q_by_node)
         self._D_stack = torch.stack((self.Dr, self.Ds, self.Dt), dim=0).contiguous()
         self._dQ_by_derivative = torch.empty(
@@ -1271,9 +1268,9 @@ class AcousticsSimulation:
         self._dQ_merged_by_node = self._dQ_by_derivative.reshape(
             3 * self.Np, 4 * self.N_tets
         )
-        self._dQdr_view = self._dQdr_by_node.view(self.Np, 4, self.N_tets)
-        self._dQds_view = self._dQds_by_node.view(self.Np, 4, self.N_tets)
-        self._dQdt_view = self._dQdt_by_node.view(self.Np, 4, self.N_tets)
+        self._dQdr_view = self._state_view(self._dQdr_by_node)
+        self._dQds_view = self._state_view(self._dQds_by_node)
+        self._dQdt_view = self._state_view(self._dQdt_by_node)
         self._dPdx = torch.empty(node_shape, **kwargs)
         self._dPdy = torch.empty(node_shape, **kwargs)
         self._dPdz = torch.empty(node_shape, **kwargs)
@@ -1327,6 +1324,7 @@ class AcousticsSimulation:
             self.device.type == "cuda"
             and os.environ.get("EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME", "0")
             != "0"
+            and not self._use_aos_state_layout
         )
         self._use_triton_lift_surface = (
             self.device.type == "cuda"
@@ -1341,23 +1339,31 @@ class AcousticsSimulation:
             self.device.type == "cuda"
             and os.environ.get("EDG_ACOUSTICS_PAIRED_INTERIOR_FLUX", "0") != "0"
         )
+        if self._use_aos_state_layout:
+            self._use_paired_interior_flux = False
         merged_derivatives_env = os.environ.get("EDG_ACOUSTICS_MERGED_DERIVATIVES")
         self._use_merged_derivatives = self.device.type == "cuda" and (
             (self.N_tets >= 10_000)
             if merged_derivatives_env is None
             else merged_derivatives_env != "0"
         )
+        if self._use_aos_state_layout:
+            self._use_triton_volume_rhs = False
+            self._use_triton_volume_surface_rhs = False
         self._flux_by_face = torch.empty((4 * self.Nfp, 4 * self.N_tets), **kwargs)
-        self._flux_by_face_view = self._flux_by_face.view(4 * self.Nfp, 4, self.N_tets)
+        self._flux_by_face_view = self._flux_state_view(self._flux_by_face)
         self._surface_by_node = torch.empty((self.Np, 4 * self.N_tets), **kwargs)
-        self._surface_view = self._surface_by_node.view(self.Np, 4, self.N_tets)
+        self._surface_by_node_soa = (
+            torch.empty_like(self._surface_by_node) if self._use_aos_state_layout else None
+        )
+        self._surface_view = self._state_view(self._surface_by_node)
         self._face_left_packed = torch.empty((4, face_shape[0] * face_shape[1]), **kwargs)
         self._face_right_packed = torch.empty_like(self._face_left_packed)
         self._rhs_by_node_buffers = tuple(
             torch.empty((self.Np, 4 * self.N_tets), **kwargs) for _ in range(2)
         )
         self._rhs_by_node_views = tuple(
-            rhs.view(self.Np, 4, self.N_tets) for rhs in self._rhs_by_node_buffers
+            self._state_view(rhs) for rhs in self._rhs_by_node_buffers
         )
         self._rhs_buffer_index = 0
         self._cuda_step_graphs = {}
@@ -1369,11 +1375,9 @@ class AcousticsSimulation:
         self._vmapM_q = self._build_packed_face_indices(self._vmapM)
         self._vmapP_q = self._build_packed_face_indices(self._vmapP)
         if self._use_aos_state_layout:
-            # AoS kernel reads AoS q, needs AoS-format vmapP indices.
-            # SoA kernels (boundary, etc.) still use SoA-format _vmapP_q.
-            self._vmapP_q_aos = self._build_packed_face_indices_aos(self._vmapP)
-        else:
             self._vmapP_q_aos = self._vmapP_q
+        else:
+            self._vmapP_q_aos = self._build_packed_face_indices_aos(self._vmapP)
         self._face_node_ids = self.Fmask.reshape(-1).to(
             device=self.device, dtype=torch.long
         )
@@ -1484,15 +1488,25 @@ class AcousticsSimulation:
     def _build_packed_face_indices(self, field_indices: torch.tensor):
         node_ids = torch.div(field_indices, self.N_tets, rounding_mode="floor")
         tet_ids = torch.remainder(field_indices, self.N_tets)
-        variable_offsets = (
-            torch.arange(4, device=self.device, dtype=torch.long).reshape(4, 1)
-            * self.N_tets
-        )
-        packed_indices = (
-            node_ids.reshape(1, -1) * (4 * self.N_tets)
-            + variable_offsets
-            + tet_ids.reshape(1, -1)
-        )
+        if self._use_aos_state_layout:
+            variable_offsets = torch.arange(
+                4, device=self.device, dtype=torch.long
+            ).reshape(4, 1)
+            packed_indices = (
+                node_ids.reshape(1, -1) * (4 * self.N_tets)
+                + tet_ids.reshape(1, -1) * 4
+                + variable_offsets
+            )
+        else:
+            variable_offsets = (
+                torch.arange(4, device=self.device, dtype=torch.long).reshape(4, 1)
+                * self.N_tets
+            )
+            packed_indices = (
+                node_ids.reshape(1, -1) * (4 * self.N_tets)
+                + variable_offsets
+                + tet_ids.reshape(1, -1)
+            )
         return packed_indices.reshape(-1)
 
     def _build_packed_face_indices_aos(self, field_indices: torch.tensor):
@@ -1543,23 +1557,21 @@ class AcousticsSimulation:
         return self._q_by_node
 
     def _compute_packed_derivatives(self, q_by_node: torch.tensor):
-        # AoS q → SoA permute for BLAS (ndim==3 → AoS layout)
-        q_mm = q_by_node.permute(0, 2, 1).reshape(self.Np, 4 * self.N_tets) if q_by_node.ndim == 3 else q_by_node
         if self._use_merged_derivatives:
-            torch.mm(self._D_merged, q_mm, out=self._dQ_merged_by_node)
+            torch.mm(self._D_merged, q_by_node, out=self._dQ_merged_by_node)
             return
 
         if self._use_batched_derivatives:
             torch.bmm(
                 self._D_stack,
-                q_mm.unsqueeze(0).expand(3, -1, -1),
+                q_by_node.unsqueeze(0).expand(3, -1, -1),
                 out=self._dQ_by_derivative,
             )
             return
 
-        torch.mm(self.Dr, q_mm, out=self._dQdr_by_node)
-        torch.mm(self.Ds, q_mm, out=self._dQds_by_node)
-        torch.mm(self.Dt, q_mm, out=self._dQdt_by_node)
+        torch.mm(self.Dr, q_by_node, out=self._dQdr_by_node)
+        torch.mm(self.Ds, q_by_node, out=self._dQds_by_node)
+        torch.mm(self.Dt, q_by_node, out=self._dQdt_by_node)
 
     def _compute_packed_jump(self, q_by_node: torch.tensor):
         q_flat = q_by_node.reshape(-1)
@@ -1624,7 +1636,7 @@ class AcousticsSimulation:
                 self._use_compact_flux_coefficients
             ):
                 if self._use_aos_state_layout:
-                    q_ptr = self._q_by_node.reshape(-1)
+                    q_ptr = q_by_node.reshape(-1)
                     kernel = compact_interior_flux_aos_kernel
                     vmap_ptr = self._vmapP_q_aos
                 else:
@@ -1836,21 +1848,32 @@ class AcousticsSimulation:
         )
 
     def _compute_lift_surface(self):
+        lift_output = (
+            self._surface_by_node_soa
+            if self._surface_by_node_soa is not None
+            else self._surface_by_node
+        )
         if self._use_triton_lift_surface:
             total_outputs = self.Np * 4 * self.N_tets
             block_size = 128
             lift_surface_kernel[(triton.cdiv(total_outputs, block_size),)](
                 self.lift,
                 self._flux_by_face,
-                self._surface_by_node,
+                lift_output,
                 total_outputs,
                 4 * self.N_tets,
                 4 * self.Nfp,
                 BLOCK_SIZE=block_size,
             )
-            return
+        else:
+            torch.mm(self.lift, self._flux_by_face, out=lift_output)
 
-        torch.mm(self.lift, self._flux_by_face, out=self._surface_by_node)
+        if self._surface_by_node_soa is not None:
+            surface_soa = self._surface_by_node_soa.view(self.Np, 4, self.N_tets)
+            self._surface_view[:, 0, :].copy_(surface_soa[:, 0, :])
+            self._surface_view[:, 1, :].copy_(surface_soa[:, 1, :])
+            self._surface_view[:, 2, :].copy_(surface_soa[:, 2, :])
+            self._surface_view[:, 3, :].copy_(surface_soa[:, 3, :])
 
     def _compute_boundary_flux(
         self,
@@ -2818,7 +2841,7 @@ class AcousticsSimulation:
         self.Q_flat = torch.empty(
             (self.Np, 4 * self.N_tets), device=self.device, dtype=device_ini.dtype
         )
-        self.Q = self.Q_flat.view(self.Np, 4, self.N_tets)
+        self.Q = self._state_view(self.Q_flat)
         self.P = self.Q[:, 0, :]
         self.Vx = self.Q[:, 1, :]
         self.Vy = self.Q[:, 2, :]
@@ -2902,7 +2925,7 @@ class AcousticsSimulation:
 
         q_by_node = self._pack_fields_by_node(P, Vx, Vy, Vz)
         rhs_by_node, BCvar = self.RHS_operator_packed(q_by_node, BCvar)
-        rhs_view = rhs_by_node.view(self.Np, 4, self.N_tets)
+        rhs_view = self._state_view(rhs_by_node)
         return (
             rhs_view[:, 0, :],
             rhs_view[:, 1, :],

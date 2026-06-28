@@ -32,6 +32,7 @@ def build_profile_mesh_sim(
     merged_derivatives: bool,
     fused_state_accumulation: bool = False,
     paired_interior_flux: bool = False,
+    aos_state_layout: bool = False,
 ):
     monkeypatch.setenv(
         "EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS", "1" if compact_flux else "0"
@@ -46,7 +47,9 @@ def build_profile_mesh_sim(
     monkeypatch.setenv(
         "EDG_ACOUSTICS_PAIRED_INTERIOR_FLUX", "1" if paired_interior_flux else "0"
     )
-    monkeypatch.setenv("EDG_ACOUSTICS_AOS_STATE_LAYOUT", "0")
+    monkeypatch.setenv(
+        "EDG_ACOUSTICS_AOS_STATE_LAYOUT", "1" if aos_state_layout else "0"
+    )
     return build_scenario1_simulation(mesh_name=PROFILE_MESH, device="cuda")
 
 
@@ -71,6 +74,30 @@ def test_profile_mesh_compact_flux_and_merged_derivatives_match_baseline_rhs(
         optimized.P, optimized.Vx, optimized.Vy, optimized.Vz, optimized_bcvar
     )
 
+    assert_rhs_close(optimized_rhs, baseline_rhs, rtol=RTOL, atol=ATOL)
+
+
+def test_profile_mesh_aos_state_layout_matches_baseline_rhs(monkeypatch):
+    baseline = build_profile_mesh_sim(
+        monkeypatch, compact_flux=True, merged_derivatives=True
+    )
+    baseline_bcvar = clone_bcvar(baseline.BC.BCvar)
+    baseline_rhs = baseline.RHS_operator(
+        baseline.P, baseline.Vx, baseline.Vy, baseline.Vz, baseline_bcvar
+    )
+
+    optimized = build_profile_mesh_sim(
+        monkeypatch,
+        compact_flux=True,
+        merged_derivatives=True,
+        aos_state_layout=True,
+    )
+    optimized_bcvar = clone_bcvar(optimized.BC.BCvar)
+    optimized_rhs = optimized.RHS_operator(
+        optimized.P, optimized.Vx, optimized.Vy, optimized.Vz, optimized_bcvar
+    )
+
+    assert optimized._use_aos_state_layout
     assert_rhs_close(optimized_rhs, baseline_rhs, rtol=RTOL, atol=ATOL)
 
 
