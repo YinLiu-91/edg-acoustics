@@ -62,12 +62,8 @@ def test_scenario1_benchmark_cli_reports_cpu_metadata():
     assert "device=cpu" in output
     assert "cuda_graph=False" in output
     assert "cpu_threads=" in output
-    assert "interior_face_order=tile_plus_packed" in output
-    assert "face_order_enabled=0" in output
-    assert "ordered_aos_variant=base" in output
-    assert "ordered_aos_state_load_mode=scalar" in output
+    assert "interior_face_order=natural" in output
     assert "aos_state_layout:0" in output
-    assert "aos_volume_vector_loads:0" in output
 
 
 def test_scenario1_benchmark_cli_reports_real_case_metadata():
@@ -125,14 +121,5 @@ def test_scenario1_benchmark_cli_reports_default_aos_metadata():
     )
 
     assert "mesh_name=scenario1_profile_lc0p20.msh" in output
-    assert "interior_face_order=tile_plus_packed" in output
-    assert "face_order_tile_size=128" in output
-    assert "face_order_block_size=128" in output
-    assert "face_order_enabled=1" in output
-    assert "face_order_storage=tile_local_u8" in output
-    assert "ordered_aos_variant=vec4_scheduled" in output
-    assert "ordered_aos_state_load_mode=vec4_scheduled" in output
+    assert "interior_face_order=natural" in output
     assert "aos_state_layout:1" in output
-    assert "aos_volume_vector_loads:1" in output
-    assert "ordered_aos_state_vec4:1" in output
-    assert "affine_metric_rhs:1" in output

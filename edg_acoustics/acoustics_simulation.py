@@ -34,7 +34,7 @@ NODETOL = 1.0e-7
 """float: Tolerance used to determine if a node lies on a facet."""
 
 INTERIOR_FACE_ORDER_METHODS = frozenset({"natural", "tile_plus_packed"})
-DEFAULT_INTERIOR_FACE_ORDER = "tile_plus_packed"
+DEFAULT_INTERIOR_FACE_ORDER = "natural"
 DEFAULT_ORDERED_AOS_STATE_LOAD_MODE = "vec4_scheduled"
 
 # device = "cuda" if torch.cuda.is_available() else "cpu"
