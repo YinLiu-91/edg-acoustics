@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import glob
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -11,12 +12,14 @@ import numpy
 import scipy.io
 import torch
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
 import edg_acoustics
 import edg_acoustics.acoustics_simulation as acoustics_simulation
 import edg_acoustics.device_ini as device_ini
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 GOLDEN_DIR = REPO_ROOT / "tests" / "golden_files" / "test_scenario1"
 EXAMPLE_DIR = REPO_ROOT / "examples" / "scenario1"
 

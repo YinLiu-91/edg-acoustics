@@ -20,6 +20,7 @@ import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TESTS_DIR = REPO_ROOT / "tests"
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(TESTS_DIR))
 
 
@@ -43,6 +44,17 @@ def synchronize():
 
 
 def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_graph: bool):
+    tilelang_graph_supported = getattr(
+        sim, "_tilelang_lift_graph_capture_supported", None
+    )
+    if tilelang_graph_supported is None:
+        tilelang_graph_supported_text = "unknown"
+    else:
+        tilelang_graph_supported_text = str(int(tilelang_graph_supported))
+    tilelang_fallback_reason = getattr(sim, "_tilelang_lift_fallback_reason", "")
+    if not tilelang_fallback_reason:
+        tilelang_fallback_reason = "none"
+
     print(f"mesh_name={mesh_name}")
     print(f"N_tets={sim.N_tets}")
     print(f"Np={sim.Np}")
@@ -100,6 +112,19 @@ def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_g
     print(f"cuda_graph={cuda_graph and sim.P.device.type == 'cuda'}")
     print(f"record_receivers={record_receivers}")
     print(
+        "tilelang_lift_enabled="
+        f"{int(getattr(sim, '_use_tilelang_lift_surface', False))}"
+    )
+    print(
+        "tilelang_lift_config="
+        f"{getattr(sim, '_tilelang_lift_config', 'disabled')}"
+    )
+    print(
+        "tilelang_lift_graph_capture_supported="
+        f"{tilelang_graph_supported_text}"
+    )
+    print(f"tilelang_lift_fallback_reason={tilelang_fallback_reason}")
+    print(
         "optimizations="
         f"volume_rhs:{int(sim._use_triton_volume_rhs)},"
         f"interior_flux:{int(sim._use_triton_interior_flux)},"
@@ -111,6 +136,7 @@ def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_g
         f"fused_state_accumulation:{int(sim._use_fused_state_accumulation)},"
         f"derivative_volume:{int(sim._use_triton_derivative_volume)},"
         f"lift_surface:{int(sim._use_triton_lift_surface)},"
+        f"tilelang_lift:{int(getattr(sim, '_use_tilelang_lift_surface', False))},"
         f"compact_flux:{int(sim._use_compact_flux_coefficients)},"
         f"aos_state_layout:{int(getattr(sim, '_use_aos_state_layout', False))},"
         f"aos_volume_vector_loads:{int(getattr(sim, '_use_aos_volume_vector_loads', False))},"
@@ -310,6 +336,9 @@ def parse_args():
     )
     parser.add_argument("--enable-triton-derivative-volume", action="store_true")
     parser.add_argument("--enable-triton-lift-surface", action="store_true")
+    tilelang_lift_group = parser.add_mutually_exclusive_group()
+    tilelang_lift_group.add_argument("--enable-tilelang-lift", action="store_true")
+    tilelang_lift_group.add_argument("--disable-tilelang-lift", action="store_true")
     parser.add_argument("--disable-compact-flux-coefficients", action="store_true")
     parser.add_argument("--disable-paired-interior-flux", action="store_true")
     merged_derivatives_group = parser.add_mutually_exclusive_group()
@@ -347,6 +376,10 @@ def main():
         os.environ["EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME"] = "1"
     if args.enable_triton_lift_surface:
         os.environ["EDG_ACOUSTICS_TRITON_LIFT_SURFACE"] = "1"
+    if args.enable_tilelang_lift:
+        os.environ["EDG_ACOUSTICS_TILELANG_LIFT"] = "1"
+    if args.disable_tilelang_lift:
+        os.environ["EDG_ACOUSTICS_TILELANG_LIFT"] = "0"
     if args.disable_compact_flux_coefficients:
         os.environ["EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS"] = "0"
     if args.disable_paired_interior_flux:

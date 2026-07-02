@@ -19,6 +19,10 @@ import triton
 import triton.language as tl
 
 import edg_acoustics.device_ini as device_ini
+from edg_acoustics.tilelang_lift import (
+    TILELANG_LIFT_CONFIG_NAME,
+    build_tilelang_lift_kernel,
+)
 
 try:
     from line_profiler import profile
@@ -39,6 +43,35 @@ DEFAULT_ORDERED_AOS_STATE_LOAD_MODE = "vec4_scheduled"
 
 # device = "cuda" if torch.cuda.is_available() else "cpu"
 device = device_ini.device
+
+
+def _normalize_env_bool_mode(raw: str | None, *, default: str = "auto") -> str:
+    if raw is None or raw.strip() == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"auto"}:
+        return "auto"
+    if normalized in {"1", "true", "yes", "on"}:
+        return "1"
+    if normalized in {"0", "false", "no", "off"}:
+        return "0"
+    raise ValueError(
+        "EDG_ACOUSTICS_TILELANG_LIFT must be one of auto, 1, or 0."
+    )
+
+
+def _is_cuda_graph_capture_active() -> bool:
+    is_capturing = getattr(torch.cuda, "is_current_stream_capturing", None)
+    if is_capturing is None:
+        return False
+    try:
+        return bool(is_capturing())
+    except Exception:
+        return False
+
+
+def _short_exception(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {str(exc).strip()}"
 
 
 def _normalize_interior_face_order_method(method: str | None) -> str:
@@ -1608,7 +1641,7 @@ class AcousticsSimulation:
         self.lift = AcousticsSimulation.compute_lift(
             self.V, torch.from_numpy(self.rst).to(device_ini.device), self.Fmask
         )
-        self.lift = self.lift.to(self.device)
+        self.lift = self.lift.to(self.device).contiguous()
 
         # Compute the metric terms for the mesh
         self.rst_xyz, self.J = AcousticsSimulation.geometric_factors_3d(
@@ -1862,6 +1895,180 @@ class AcousticsSimulation:
         )
         self._rhs_buffer_index = 0
         self._cuda_step_graphs = {}
+        self._configure_tilelang_lift_backend()
+
+    def _configure_tilelang_lift_backend(self):
+        self._tilelang_lift_mode = _normalize_env_bool_mode(
+            os.environ.get("EDG_ACOUSTICS_TILELANG_LIFT")
+        )
+        self._use_tilelang_lift_surface = False
+        self._tilelang_lift_kernel = None
+        self._tilelang_lift_accepts_skip_validation = None
+        self._tilelang_lift_correctness_checked = False
+        self._tilelang_lift_graph_capture_supported = None
+        self._tilelang_lift_fallback_reason = ""
+        self._tilelang_lift_config = TILELANG_LIFT_CONFIG_NAME
+
+        if self._tilelang_lift_mode == "0":
+            self._tilelang_lift_fallback_reason = (
+                "disabled by EDG_ACOUSTICS_TILELANG_LIFT"
+            )
+            return
+        if self.device.type != "cuda":
+            self._tilelang_lift_fallback_reason = "requires CUDA tensors"
+            return
+        if self._tilelang_lift_mode == "auto" and not self._is_metax_cuda_device():
+            self._tilelang_lift_fallback_reason = (
+                "auto mode requires a MetaX/MACA CUDA device"
+            )
+            return
+
+        reason = self._tilelang_lift_unsupported_reason()
+        if reason:
+            self._tilelang_lift_fallback_reason = reason
+            return
+        self._use_tilelang_lift_surface = True
+
+    def _is_metax_cuda_device(self) -> bool:
+        if getattr(torch.version, "maca", None) is not None:
+            return True
+        if not torch.cuda.is_available():
+            return False
+        try:
+            device_name = torch.cuda.get_device_name(self.device).lower()
+        except Exception:
+            return False
+        return "metax" in device_name or "maca" in device_name or "muxi" in device_name
+
+    def _tilelang_lift_unsupported_reason(self) -> str:
+        if self.Np != 35:
+            return "requires Np=35"
+        if 4 * self.Nfp != 60:
+            return "requires 4*Nfp=60"
+        if self.lift.shape != (35, 60):
+            return f"requires lift shape (35, 60), got {tuple(self.lift.shape)}"
+        if self._flux_by_face.shape[0] != 60:
+            return (
+                "requires flux_by_face shape (60, N), got "
+                f"{tuple(self._flux_by_face.shape)}"
+            )
+        if self._surface_by_node.shape[0] != 35:
+            return (
+                "requires surface_by_node shape (35, N), got "
+                f"{tuple(self._surface_by_node.shape)}"
+            )
+        if self.lift.dtype != torch.float64:
+            return f"requires fp64 lift, got {self.lift.dtype}"
+        if self._flux_by_face.dtype != torch.float64:
+            return f"requires fp64 flux buffer, got {self._flux_by_face.dtype}"
+        if self._surface_by_node.dtype != torch.float64:
+            return f"requires fp64 surface buffer, got {self._surface_by_node.dtype}"
+        if not self.lift.is_contiguous():
+            return "requires contiguous lift"
+        if not self._flux_by_face.is_contiguous():
+            return "requires contiguous flux buffer"
+        if not self._surface_by_node.is_contiguous():
+            return "requires contiguous surface buffer"
+        return ""
+
+    def _disable_tilelang_lift(self, reason: str):
+        self._use_tilelang_lift_surface = False
+        self._tilelang_lift_kernel = None
+        self._tilelang_lift_fallback_reason = reason
+
+    def _ensure_tilelang_lift_kernel(self) -> bool:
+        if not self._use_tilelang_lift_surface:
+            return False
+        if self._tilelang_lift_kernel is not None:
+            return True
+        try:
+            self._tilelang_lift_kernel = build_tilelang_lift_kernel(
+                self._flux_by_face.shape[1]
+            )
+        except Exception as exc:
+            self._disable_tilelang_lift(
+                f"compile/import failed: {_short_exception(exc)}"
+            )
+            return False
+        return True
+
+    def _invoke_tilelang_lift_kernel(self):
+        if self._tilelang_lift_accepts_skip_validation is not False:
+            try:
+                self._tilelang_lift_kernel(
+                    self.lift,
+                    self._flux_by_face,
+                    self._surface_by_node,
+                    skip_tensor_validation=True,
+                )
+                self._tilelang_lift_accepts_skip_validation = True
+                return
+            except TypeError:
+                if self._tilelang_lift_accepts_skip_validation is True:
+                    raise
+                self._tilelang_lift_accepts_skip_validation = False
+
+        self._tilelang_lift_kernel(
+            self.lift,
+            self._flux_by_face,
+            self._surface_by_node,
+        )
+
+    def _validate_tilelang_lift_kernel(self) -> bool:
+        if self._tilelang_lift_correctness_checked:
+            return True
+        if not self._ensure_tilelang_lift_kernel():
+            return False
+        try:
+            reference = torch.empty_like(self._surface_by_node)
+            torch.mm(self.lift, self._flux_by_face, out=reference)
+            self._invoke_tilelang_lift_kernel()
+            if self.device.type == "cuda":
+                torch.cuda.synchronize()
+            if not torch.allclose(
+                self._surface_by_node, reference, rtol=1.0e-10, atol=1.0e-10
+            ):
+                diff = (self._surface_by_node - reference).abs()
+                self._disable_tilelang_lift(
+                    "correctness validation failed: "
+                    f"max_abs={diff.max().item():.6e}"
+                )
+                return False
+        except Exception as exc:
+            self._disable_tilelang_lift(
+                f"correctness validation failed: {_short_exception(exc)}"
+            )
+            return False
+
+        self._tilelang_lift_correctness_checked = True
+        return True
+
+    def _prepare_tilelang_lift_cuda_graph(self):
+        if not self._use_tilelang_lift_surface:
+            return
+        if not self._validate_tilelang_lift_kernel():
+            return
+        if self._tilelang_lift_graph_capture_supported is not None:
+            if not self._tilelang_lift_graph_capture_supported:
+                self._disable_tilelang_lift(self._tilelang_lift_fallback_reason)
+            return
+
+        try:
+            self._invoke_tilelang_lift_kernel()
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                self._invoke_tilelang_lift_kernel()
+            graph.replay()
+            torch.cuda.synchronize()
+        except Exception as exc:
+            self._tilelang_lift_graph_capture_supported = False
+            self._disable_tilelang_lift(
+                f"cuda graph capture failed: {_short_exception(exc)}"
+            )
+            return
+
+        self._tilelang_lift_graph_capture_supported = True
 
     def _cache_affine_volume_metrics(self, derivative_volume_requested: bool):
         """Cache full and element-affine metric coefficients for volume RHS kernels."""
@@ -2508,6 +2715,14 @@ class AcousticsSimulation:
         )
 
     def _compute_lift_surface(self):
+        if self._use_tilelang_lift_surface:
+            capture_active = _is_cuda_graph_capture_active()
+            if self._tilelang_lift_correctness_checked:
+                self._invoke_tilelang_lift_kernel()
+                return
+            if not capture_active and self._validate_tilelang_lift_kernel():
+                return
+
         if self._use_triton_lift_surface:
             total_outputs = self.Np * 4 * self.N_tets
             block_size = 128
@@ -2718,6 +2933,7 @@ class AcousticsSimulation:
                 self._sample_receivers(sample_chunk[step_index])
         torch.cuda.synchronize()
         self._restore_time_state(snapshot)
+        self._prepare_tilelang_lift_cuda_graph()
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):

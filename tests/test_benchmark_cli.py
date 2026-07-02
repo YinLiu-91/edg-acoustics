@@ -43,6 +43,10 @@ def assert_common_output(output: str):
         "interior_face_order=",
         "ordered_aos_variant=",
         "ordered_aos_state_load_mode=",
+        "tilelang_lift_enabled=",
+        "tilelang_lift_config=",
+        "tilelang_lift_graph_capture_supported=",
+        "tilelang_lift_fallback_reason=",
     ):
         assert field in output
 
@@ -64,6 +68,24 @@ def test_scenario1_benchmark_cli_reports_cpu_metadata():
     assert "cpu_threads=" in output
     assert "interior_face_order=natural" in output
     assert "aos_state_layout:0" in output
+    assert "tilelang_lift:0" in output
+
+
+def test_scenario1_benchmark_cli_accepts_tilelang_lift_flags():
+    output = run_benchmark(
+        "--device",
+        "cpu",
+        "--steps",
+        "1",
+        "--cpu-threads",
+        "1",
+        "--no-record-receivers",
+        "--disable-tilelang-lift",
+    )
+
+    assert_common_output(output)
+    assert "tilelang_lift_enabled=0" in output
+    assert "tilelang_lift_config=bm48_bn64_bk16_s0_t256_fullcol" in output
 
 
 def test_scenario1_benchmark_cli_reports_real_case_metadata():
