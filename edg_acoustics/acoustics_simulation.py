@@ -2043,31 +2043,9 @@ class AcousticsSimulation:
         self._tilelang_lift_correctness_checked = True
         return True
 
-    def _prepare_tilelang_lift_cuda_graph(self):
+    def _mark_tilelang_lift_cuda_graph_validated(self):
         if not self._use_tilelang_lift_surface:
             return
-        if not self._validate_tilelang_lift_kernel():
-            return
-        if self._tilelang_lift_graph_capture_supported is not None:
-            if not self._tilelang_lift_graph_capture_supported:
-                self._disable_tilelang_lift(self._tilelang_lift_fallback_reason)
-            return
-
-        try:
-            self._invoke_tilelang_lift_kernel()
-            torch.cuda.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                self._invoke_tilelang_lift_kernel()
-            graph.replay()
-            torch.cuda.synchronize()
-        except Exception as exc:
-            self._tilelang_lift_graph_capture_supported = False
-            self._disable_tilelang_lift(
-                f"cuda graph capture failed: {_short_exception(exc)}"
-            )
-            return
-
         self._tilelang_lift_graph_capture_supported = True
 
     def _cache_affine_volume_metrics(self, derivative_volume_requested: bool):
@@ -2909,6 +2887,16 @@ class AcousticsSimulation:
             for key, value in state_snapshot.items():
                 state[key].copy_(value)
 
+    def _time_state_matches(self, snapshot, *, rtol: float = 1.0e-10, atol: float = 1.0e-10) -> bool:
+        q_snapshot, bc_snapshot = snapshot
+        if not torch.allclose(self.Q_flat, q_snapshot, rtol=rtol, atol=atol):
+            return False
+        for state, state_snapshot in zip(self.BC.BCvar, bc_snapshot):
+            for key, value in state_snapshot.items():
+                if not torch.allclose(state[key], value, rtol=rtol, atol=atol):
+                    return False
+        return True
+
     def _ensure_cuda_step_graph(
         self, chunk_steps: int = 1, record_receivers: bool = False
     ):
@@ -2926,24 +2914,44 @@ class AcousticsSimulation:
                 dtype=device_ini.dtype,
             )
 
-        snapshot = self._snapshot_time_state()
-        for step_index in range(chunk_steps):
-            self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
-            if sample_chunk is not None:
-                self._sample_receivers(sample_chunk[step_index])
-        torch.cuda.synchronize()
-        self._restore_time_state(snapshot)
-        self._prepare_tilelang_lift_cuda_graph()
-
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
+        tilelang_retry_done = False
+        while True:
+            snapshot = self._snapshot_time_state()
             for step_index in range(chunk_steps):
                 self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
                 if sample_chunk is not None:
                     self._sample_receivers(sample_chunk[step_index])
-        self._restore_time_state(snapshot)
-        self._cuda_step_graphs[key] = (graph, sample_chunk)
-        return self._cuda_step_graphs[key]
+            torch.cuda.synchronize()
+            expected_snapshot = self._snapshot_time_state()
+            self._restore_time_state(snapshot)
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                for step_index in range(chunk_steps):
+                    self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
+                    if sample_chunk is not None:
+                        self._sample_receivers(sample_chunk[step_index])
+
+            self._restore_time_state(snapshot)
+            graph.replay()
+            torch.cuda.synchronize()
+            graph_matches = self._time_state_matches(expected_snapshot)
+            self._restore_time_state(snapshot)
+
+            if graph_matches:
+                self._mark_tilelang_lift_cuda_graph_validated()
+                self._cuda_step_graphs[key] = (graph, sample_chunk)
+                return self._cuda_step_graphs[key]
+
+            if self._use_tilelang_lift_surface and not tilelang_retry_done:
+                self._tilelang_lift_graph_capture_supported = False
+                self._disable_tilelang_lift(
+                    "cuda graph replay validation failed; falling back from TileLang lift"
+                )
+                tilelang_retry_done = True
+                continue
+
+            raise RuntimeError("CUDA graph replay validation failed.")
 
     # Static methods ---------------------------------------------------------------------------------------------------
     @staticmethod

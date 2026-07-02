@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from scenario1_utils import build_scenario1_simulation, clone_bcvar
+from scenario1_utils import (
+    assert_simulation_state_close,
+    build_scenario1_simulation,
+    clone_bcvar,
+)
 
 
 def _tilelang_runtime_status() -> tuple[bool, str]:
@@ -73,11 +77,18 @@ def test_forced_tilelang_lift_falls_back_or_validates(monkeypatch):
     not (torch.cuda.is_available() and TILELANG_AVAILABLE and _is_maca_cuda_runtime()),
     reason=f"requires CUDA + MACA/MetaX + TileLang: {TILELANG_UNAVAILABLE_REASON}",
 )
-def test_tilelang_lift_cuda_graph_probe_reports_result(monkeypatch):
+def test_tilelang_lift_cuda_graph_path_matches_eager(monkeypatch):
     monkeypatch.setenv("EDG_ACOUSTICS_TILELANG_LIFT", "1")
-    sim = build_scenario1_simulation(device="cuda")
+    eager = build_scenario1_simulation(device="cuda")
+    graphed = build_scenario1_simulation(device="cuda")
 
-    sim.time_integration(
+    eager.time_integration(
+        n_time_steps=1,
+        progress=False,
+        use_cuda_graph=False,
+        record_receivers=False,
+    )
+    graphed.time_integration(
         n_time_steps=1,
         progress=False,
         use_cuda_graph=True,
@@ -85,10 +96,11 @@ def test_tilelang_lift_cuda_graph_probe_reports_result(monkeypatch):
     )
     torch.cuda.synchronize()
 
-    assert sim._tilelang_lift_correctness_checked or sim._tilelang_lift_fallback_reason
-    assert sim._tilelang_lift_graph_capture_supported in {True, False}
-    if sim._tilelang_lift_graph_capture_supported:
-        assert sim._use_tilelang_lift_surface
+    assert_simulation_state_close(graphed, eager, rtol=1.0e-10, atol=1.0e-10)
+    assert graphed._tilelang_lift_correctness_checked or graphed._tilelang_lift_fallback_reason
+    assert graphed._tilelang_lift_graph_capture_supported in {True, False}
+    if graphed._tilelang_lift_graph_capture_supported:
+        assert graphed._use_tilelang_lift_surface
     else:
-        assert not sim._use_tilelang_lift_surface
-        assert sim._tilelang_lift_fallback_reason
+        assert not graphed._use_tilelang_lift_surface
+        assert graphed._tilelang_lift_fallback_reason
