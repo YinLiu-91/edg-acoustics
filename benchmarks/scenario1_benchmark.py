@@ -51,9 +51,23 @@ def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_g
         tilelang_graph_supported_text = "unknown"
     else:
         tilelang_graph_supported_text = str(int(tilelang_graph_supported))
+    tilelang_segmented_graph_supported = getattr(
+        sim, "_tilelang_lift_segmented_graph_supported", None
+    )
+    if tilelang_segmented_graph_supported is None:
+        tilelang_segmented_graph_supported_text = "unknown"
+    else:
+        tilelang_segmented_graph_supported_text = str(
+            int(tilelang_segmented_graph_supported)
+        )
     tilelang_fallback_reason = getattr(sim, "_tilelang_lift_fallback_reason", "")
     if not tilelang_fallback_reason:
         tilelang_fallback_reason = "none"
+    tilelang_segmented_fallback_reason = getattr(
+        sim, "_tilelang_lift_segmented_graph_fallback_reason", ""
+    )
+    if not tilelang_segmented_fallback_reason:
+        tilelang_segmented_fallback_reason = "none"
 
     print(f"mesh_name={mesh_name}")
     print(f"N_tets={sim.N_tets}")
@@ -110,6 +124,10 @@ def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_g
     print(f"dtype={sim.P.dtype}")
     print(f"device={sim.P.device}")
     print(f"cuda_graph={cuda_graph and sim.P.device.type == 'cuda'}")
+    print(
+        "cuda_graph_mode="
+        f"{getattr(sim, 'last_time_integration_cuda_graph_mode', 'not_run')}"
+    )
     print(f"record_receivers={record_receivers}")
     print(
         "tilelang_lift_enabled="
@@ -122,6 +140,18 @@ def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_g
     print(
         "tilelang_lift_graph_capture_supported="
         f"{tilelang_graph_supported_text}"
+    )
+    print(
+        "tilelang_lift_segmented_graph_mode="
+        f"{getattr(sim, '_tilelang_segmented_graph_mode', 'auto')}"
+    )
+    print(
+        "tilelang_lift_segmented_graph_supported="
+        f"{tilelang_segmented_graph_supported_text}"
+    )
+    print(
+        "tilelang_lift_segmented_graph_fallback_reason="
+        f"{tilelang_segmented_fallback_reason}"
     )
     print(f"tilelang_lift_fallback_reason={tilelang_fallback_reason}")
     print(
@@ -339,6 +369,17 @@ def parse_args():
     tilelang_lift_group = parser.add_mutually_exclusive_group()
     tilelang_lift_group.add_argument("--enable-tilelang-lift", action="store_true")
     tilelang_lift_group.add_argument("--disable-tilelang-lift", action="store_true")
+    segmented_graph_group = parser.add_mutually_exclusive_group()
+    segmented_graph_group.add_argument(
+        "--enable-tilelang-segmented-graph",
+        action="store_true",
+        help="Force segmented CUDA graph around TileLang lift.",
+    )
+    segmented_graph_group.add_argument(
+        "--disable-tilelang-segmented-graph",
+        action="store_true",
+        help="Disable segmented CUDA graph fallback around TileLang lift.",
+    )
     parser.add_argument("--disable-compact-flux-coefficients", action="store_true")
     parser.add_argument("--disable-paired-interior-flux", action="store_true")
     merged_derivatives_group = parser.add_mutually_exclusive_group()
@@ -380,6 +421,10 @@ def main():
         os.environ["EDG_ACOUSTICS_TILELANG_LIFT"] = "1"
     if args.disable_tilelang_lift:
         os.environ["EDG_ACOUSTICS_TILELANG_LIFT"] = "0"
+    if args.enable_tilelang_segmented_graph:
+        os.environ["EDG_ACOUSTICS_TILELANG_SEGMENTED_CUDA_GRAPH"] = "1"
+    if args.disable_tilelang_segmented_graph:
+        os.environ["EDG_ACOUSTICS_TILELANG_SEGMENTED_CUDA_GRAPH"] = "0"
     if args.disable_compact_flux_coefficients:
         os.environ["EDG_ACOUSTICS_COMPACT_FLUX_COEFFICIENTS"] = "0"
     if args.disable_paired_interior_flux:

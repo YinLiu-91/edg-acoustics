@@ -45,7 +45,12 @@ DEFAULT_ORDERED_AOS_STATE_LOAD_MODE = "vec4_scheduled"
 device = device_ini.device
 
 
-def _normalize_env_bool_mode(raw: str | None, *, default: str = "auto") -> str:
+def _normalize_env_bool_mode(
+    raw: str | None,
+    *,
+    default: str = "auto",
+    name: str = "EDG_ACOUSTICS_TILELANG_LIFT",
+) -> str:
     if raw is None or raw.strip() == "":
         return default
     normalized = raw.strip().lower()
@@ -55,9 +60,19 @@ def _normalize_env_bool_mode(raw: str | None, *, default: str = "auto") -> str:
         return "1"
     if normalized in {"0", "false", "no", "off"}:
         return "0"
-    raise ValueError(
-        "EDG_ACOUSTICS_TILELANG_LIFT must be one of auto, 1, or 0."
-    )
+    raise ValueError(f"{name} must be one of auto, 1, or 0.")
+
+
+class _SegmentedCudaStepGraph:
+    def __init__(self, segments, lift_callback):
+        self._segments = segments
+        self._lift_callback = lift_callback
+
+    def replay(self):
+        for graph, run_lift_after in self._segments:
+            graph.replay()
+            if run_lift_after:
+                self._lift_callback()
 
 
 def _is_cuda_graph_capture_active() -> bool:
@@ -1899,13 +1914,20 @@ class AcousticsSimulation:
 
     def _configure_tilelang_lift_backend(self):
         self._tilelang_lift_mode = _normalize_env_bool_mode(
-            os.environ.get("EDG_ACOUSTICS_TILELANG_LIFT")
+            os.environ.get("EDG_ACOUSTICS_TILELANG_LIFT"),
+            name="EDG_ACOUSTICS_TILELANG_LIFT",
+        )
+        self._tilelang_segmented_graph_mode = _normalize_env_bool_mode(
+            os.environ.get("EDG_ACOUSTICS_TILELANG_SEGMENTED_CUDA_GRAPH"),
+            name="EDG_ACOUSTICS_TILELANG_SEGMENTED_CUDA_GRAPH",
         )
         self._use_tilelang_lift_surface = False
         self._tilelang_lift_kernel = None
         self._tilelang_lift_accepts_skip_validation = None
         self._tilelang_lift_correctness_checked = False
         self._tilelang_lift_graph_capture_supported = None
+        self._tilelang_lift_segmented_graph_supported = None
+        self._tilelang_lift_segmented_graph_fallback_reason = ""
         self._tilelang_lift_fallback_reason = ""
         self._tilelang_lift_config = TILELANG_LIFT_CONFIG_NAME
 
@@ -2047,6 +2069,14 @@ class AcousticsSimulation:
         if not self._use_tilelang_lift_surface:
             return
         self._tilelang_lift_graph_capture_supported = True
+        self._tilelang_lift_segmented_graph_supported = False
+
+    def _mark_tilelang_lift_segmented_cuda_graph_validated(self):
+        if not self._use_tilelang_lift_surface:
+            return
+        self._tilelang_lift_graph_capture_supported = False
+        self._tilelang_lift_segmented_graph_supported = True
+        self._tilelang_lift_segmented_graph_fallback_reason = ""
 
     def _cache_affine_volume_metrics(self, derivative_volume_requested: bool):
         """Cache full and element-affine metric coefficients for volume RHS kernels."""
@@ -2897,10 +2927,151 @@ class AcousticsSimulation:
                     return False
         return True
 
+    def _run_cuda_step_chunk(self, chunk_steps: int, sample_chunk: torch.tensor | None):
+        for step_index in range(chunk_steps):
+            self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
+            if sample_chunk is not None:
+                self._sample_receivers(sample_chunk[step_index])
+
+    @staticmethod
+    def _capture_cuda_graph_segment(fn):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            fn()
+        return graph
+
+    def _validate_cuda_step_graph(self, graph, snapshot, expected_snapshot) -> bool:
+        self._restore_time_state(snapshot)
+        graph.replay()
+        torch.cuda.synchronize()
+        graph_matches = self._time_state_matches(expected_snapshot)
+        self._restore_time_state(snapshot)
+        return graph_matches
+
+    def _tilelang_segmented_cuda_graph_unsupported_reason(self) -> str:
+        if not self._use_tilelang_lift_surface:
+            return "requires TileLang lift"
+        if self._tilelang_segmented_graph_mode == "0":
+            return "disabled by EDG_ACOUSTICS_TILELANG_SEGMENTED_CUDA_GRAPH"
+
+        time_integrator = self.time_integrator
+        required_methods = (
+            "_copy_packed_state_to_buffer",
+            "_copy_boundary_derivatives",
+            "_accumulate_boundary_derivatives",
+        )
+        for method_name in required_methods:
+            if not hasattr(time_integrator, method_name):
+                return f"requires time integrator method {method_name}"
+
+        packed_operator = getattr(time_integrator, "L_operator_packed", None)
+        if getattr(packed_operator, "__self__", None) is not self:
+            return "requires this simulation's packed RHS operator"
+
+        accumulate_operator = getattr(
+            time_integrator, "L_operator_packed_accumulate", None
+        )
+        if (
+            accumulate_operator is not None
+            and getattr(accumulate_operator, "__self__", None) is not self
+        ):
+            return "requires this simulation's packed accumulate RHS operator"
+
+        if not hasattr(time_integrator, "taylor_coefficients"):
+            return "requires Taylor coefficients"
+        return ""
+
+    def _capture_tilelang_segmented_cuda_step_graph(
+        self, chunk_steps: int, sample_chunk: torch.tensor | None
+    ):
+        reason = self._tilelang_segmented_cuda_graph_unsupported_reason()
+        if reason:
+            self._tilelang_lift_segmented_graph_fallback_reason = reason
+            return None
+        if not self._validate_tilelang_lift_kernel():
+            self._tilelang_lift_segmented_graph_fallback_reason = (
+                self._tilelang_lift_fallback_reason
+            )
+            return None
+
+        time_integrator = self.time_integrator
+        fused_accumulate = time_integrator.L_operator_packed_accumulate is not None
+        segments = []
+
+        for chunk_step_index in range(chunk_steps):
+            init_graph = self._capture_cuda_graph_segment(
+                lambda: (
+                    time_integrator._copy_packed_state_to_buffer(self.Q_flat),
+                    time_integrator._copy_boundary_derivatives(self.BC),
+                )
+            )
+            segments.append((init_graph, False))
+
+            q_stage = time_integrator._packed_state_buffer
+            for coefficient in time_integrator.taylor_coefficients:
+                pre_result = {}
+
+                def run_pre(q_stage=q_stage, pre_result=pre_result):
+                    (
+                        pre_result["rhs_q"],
+                        pre_result["rhs_q_view"],
+                        _,
+                    ) = self._rhs_operator_packed_pre_lift(q_stage, self.BC.BCvar)
+
+                pre_graph = self._capture_cuda_graph_segment(run_pre)
+                segments.append((pre_graph, True))
+
+                rhs_q = pre_result["rhs_q"]
+                rhs_q_view = pre_result["rhs_q_view"]
+
+                def run_post(
+                    q_stage=q_stage,
+                    rhs_q=rhs_q,
+                    rhs_q_view=rhs_q_view,
+                    coefficient=coefficient,
+                ):
+                    self._rhs_operator_packed_post_lift(
+                        q_stage,
+                        rhs_q,
+                        rhs_q_view,
+                        self.Q_flat if fused_accumulate else None,
+                        coefficient if fused_accumulate else 0.0,
+                    )
+                    if not fused_accumulate:
+                        self.Q_flat.add_(rhs_q, alpha=coefficient)
+                    time_integrator._accumulate_boundary_derivatives(
+                        self.BC, coefficient
+                    )
+
+                post_graph = self._capture_cuda_graph_segment(run_post)
+                segments.append((post_graph, False))
+                q_stage = rhs_q
+
+            if sample_chunk is not None:
+                sample_graph = self._capture_cuda_graph_segment(
+                    lambda chunk_step_index=chunk_step_index: self._sample_receivers(
+                        sample_chunk[chunk_step_index]
+                    )
+                )
+                segments.append((sample_graph, False))
+
+        return _SegmentedCudaStepGraph(segments, self._invoke_tilelang_lift_kernel)
+
+    def _capture_full_cuda_step_graph(
+        self, chunk_steps: int, sample_chunk: torch.tensor | None
+    ):
+        return self._capture_cuda_graph_segment(
+            lambda: self._run_cuda_step_chunk(chunk_steps, sample_chunk)
+        )
+
     def _ensure_cuda_step_graph(
         self, chunk_steps: int = 1, record_receivers: bool = False
     ):
-        key = (chunk_steps, record_receivers)
+        key = (
+            chunk_steps,
+            record_receivers,
+            self._tilelang_segmented_graph_mode,
+        )
         if key in self._cuda_step_graphs:
             return self._cuda_step_graphs[key]
         if not torch.cuda.is_available() or self.Q_flat.device.type != "cuda":
@@ -2917,36 +3088,58 @@ class AcousticsSimulation:
         tilelang_retry_done = False
         while True:
             snapshot = self._snapshot_time_state()
-            for step_index in range(chunk_steps):
-                self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
-                if sample_chunk is not None:
-                    self._sample_receivers(sample_chunk[step_index])
+            self._run_cuda_step_chunk(chunk_steps, sample_chunk)
             torch.cuda.synchronize()
             expected_snapshot = self._snapshot_time_state()
             self._restore_time_state(snapshot)
+            force_segmented = (
+                self._tilelang_segmented_graph_mode == "1"
+                and self._use_tilelang_lift_surface
+            )
 
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                for step_index in range(chunk_steps):
-                    self.time_integrator.step_dt_packed(self.Q_flat, self.BC)
-                    if sample_chunk is not None:
-                        self._sample_receivers(sample_chunk[step_index])
+            if not force_segmented:
+                graph = self._capture_full_cuda_step_graph(chunk_steps, sample_chunk)
+                if self._validate_cuda_step_graph(graph, snapshot, expected_snapshot):
+                    self._mark_tilelang_lift_cuda_graph_validated()
+                    self._cuda_step_graphs[key] = (graph, sample_chunk, "full")
+                    return self._cuda_step_graphs[key]
 
-            self._restore_time_state(snapshot)
-            graph.replay()
-            torch.cuda.synchronize()
-            graph_matches = self._time_state_matches(expected_snapshot)
-            self._restore_time_state(snapshot)
+            if (
+                self._use_tilelang_lift_surface
+                and self._tilelang_segmented_graph_mode != "0"
+            ):
+                graph = self._capture_tilelang_segmented_cuda_step_graph(
+                    chunk_steps, sample_chunk
+                )
+                if graph is not None and self._validate_cuda_step_graph(
+                    graph, snapshot, expected_snapshot
+                ):
+                    self._mark_tilelang_lift_segmented_cuda_graph_validated()
+                    self._cuda_step_graphs[key] = (
+                        graph,
+                        sample_chunk,
+                        "segmented_tilelang_lift",
+                    )
+                    return self._cuda_step_graphs[key]
+                self._tilelang_lift_segmented_graph_supported = False
 
-            if graph_matches:
-                self._mark_tilelang_lift_cuda_graph_validated()
-                self._cuda_step_graphs[key] = (graph, sample_chunk)
-                return self._cuda_step_graphs[key]
+            if not self._use_tilelang_lift_surface:
+                graph = self._capture_full_cuda_step_graph(chunk_steps, sample_chunk)
+                if self._validate_cuda_step_graph(graph, snapshot, expected_snapshot):
+                    self._cuda_step_graphs[key] = (graph, sample_chunk, "full")
+                    return self._cuda_step_graphs[key]
 
             if self._use_tilelang_lift_surface and not tilelang_retry_done:
                 self._tilelang_lift_graph_capture_supported = False
+                fallback_reason = (
+                    "segmented cuda graph replay validation failed; "
+                    "falling back from TileLang lift"
+                    if force_segmented
+                    else "cuda graph replay validation failed; "
+                    "falling back from TileLang lift"
+                )
                 self._disable_tilelang_lift(
-                    "cuda graph replay validation failed; falling back from TileLang lift"
+                    fallback_reason
                 )
                 tilelang_retry_done = True
                 continue
@@ -3815,11 +4008,25 @@ class AcousticsSimulation:
     ):
         """Compute packed RHS for ``q_by_node`` shaped ``[Np, 4 * N_tets]``."""
 
+        RHS_Q, RHS_Q_view, BCvar = self._rhs_operator_packed_pre_lift(
+            q_by_node, BCvar
+        )
+        self._compute_lift_surface()
+        self._rhs_operator_packed_post_lift(
+            q_by_node,
+            RHS_Q,
+            RHS_Q_view,
+            q_accumulate,
+            accumulate_coefficient,
+        )
+        return RHS_Q, BCvar
+
+    def _rhs_operator_packed_pre_lift(
+        self,
+        q_by_node: torch.tensor,
+        BCvar: list[dict],
+    ):
         RHS_Q, RHS_Q_view = self._next_rhs_buffers()
-        RHS_P = RHS_Q_view[:, 0, :]
-        RHS_Vx = RHS_Q_view[:, 1, :]
-        RHS_Vy = RHS_Q_view[:, 2, :]
-        RHS_Vz = RHS_Q_view[:, 3, :]
         if not self._use_triton_derivative_volume:
             self._compute_packed_derivatives(q_by_node)
         self._compute_interior_flux(q_by_node)
@@ -3840,7 +4047,20 @@ class AcousticsSimulation:
         if not self._use_scaled_flux_kernels:
             flux_view.mul_(self.Fscale.unsqueeze(1))
 
-        self._compute_lift_surface()
+        return RHS_Q, RHS_Q_view, BCvar
+
+    def _rhs_operator_packed_post_lift(
+        self,
+        q_by_node: torch.tensor,
+        RHS_Q: torch.tensor,
+        RHS_Q_view: torch.tensor,
+        q_accumulate: torch.tensor | None = None,
+        accumulate_coefficient: float = 0.0,
+    ):
+        RHS_P = RHS_Q_view[:, 0, :]
+        RHS_Vx = RHS_Q_view[:, 1, :]
+        RHS_Vy = RHS_Q_view[:, 2, :]
+        RHS_Vz = RHS_Q_view[:, 3, :]
         if self._use_triton_volume_surface_rhs and self._use_triton_volume_rhs:
             if self._use_triton_derivative_volume:
                 self._compute_derivative_volume_rhs(
@@ -3866,8 +4086,6 @@ class AcousticsSimulation:
             RHS_Vz.add_(surface[:, 3, :])
             if q_accumulate is not None:
                 q_accumulate.add_(RHS_Q, alpha=accumulate_coefficient)
-
-        return RHS_Q, BCvar
 
     def RHS_operator_packed_accumulate(
         self,
@@ -3944,10 +4162,13 @@ class AcousticsSimulation:
 
         cuda_step_graph = None
         cuda_sample_chunk = None
+        cuda_graph_mode = "disabled"
         if use_cuda_graph:
-            cuda_step_graph, cuda_sample_chunk = self._ensure_cuda_step_graph(
-                cuda_graph_chunk_steps, record_receivers
-            )
+            (
+                cuda_step_graph,
+                cuda_sample_chunk,
+                cuda_graph_mode,
+            ) = self._ensure_cuda_step_graph(cuda_graph_chunk_steps, record_receivers)
         startTime = time.time()
         curTime = startTime
         prevEstimated = 0
@@ -4030,6 +4251,7 @@ class AcousticsSimulation:
         self.last_time_integration_steps = self.Ntimesteps
         self.last_time_integration_total_time = total_time
         self.last_time_integration_used_cuda_graph = use_cuda_graph
+        self.last_time_integration_cuda_graph_mode = cuda_graph_mode
         self.last_time_integration_record_receivers = record_receivers
         if progress:
             print(f"time: {self.last_time_integration_elapsed_s} s")

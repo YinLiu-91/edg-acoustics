@@ -46,7 +46,11 @@ def assert_common_output(output: str):
         "tilelang_lift_enabled=",
         "tilelang_lift_config=",
         "tilelang_lift_graph_capture_supported=",
+        "tilelang_lift_segmented_graph_mode=",
+        "tilelang_lift_segmented_graph_supported=",
+        "tilelang_lift_segmented_graph_fallback_reason=",
         "tilelang_lift_fallback_reason=",
+        "cuda_graph_mode=",
     ):
         assert field in output
 
@@ -86,6 +90,22 @@ def test_scenario1_benchmark_cli_accepts_tilelang_lift_flags():
     assert_common_output(output)
     assert "tilelang_lift_enabled=0" in output
     assert "tilelang_lift_config=bm48_bn64_bk16_s0_t256_fullcol" in output
+
+
+def test_scenario1_benchmark_cli_accepts_tilelang_segmented_graph_flags():
+    output = run_benchmark(
+        "--device",
+        "cpu",
+        "--steps",
+        "1",
+        "--cpu-threads",
+        "1",
+        "--no-record-receivers",
+        "--enable-tilelang-segmented-graph",
+    )
+
+    assert_common_output(output)
+    assert "tilelang_lift_segmented_graph_mode=1" in output
 
 
 def test_scenario1_benchmark_cli_reports_real_case_metadata():
