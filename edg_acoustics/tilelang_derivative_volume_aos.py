@@ -23,11 +23,13 @@ _VARIANT_COPY_SHARED = 0
 _VARIANT_DIRECT_EPILOGUE = 1
 _VARIANT_FIELD_FRAGMENTS = 2
 _VARIANT_FIELD_PAIRS = 3
+_VARIANT_MERGED3 = 4
 _VARIANT_CODES = {
     "copy_shared": _VARIANT_COPY_SHARED,
     "direct_epilogue": _VARIANT_DIRECT_EPILOGUE,
     "field_fragments": _VARIANT_FIELD_FRAGMENTS,
     "field_pairs": _VARIANT_FIELD_PAIRS,
+    "merged3": _VARIANT_MERGED3,
 }
 
 T = None
@@ -69,12 +71,14 @@ class DerivativeVolumeAosConfig:
             )
         elif self.variant == "direct_epilogue":
             elements = 3 * self.block_p * self.block_k + self.block_n * self.block_k
-        else:
+        elif self.variant in ("copy_shared", "merged3"):
             elements = (
                 3 * self.block_p * self.block_k
                 + self.block_n * self.block_k
                 + 3 * self.block_p * self.block_n
             )
+        else:
+            raise ValueError(f"unknown derivative-volume AoS variant: {self.variant}")
         return elements * 8
 
 
@@ -176,6 +180,42 @@ _CONFIGS: dict[str, DerivativeVolumeAosConfig] = {
             0,
             128,
             variant="field_pairs",
+        ),
+        DerivativeVolumeAosConfig(
+            "bp16_be8_bn32_bk16_s0_t128_fullcol_merged3",
+            16,
+            8,
+            16,
+            0,
+            128,
+            variant="merged3",
+        ),
+        DerivativeVolumeAosConfig(
+            "bp16_be8_bn32_bk16_s1_t128_fullcol_merged3",
+            16,
+            8,
+            16,
+            1,
+            128,
+            variant="merged3",
+        ),
+        DerivativeVolumeAosConfig(
+            "bp16_be16_bn64_bk16_s0_t256_fullcol_merged3",
+            16,
+            16,
+            16,
+            0,
+            256,
+            variant="merged3",
+        ),
+        DerivativeVolumeAosConfig(
+            "bp16_be16_bn64_bk16_s1_t256_fullcol_merged3",
+            16,
+            16,
+            16,
+            1,
+            256,
+            variant="merged3",
         ),
     )
 }
@@ -313,6 +353,139 @@ def _fp64_derivative_volume_aos(
                             vz_r = acc_r[i, lc + 3]
                             vz_s = acc_s[i, lc + 3]
                             vz_t = acc_t[i, lc + 3]
+
+                        rhs_p = (
+                            metric_p[0, 0, elem] * vx_r
+                            + metric_p[1, 0, elem] * vx_s
+                            + metric_p[2, 0, elem] * vx_t
+                            + metric_p[0, 1, elem] * vy_r
+                            + metric_p[1, 1, elem] * vy_s
+                            + metric_p[2, 1, elem] * vy_t
+                            + metric_p[0, 2, elem] * vz_r
+                            + metric_p[1, 2, elem] * vz_s
+                            + metric_p[2, 2, elem] * vz_t
+                            + surface[node, c]
+                        )
+                        rhs_vx = (
+                            metric_v[0, 0, elem] * p_r
+                            + metric_v[1, 0, elem] * p_s
+                            + metric_v[2, 0, elem] * p_t
+                            + surface[node, c + 1]
+                        )
+                        rhs_vy = (
+                            metric_v[0, 1, elem] * p_r
+                            + metric_v[1, 1, elem] * p_s
+                            + metric_v[2, 1, elem] * p_t
+                            + surface[node, c + 2]
+                        )
+                        rhs_vz = (
+                            metric_v[0, 2, elem] * p_r
+                            + metric_v[1, 2, elem] * p_s
+                            + metric_v[2, 2, elem] * p_t
+                            + surface[node, c + 3]
+                        )
+
+                        rhs[node, c] = rhs_p
+                        rhs[node, c + 1] = rhs_vx
+                        rhs[node, c + 2] = rhs_vy
+                        rhs[node, c + 3] = rhs_vz
+                        if update_state:
+                            q_update[node, c] = q_update[node, c] + coeff * rhs_p
+                            q_update[node, c + 1] = (
+                                q_update[node, c + 1] + coeff * rhs_vx
+                            )
+                            q_update[node, c + 2] = (
+                                q_update[node, c + 2] + coeff * rhs_vy
+                            )
+                            q_update[node, c + 3] = (
+                                q_update[node, c + 3] + coeff * rhs_vz
+                            )
+
+        return main
+
+    if variant == _VARIANT_MERGED3:
+        @T.prim_func
+        def main(
+            Q: T.Tensor((M, N), T.float64),
+            Dr: T.Tensor((M, K), T.float64),
+            Ds: T.Tensor((M, K), T.float64),
+            Dt: T.Tensor((M, K), T.float64),
+            metric_p: T.Tensor((3, 3, n_tets), T.float64),
+            metric_v: T.Tensor((3, 3, n_tets), T.float64),
+            surface: T.Tensor((M, N), T.float64),
+            rhs: T.Tensor((M, N), T.float64),
+            q_update: T.Tensor((M, N), T.float64),
+            coefficient: T.Tensor((1,), T.float64),
+        ):
+            with T.Kernel(
+                T.ceildiv(N, block_n), T.ceildiv(M, block_p), threads=threads
+            ) as (bx, by):
+                d_merged_shared = T.alloc_shared((3 * block_p, block_k), T.float64)
+                q_shared = T.alloc_shared((block_n, block_k), T.float64)
+                acc_merged = T.alloc_fragment((3 * block_p, block_n), T.float64)
+                acc_merged_shared = T.alloc_shared((3 * block_p, block_n), T.float64)
+
+                T.use_swizzle(panel_size=10, enable=True)
+                T.clear(acc_merged)
+                for ko in T.Pipelined(T.ceildiv(K, block_k), num_stages=num_stages):
+                    for i, kk in T.Parallel(block_p, block_k):
+                        row = by * block_p + i
+                        k_idx = ko * block_k + kk
+                        valid = (row < M) & (k_idx < K)
+                        d_merged_shared[i, kk] = T.if_then_else(
+                            valid,
+                            Dr[row, k_idx],
+                            T.float64(0.0),
+                        )
+                        d_merged_shared[i + block_p, kk] = T.if_then_else(
+                            valid,
+                            Ds[row, k_idx],
+                            T.float64(0.0),
+                        )
+                        d_merged_shared[i + 2 * block_p, kk] = T.if_then_else(
+                            valid,
+                            Dt[row, k_idx],
+                            T.float64(0.0),
+                        )
+
+                    for j, kk in T.Parallel(block_n, block_k):
+                        k_idx = ko * block_k + kk
+                        n_idx = bx * block_n + j
+                        q_shared[j, kk] = T.if_then_else(
+                            (k_idx < K) & (n_idx < N),
+                            Q[k_idx, n_idx],
+                            T.float64(0.0),
+                        )
+
+                    T.gemm(
+                        d_merged_shared,
+                        q_shared,
+                        acc_merged,
+                        transpose_B=True,
+                        policy=policy,
+                    )
+
+                T.copy(acc_merged, acc_merged_shared)
+
+                coeff = coefficient[0]
+                for i, e in T.Parallel(block_p, block_e):
+                    node = by * block_p + i
+                    elem = bx * block_e + e
+                    if node < M and elem < n_tets:
+                        c = elem * 4
+                        lc = e * 4
+                        p_r = acc_merged_shared[i, lc]
+                        p_s = acc_merged_shared[i + block_p, lc]
+                        p_t = acc_merged_shared[i + 2 * block_p, lc]
+                        vx_r = acc_merged_shared[i, lc + 1]
+                        vx_s = acc_merged_shared[i + block_p, lc + 1]
+                        vx_t = acc_merged_shared[i + 2 * block_p, lc + 1]
+                        vy_r = acc_merged_shared[i, lc + 2]
+                        vy_s = acc_merged_shared[i + block_p, lc + 2]
+                        vy_t = acc_merged_shared[i + 2 * block_p, lc + 2]
+                        vz_r = acc_merged_shared[i, lc + 3]
+                        vz_s = acc_merged_shared[i + block_p, lc + 3]
+                        vz_t = acc_merged_shared[i + 2 * block_p, lc + 3]
 
                         rhs_p = (
                             metric_p[0, 0, elem] * vx_r
@@ -511,6 +684,9 @@ def _fp64_derivative_volume_aos(
                             )
 
         return main
+
+    if variant != _VARIANT_FIELD_PAIRS:
+        raise ValueError(f"unknown TileLang derivative-volume AoS variant code: {variant}")
 
     @T.prim_func
     def main(

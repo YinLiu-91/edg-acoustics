@@ -90,14 +90,18 @@ def test_tilelang_derivative_volume_aos_variant_configs_are_exposed():
     direct_config = module.get_config("bp16_be8_bn32_bk16_s0_t128_fullcol_direct")
     fieldfrag_config = module.get_config("bp16_be8_bn32_bk16_s0_t128_fullcol_fieldfrag")
     fieldpair_config = module.get_config("bp16_be8_bn32_bk16_s0_t128_fullcol_fieldpair")
+    merged3_config = module.get_config("bp16_be8_bn32_bk16_s0_t128_fullcol_merged3")
 
     assert default_config.variant == "copy_shared"
     assert direct_config.variant == "direct_epilogue"
     assert fieldfrag_config.variant == "field_fragments"
     assert fieldpair_config.variant == "field_pairs"
+    assert merged3_config.variant == "merged3"
     assert direct_config.explicit_shared_memory_bytes < default_config.explicit_shared_memory_bytes
     assert fieldfrag_config.explicit_shared_memory_bytes < default_config.explicit_shared_memory_bytes
+    assert merged3_config.explicit_shared_memory_bytes == default_config.explicit_shared_memory_bytes
     assert "bp16_be8_bn32_bk16_s0_t128_fullcol_fieldpair" in module.available_config_names()
+    assert "bp16_be8_bn32_bk16_s0_t128_fullcol_merged3" in module.available_config_names()
 
 
 @pytest.mark.skipif(
