@@ -10,6 +10,7 @@ computed:
 from __future__ import annotations
 
 import argparse
+import bisect
 import os
 import sys
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from pathlib import Path
 
 import torch
 import triton
+from torch.autograd.profiler import DeviceType
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -76,6 +78,14 @@ def synchronize() -> None:
     torch.cuda.synchronize()
 
 
+def make_flush_cache() -> torch.Tensor:
+    props = torch.cuda.get_device_properties(0)
+    l2_bytes = int(getattr(props, "L2_cache_size", 0) or 0)
+    if l2_bytes <= 0:
+        l2_bytes = int(256e6)
+    return torch.empty(max(l2_bytes // 4, 1), dtype=torch.int, device="cuda")
+
+
 def max_error(actual: torch.Tensor, expected: torch.Tensor) -> tuple[float, float, bool]:
     diff = (actual - expected).abs()
     max_abs = float(diff.max().item())
@@ -104,45 +114,113 @@ def call_tilelang_kernel(kernel, args, *, skip_validation: bool) -> None:
     kernel(*args)
 
 
-def time_eager(fn, *, warmup: int, iterations: int) -> float:
+def _sum_kernel_time_us(kineto_results) -> tuple[float, int]:
+    windows: list[tuple[int, int]] = []
+    kernels: list[tuple[int, int]] = []
+    for event in kineto_results.events():
+        if event.device_type() != DeviceType.CUDA:
+            continue
+        if event.is_user_annotation():
+            if event.name() == "edg_acoustics_kernel":
+                windows.append((event.start_ns(), event.end_ns()))
+            continue
+        kernels.append((event.start_ns(), event.duration_ns()))
+
+    windows.sort()
+    starts = [window[0] for window in windows]
+    ends = [window[1] for window in windows]
+    total_us = 0.0
+    for start_ns, duration_ns in kernels:
+        idx = bisect.bisect_right(starts, start_ns) - 1
+        if idx >= 0 and start_ns < ends[idx]:
+            total_us += duration_ns / 1000.0
+    return total_us, len(windows)
+
+
+def time_event(fn, *, cache: torch.Tensor, warmup: int, iterations: int) -> float:
     for _ in range(warmup):
+        cache.zero_()
         fn()
     synchronize()
 
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iterations):
+    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+    for index in range(iterations):
+        cache.zero_()
+        start_events[index].record()
         fn()
-    end.record()
+        end_events[index].record()
     synchronize()
-    return float(start.elapsed_time(end)) / iterations
+    return sum(
+        float(start.elapsed_time(end))
+        for start, end in zip(start_events, end_events, strict=True)
+    ) / iterations
 
 
-def time_cudagraph(fn, *, warmup: int, iterations: int) -> float:
+def time_cudagraph(fn, *, cache: torch.Tensor, warmup: int, iterations: int) -> float:
     for _ in range(warmup):
+        cache.zero_()
         fn()
     synchronize()
 
+    replay_stream = torch.cuda.Stream()
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    with torch.cuda.stream(replay_stream):
+        synchronize()
+        with torch.cuda.graph(graph):
+            fn()
+    synchronize()
+
+    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+    for index in range(iterations):
+        cache.zero_()
+        start_events[index].record()
+        graph.replay()
+        end_events[index].record()
+    synchronize()
+    return sum(
+        float(start.elapsed_time(end))
+        for start, end in zip(start_events, end_events, strict=True)
+    ) / iterations
+
+
+def time_cupti(fn, *, cache: torch.Tensor, warmup: int, iterations: int) -> float:
+    for _ in range(warmup):
+        cache.zero_()
         fn()
     synchronize()
 
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iterations):
-        graph.replay()
-    end.record()
-    synchronize()
-    return float(start.elapsed_time(end)) / iterations
+    try:
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+        ) as profiler:
+            for _ in range(iterations):
+                cache.zero_()
+                with torch.profiler.record_function("edg_acoustics_kernel"):
+                    fn()
+                synchronize()
+        total_us, n_regions = _sum_kernel_time_us(profiler.profiler.kineto_results)
+        if n_regions != iterations:
+            raise RuntimeError(
+                f"expected {iterations} profiled regions, got {n_regions}"
+            )
+        return total_us / iterations * 1.0e-3
+    except Exception as exc:
+        print(f"cupti_fallback={type(exc).__name__}: {exc}")
+        return time_event(fn, cache=cache, warmup=0, iterations=iterations)
 
 
 def time_callable(fn, *, backend: str, warmup: int, iterations: int) -> float:
+    cache = make_flush_cache()
+    if backend == "cupti":
+        return time_cupti(fn, cache=cache, warmup=warmup, iterations=iterations)
     if backend == "cudagraph":
-        return time_cudagraph(fn, warmup=warmup, iterations=iterations)
-    return time_eager(fn, warmup=warmup, iterations=iterations)
+        return time_cudagraph(fn, cache=cache, warmup=warmup, iterations=iterations)
+    return time_event(fn, cache=cache, warmup=warmup, iterations=iterations)
 
 
 def run_profile_loop(name: str, fn, *, repeat: int) -> None:
@@ -164,6 +242,60 @@ def run_profile_loop(name: str, fn, *, repeat: int) -> None:
     synchronize()
     print(f"profile_loop={name}")
     print(f"profile_loop_repeat={repeat}")
+
+
+def logical_flops(inputs: KernelInputs, *, update_state: bool) -> float:
+    gemm_flops = float(2 * (3 * inputs.n_p) * inputs.n_p * inputs.n_columns)
+    epilogue_flops_per_state = 36 + (8 if update_state else 0)
+    epilogue_flops = float(epilogue_flops_per_state * inputs.n_p * inputs.n_tets)
+    return gemm_flops + epilogue_flops
+
+
+def logical_memory_bytes(inputs: KernelInputs, *, update_state: bool, candidate: bool) -> int:
+    dtype_bytes = inputs.q_by_node.element_size()
+    deriv_bytes = (
+        inputs.dr.nelement() + inputs.ds.nelement() + inputs.dt.nelement()
+    ) * dtype_bytes
+    q_bytes = inputs.q_by_node.nelement() * dtype_bytes
+    metric_bytes = (
+        inputs.metric_p_affine.nelement() + inputs.metric_v_affine.nelement()
+    ) * dtype_bytes
+    surface_bytes = inputs.surface_by_node.nelement() * dtype_bytes
+    rhs_bytes = inputs.q_by_node.nelement() * dtype_bytes
+    update_bytes = 2 * inputs.q_by_node.nelement() * dtype_bytes if update_state else 0
+    if candidate:
+        return deriv_bytes + q_bytes + metric_bytes + surface_bytes + rhs_bytes + update_bytes
+    intermediate_bytes = 2 * inputs.dQ_by_derivative.nelement() * dtype_bytes
+    return (
+        deriv_bytes
+        + q_bytes
+        + intermediate_bytes
+        + metric_bytes
+        + surface_bytes
+        + rhs_bytes
+        + update_bytes
+    )
+
+
+def report_perf(prefix: str, ms: float, flops: float, memory_bytes: int) -> None:
+    print(f"{prefix}_ms={ms:.6f}")
+    print(f"{prefix}_us={ms * 1000.0:.3f}")
+    print(f"{prefix}_tflops={flops / ms * 1.0e-9:.6f}")
+    print(f"{prefix}_bandwidth_tbps={memory_bytes / ms * 1.0e-9:.6f}")
+
+
+def export_candidate_sources(kernel, export_dir: Path, config_name: str) -> None:
+    kernel_path = export_dir / f"{config_name}.kernel.cu"
+    host_path = export_dir / f"{config_name}.host.cc"
+    try:
+        kernel.export_sources(
+            kernel_path=str(kernel_path),
+            host_path=str(host_path),
+        )
+        print(f"candidate_kernel_source={kernel_path}")
+        print(f"candidate_host_source={host_path}")
+    except Exception as exc:
+        print(f"candidate_export_error={type(exc).__name__}: {exc}")
 
 
 def make_kernel_inputs(
@@ -343,12 +475,26 @@ def launch_baseline(
 
 def run_config(args, inputs: KernelInputs, config_name: str) -> bool:
     config = get_config(config_name)
-    shared_limit = torch.cuda.get_device_properties(0).shared_memory_per_block
+    props = torch.cuda.get_device_properties(0)
+    shared_limit = props.shared_memory_per_block
     update_state = args.mode == "update"
     coefficient = inputs.coefficient
     q_by_node = inputs.q_by_node
+    flops = logical_flops(inputs, update_state=update_state)
+    baseline_memory_bytes = logical_memory_bytes(
+        inputs,
+        update_state=update_state,
+        candidate=False,
+    )
+    candidate_memory_bytes = logical_memory_bytes(
+        inputs,
+        update_state=update_state,
+        candidate=True,
+    )
 
     print(f"config={config.name}")
+    print(f"variant={config.variant}")
+    print(f"policy={config.policy}")
     print(f"block_p={config.block_p}")
     print(f"block_e={config.block_e}")
     print(f"block_n={config.block_n}")
@@ -356,6 +502,9 @@ def run_config(args, inputs: KernelInputs, config_name: str) -> bool:
     print(f"num_stages={config.num_stages}")
     print(f"threads={config.threads}")
     print(f"explicit_shared_memory_kib={config.explicit_shared_memory_bytes / 1024:.1f}")
+    print(f"logical_flops={flops:.0f}")
+    print(f"baseline_logical_bytes={baseline_memory_bytes}")
+    print(f"candidate_logical_bytes={candidate_memory_bytes}")
     print(f"mode={args.mode}")
     if config.explicit_shared_memory_bytes > shared_limit:
         print(
@@ -370,6 +519,9 @@ def run_config(args, inputs: KernelInputs, config_name: str) -> bool:
             config_name=config.name,
             update_state=update_state,
         )
+        if args.export_sources is not None:
+            args.export_sources.mkdir(parents=True, exist_ok=True)
+            export_candidate_sources(kernel, args.export_sources, config.name)
     except Exception as exc:
         print(f"candidate_build_error={type(exc).__name__}: {exc}")
         return False
@@ -465,10 +617,8 @@ def run_config(args, inputs: KernelInputs, config_name: str) -> bool:
         print(f"candidate_bench_error={type(exc).__name__}: {exc}")
         return False
 
-    print(f"baseline_ms={baseline_ms:.6f}")
-    print(f"candidate_ms={candidate_ms:.6f}")
-    print(f"baseline_us={baseline_ms * 1000.0:.3f}")
-    print(f"candidate_us={candidate_ms * 1000.0:.3f}")
+    report_perf("baseline", baseline_ms, flops, baseline_memory_bytes)
+    report_perf("candidate", candidate_ms, flops, candidate_memory_bytes)
     print(f"speedup={baseline_ms / candidate_ms:.6f}")
 
     if args.profile_target in {"baseline", "both"}:
@@ -501,7 +651,7 @@ def parse_args():
     )
     parser.add_argument(
         "--profile-backend",
-        choices=("eager", "cudagraph"),
+        choices=("event", "eager", "cudagraph", "cupti"),
         default="cudagraph",
     )
     parser.add_argument("--config", default=TILELANG_DERIVATIVE_VOLUME_AOS_CONFIG_NAME)
@@ -535,6 +685,12 @@ def parse_args():
         default=200,
         help="Number of calls inside each NVTX profiling loop.",
     )
+    parser.add_argument(
+        "--export-sources",
+        type=Path,
+        default=None,
+        help="Export generated TileLang kernel/host sources per config.",
+    )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument(
@@ -554,6 +710,10 @@ def main() -> None:
     print(f"device={torch.cuda.get_device_name(0)}")
     print(f"torch_version={torch.__version__}")
     print(f"torch_version_maca={getattr(torch.version, 'maca', None)}")
+    props = torch.cuda.get_device_properties(0)
+    print(f"shared_memory_per_block={props.shared_memory_per_block}")
+    print(f"warp_size={getattr(props, 'warp_size', 32)}")
+    print(f"L2_cache_size={getattr(props, 'L2_cache_size', 0)}")
     print(f"profile_backend={args.profile_backend}")
     print(f"mesh_name={args.mesh_name}")
 
