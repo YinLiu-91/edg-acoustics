@@ -3064,6 +3064,15 @@ class AcousticsSimulation:
             lambda: self._run_cuda_step_chunk(chunk_steps, sample_chunk)
         )
 
+    @staticmethod
+    def _cuda_graph_selection_log_enabled() -> bool:
+        raw = os.environ.get("EDG_ACOUSTICS_CUDA_GRAPH_SELECTION_LOG", "0")
+        return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+    def _log_cuda_graph_selection(self, message: str):
+        if self._cuda_graph_selection_log_enabled():
+            print(f"cuda_graph_selection={message}", flush=True)
+
     def _ensure_cuda_step_graph(
         self, chunk_steps: int = 1, record_receivers: bool = False
     ):
@@ -3073,9 +3082,19 @@ class AcousticsSimulation:
             self._tilelang_segmented_graph_mode,
         )
         if key in self._cuda_step_graphs:
+            cached_mode = self._cuda_step_graphs[key][2]
+            self._log_cuda_graph_selection(f"cache_hit mode={cached_mode}")
             return self._cuda_step_graphs[key]
         if not torch.cuda.is_available() or self.Q_flat.device.type != "cuda":
             raise RuntimeError("CUDA graph time stepping requires CUDA tensors.")
+
+        self._log_cuda_graph_selection(
+            "begin "
+            f"chunk_steps={chunk_steps} "
+            f"record_receivers={int(record_receivers)} "
+            f"tilelang_lift={int(self._use_tilelang_lift_surface)} "
+            f"segmented_mode={self._tilelang_segmented_graph_mode}"
+        )
 
         sample_chunk = None
         if record_receivers:
@@ -3098,20 +3117,36 @@ class AcousticsSimulation:
             )
 
             if not force_segmented:
+                self._log_cuda_graph_selection("full_try")
                 graph = self._capture_full_cuda_step_graph(chunk_steps, sample_chunk)
                 if self._validate_cuda_step_graph(graph, snapshot, expected_snapshot):
                     self._mark_tilelang_lift_cuda_graph_validated()
                     self._cuda_step_graphs[key] = (graph, sample_chunk, "full")
+                    self._log_cuda_graph_selection("selected mode=full")
                     return self._cuda_step_graphs[key]
+                self._log_cuda_graph_selection("full_valid=0")
+            else:
+                self._log_cuda_graph_selection(
+                    "full_skip reason=forced_segmented_tilelang_lift"
+                )
 
             if (
                 self._use_tilelang_lift_surface
                 and self._tilelang_segmented_graph_mode != "0"
             ):
+                self._log_cuda_graph_selection("segmented_try")
                 graph = self._capture_tilelang_segmented_cuda_step_graph(
                     chunk_steps, sample_chunk
                 )
-                if graph is not None and self._validate_cuda_step_graph(
+                if graph is None:
+                    reason = (
+                        self._tilelang_lift_segmented_graph_fallback_reason
+                        or "capture returned None"
+                    )
+                    self._log_cuda_graph_selection(
+                        f"segmented_capture=0 reason={reason}"
+                    )
+                elif self._validate_cuda_step_graph(
                     graph, snapshot, expected_snapshot
                 ):
                     self._mark_tilelang_lift_segmented_cuda_graph_validated()
@@ -3120,14 +3155,31 @@ class AcousticsSimulation:
                         sample_chunk,
                         "segmented_tilelang_lift",
                     )
+                    self._log_cuda_graph_selection(
+                        "selected mode=segmented_tilelang_lift"
+                    )
                     return self._cuda_step_graphs[key]
+                else:
+                    self._tilelang_lift_segmented_graph_fallback_reason = (
+                        "segmented cuda graph replay validation failed"
+                    )
+                    self._log_cuda_graph_selection("segmented_valid=0")
                 self._tilelang_lift_segmented_graph_supported = False
+            elif self._use_tilelang_lift_surface:
+                self._log_cuda_graph_selection(
+                    "segmented_skip reason=disabled_by_mode"
+                )
 
             if not self._use_tilelang_lift_surface:
+                self._log_cuda_graph_selection("fallback_full_try tilelang_lift=0")
                 graph = self._capture_full_cuda_step_graph(chunk_steps, sample_chunk)
                 if self._validate_cuda_step_graph(graph, snapshot, expected_snapshot):
                     self._cuda_step_graphs[key] = (graph, sample_chunk, "full")
+                    self._log_cuda_graph_selection(
+                        "selected mode=full tilelang_lift=0"
+                    )
                     return self._cuda_step_graphs[key]
+                self._log_cuda_graph_selection("fallback_full_valid=0")
 
             if self._use_tilelang_lift_surface and not tilelang_retry_done:
                 self._tilelang_lift_graph_capture_supported = False
@@ -3141,9 +3193,13 @@ class AcousticsSimulation:
                 self._disable_tilelang_lift(
                     fallback_reason
                 )
+                self._log_cuda_graph_selection(
+                    f"tilelang_disable reason={fallback_reason}"
+                )
                 tilelang_retry_done = True
                 continue
 
+            self._log_cuda_graph_selection("failed")
             raise RuntimeError("CUDA graph replay validation failed.")
 
     # Static methods ---------------------------------------------------------------------------------------------------

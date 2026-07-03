@@ -329,6 +329,11 @@ def parse_args():
     parser.add_argument("--cuda-graph", action="store_true")
     parser.add_argument("--cuda-graph-chunk-steps", type=int, default=1)
     parser.add_argument(
+        "--log-cuda-graph-selection",
+        action="store_true",
+        help="Print CUDA graph selection decisions during graph capture.",
+    )
+    parser.add_argument(
         "--no-record-receivers",
         action="store_true",
         help="Skip per-step receiver sampling to measure solver-only time.",
@@ -433,6 +438,8 @@ def main():
         os.environ["EDG_ACOUSTICS_MERGED_DERIVATIVES"] = "1"
     if args.disable_merged_derivatives:
         os.environ["EDG_ACOUSTICS_MERGED_DERIVATIVES"] = "0"
+    if args.log_cuda_graph_selection:
+        os.environ["EDG_ACOUSTICS_CUDA_GRAPH_SELECTION_LOG"] = "1"
     if args.cpu_threads is not None:
         torch.set_num_threads(args.cpu_threads)
 
