@@ -662,6 +662,139 @@ def volume_surface_rhs_affine_metric_aos_vector_kernel(
 
 
 @triton.jit
+def derivative_volume_surface_rhs_affine_metric_aos_kernel(
+    q_ptr,
+    dr_ptr,
+    ds_ptr,
+    dt_ptr,
+    metric_p_ptr,
+    metric_v_ptr,
+    surface_ptr,
+    rhs_ptr,
+    q_update_ptr,
+    total_nodes: tl.constexpr,
+    n_tets: tl.constexpr,
+    n_var_tets: tl.constexpr,
+    n_p: tl.constexpr,
+    coefficient: tl.constexpr,
+    UPDATE_STATE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_nodes
+    node = offsets // n_tets
+    tet = offsets - node * n_tets
+
+    dPdr = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dPds = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dPdt = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVxdr = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVxds = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVxdt = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVydr = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVyds = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVydt = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVzdr = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVzds = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+    dVzdt = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
+
+    for k in range(n_p):
+        d_index = node * n_p + k
+        q_base = k * n_var_tets + tet * 4
+        q_p = tl.load(q_ptr + q_base, mask=mask, other=0.0)
+        q_vx = tl.load(q_ptr + q_base + 1, mask=mask, other=0.0)
+        q_vy = tl.load(q_ptr + q_base + 2, mask=mask, other=0.0)
+        q_vz = tl.load(q_ptr + q_base + 3, mask=mask, other=0.0)
+        dr = tl.load(dr_ptr + d_index, mask=mask, other=0.0)
+        ds = tl.load(ds_ptr + d_index, mask=mask, other=0.0)
+        dt = tl.load(dt_ptr + d_index, mask=mask, other=0.0)
+        dPdr += dr * q_p
+        dPds += ds * q_p
+        dPdt += dt * q_p
+        dVxdr += dr * q_vx
+        dVxds += ds * q_vx
+        dVxdt += dt * q_vx
+        dVydr += dr * q_vy
+        dVyds += ds * q_vy
+        dVydt += dt * q_vy
+        dVzdr += dr * q_vz
+        dVzds += ds * q_vz
+        dVzdt += dt * q_vz
+
+    base = node * n_var_tets + tet * 4
+    field_offsets = tl.arange(0, 4)[:, None]
+    field_mask = mask[None, :]
+    field_index = base[None, :] + field_offsets
+    surface = tl.load(surface_ptr + field_index, mask=field_mask, other=0.0)
+
+    selector = tl.arange(0, 4)[:, None]
+    selector_p = (selector == 0).to(tl.float64)
+    selector_vx = (selector == 1).to(tl.float64)
+    selector_vy = (selector == 2).to(tl.float64)
+    selector_vz = (selector == 3).to(tl.float64)
+    surface_p = tl.sum(surface * selector_p, axis=0)
+    surface_vx = tl.sum(surface * selector_vx, axis=0)
+    surface_vy = tl.sum(surface * selector_vy, axis=0)
+    surface_vz = tl.sum(surface * selector_vz, axis=0)
+
+    m00 = tet
+    m10 = 3 * n_tets + tet
+    m20 = 6 * n_tets + tet
+    m01 = n_tets + tet
+    m11 = 4 * n_tets + tet
+    m21 = 7 * n_tets + tet
+    m02 = 2 * n_tets + tet
+    m12 = 5 * n_tets + tet
+    m22 = 8 * n_tets + tet
+
+    rhs_vx = (
+        tl.load(metric_v_ptr + m00, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m10, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m20, mask=mask) * dPdt
+        + surface_vx
+    )
+    rhs_vy = (
+        tl.load(metric_v_ptr + m01, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m11, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m21, mask=mask) * dPdt
+        + surface_vy
+    )
+    rhs_vz = (
+        tl.load(metric_v_ptr + m02, mask=mask) * dPdr
+        + tl.load(metric_v_ptr + m12, mask=mask) * dPds
+        + tl.load(metric_v_ptr + m22, mask=mask) * dPdt
+        + surface_vz
+    )
+    rhs_p = (
+        tl.load(metric_p_ptr + m00, mask=mask) * dVxdr
+        + tl.load(metric_p_ptr + m10, mask=mask) * dVxds
+        + tl.load(metric_p_ptr + m20, mask=mask) * dVxdt
+        + tl.load(metric_p_ptr + m01, mask=mask) * dVydr
+        + tl.load(metric_p_ptr + m11, mask=mask) * dVyds
+        + tl.load(metric_p_ptr + m21, mask=mask) * dVydt
+        + tl.load(metric_p_ptr + m02, mask=mask) * dVzdr
+        + tl.load(metric_p_ptr + m12, mask=mask) * dVzds
+        + tl.load(metric_p_ptr + m22, mask=mask) * dVzdt
+        + surface_p
+    )
+
+    rhs_pack = (
+        rhs_p[None, :] * selector_p
+        + rhs_vx[None, :] * selector_vx
+        + rhs_vy[None, :] * selector_vy
+        + rhs_vz[None, :] * selector_vz
+    )
+    tl.store(rhs_ptr + field_index, rhs_pack, mask=field_mask)
+    if UPDATE_STATE:
+        q_old = tl.load(q_update_ptr + field_index, mask=field_mask, other=0.0)
+        tl.store(
+            q_update_ptr + field_index,
+            q_old + coefficient * rhs_pack,
+            mask=field_mask,
+        )
+
+
+@triton.jit
 def derivative_volume_surface_rhs_kernel(
     q_ptr,
     dr_ptr,
@@ -1910,7 +2043,65 @@ class AcousticsSimulation:
         )
         self._rhs_buffer_index = 0
         self._cuda_step_graphs = {}
+        self._configure_fused_derivative_volume_aos_backend()
         self._configure_tilelang_lift_backend()
+
+    def _configure_fused_derivative_volume_aos_backend(self):
+        self._fused_derivative_volume_aos_mode = _normalize_env_bool_mode(
+            os.environ.get("EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS"),
+            name="EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS",
+        )
+        self._use_fused_derivative_volume_aos = False
+        self._fused_derivative_volume_aos_checked = False
+        self._fused_derivative_volume_aos_fallback_reason = ""
+
+        if self._fused_derivative_volume_aos_mode == "0":
+            self._fused_derivative_volume_aos_fallback_reason = (
+                "disabled by EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS"
+            )
+            return
+
+        reason = self._fused_derivative_volume_aos_unsupported_reason()
+        if reason:
+            self._fused_derivative_volume_aos_fallback_reason = reason
+            return
+        self._use_fused_derivative_volume_aos = True
+
+    def _fused_derivative_volume_aos_unsupported_reason(self) -> str:
+        if self.device.type != "cuda":
+            return "requires CUDA tensors"
+        if (
+            self._fused_derivative_volume_aos_mode == "auto"
+            and not self._is_metax_cuda_device()
+        ):
+            return "auto mode requires a MetaX/MACA CUDA device"
+        if self.Np != 35:
+            return f"requires Np=35, got {self.Np}"
+        if self.Nfp != 15:
+            return f"requires Nfp=15, got {self.Nfp}"
+        if device_ini.dtype != torch.float64:
+            return f"requires fp64, got {device_ini.dtype}"
+        if not self._use_aos_state_layout:
+            return "requires AoS state layout"
+        if not self._use_triton_volume_rhs:
+            return "requires Triton volume RHS"
+        if not self._use_triton_volume_surface_rhs:
+            return "requires Triton volume-surface RHS"
+        if not self._use_affine_metric_rhs:
+            return "requires affine metric RHS"
+        if not self._use_aos_volume_vector_loads:
+            return "requires AoS vector volume loads"
+        if (
+            not self.Dr.is_contiguous()
+            or not self.Ds.is_contiguous()
+            or not self.Dt.is_contiguous()
+        ):
+            return "requires contiguous derivative matrices"
+        return ""
+
+    def _disable_fused_derivative_volume_aos(self, reason: str):
+        self._use_fused_derivative_volume_aos = False
+        self._fused_derivative_volume_aos_fallback_reason = reason
 
     def _configure_tilelang_lift_backend(self):
         self._tilelang_lift_mode = _normalize_env_bool_mode(
@@ -2551,8 +2742,34 @@ class AcousticsSimulation:
         surface_by_node: torch.tensor | None = None,
         q_update: torch.tensor | None = None,
         coefficient: float = 0.0,
+        q_source_by_node: torch.tensor | None = None,
     ):
         rhs_by_node = self._packed_rhs_buffer_for_view(rhs_view)
+        if (
+            self._use_fused_derivative_volume_aos
+            and surface_by_node is not None
+            and q_source_by_node is not None
+        ):
+            if (
+                self._fused_derivative_volume_aos_checked
+                or _is_cuda_graph_capture_active()
+                or self._validate_fused_derivative_volume_aos(
+                    q_source_by_node,
+                    rhs_by_node,
+                    surface_by_node,
+                    q_update,
+                    coefficient,
+                )
+            ):
+                self._launch_fused_derivative_volume_aos(
+                    q_source_by_node,
+                    rhs_by_node,
+                    surface_by_node,
+                    q_update,
+                    coefficient,
+                )
+                return
+
         if (
             self._use_aos_state_layout
             and self._use_triton_volume_rhs
@@ -2691,6 +2908,111 @@ class AcousticsSimulation:
         rhs_p.addcmul_(self._metric_p[0, 2], self._dQdr_view[:, 3, :])
         rhs_p.addcmul_(self._metric_p[1, 2], self._dQds_view[:, 3, :])
         rhs_p.addcmul_(self._metric_p[2, 2], self._dQdt_view[:, 3, :])
+
+    def _launch_fused_derivative_volume_aos(
+        self,
+        q_by_node: torch.tensor,
+        rhs_by_node: torch.tensor,
+        surface_by_node: torch.tensor,
+        q_update: torch.tensor | None = None,
+        coefficient: float = 0.0,
+    ):
+        total_nodes = self.Np * self.N_tets
+        block_size = 128
+        derivative_volume_surface_rhs_affine_metric_aos_kernel[
+            (triton.cdiv(total_nodes, block_size),)
+        ](
+            q_by_node,
+            self.Dr,
+            self.Ds,
+            self.Dt,
+            self._metric_p_affine,
+            self._metric_v_affine,
+            surface_by_node,
+            rhs_by_node,
+            q_update if q_update is not None else rhs_by_node,
+            total_nodes,
+            self.N_tets,
+            4 * self.N_tets,
+            self.Np,
+            coefficient,
+            q_update is not None,
+            BLOCK_SIZE=block_size,
+        )
+
+    def _validate_fused_derivative_volume_aos(
+        self,
+        q_by_node: torch.tensor,
+        rhs_by_node: torch.tensor,
+        surface_by_node: torch.tensor,
+        q_update: torch.tensor | None = None,
+        coefficient: float = 0.0,
+    ) -> bool:
+        if self._fused_derivative_volume_aos_checked:
+            return True
+        try:
+            reference_rhs = torch.empty_like(rhs_by_node)
+            fused_rhs = torch.empty_like(rhs_by_node)
+            reference_update = q_update.clone() if q_update is not None else None
+            fused_update = q_update.clone() if q_update is not None else None
+
+            self._compute_packed_derivatives(q_by_node)
+            total_nodes = self.Np * self.N_tets
+            block_size = 128
+            volume_surface_rhs_affine_metric_aos_vector_kernel[
+                (triton.cdiv(total_nodes, block_size),)
+            ](
+                self._dQdr_by_node,
+                self._dQds_by_node,
+                self._dQdt_by_node,
+                self._metric_p_affine,
+                self._metric_v_affine,
+                surface_by_node,
+                reference_rhs,
+                reference_update if reference_update is not None else reference_rhs,
+                total_nodes,
+                self.N_tets,
+                4 * self.N_tets,
+                coefficient,
+                reference_update is not None,
+                BLOCK_SIZE=block_size,
+            )
+            self._launch_fused_derivative_volume_aos(
+                q_by_node,
+                fused_rhs,
+                surface_by_node,
+                fused_update,
+                coefficient,
+            )
+            if self.device.type == "cuda":
+                torch.cuda.synchronize()
+
+            if not torch.allclose(
+                fused_rhs, reference_rhs, rtol=1.0e-10, atol=1.0e-10
+            ):
+                diff = (fused_rhs - reference_rhs).abs()
+                self._disable_fused_derivative_volume_aos(
+                    "correctness validation failed: "
+                    f"rhs max_abs={diff.max().item():.6e}"
+                )
+                return False
+            if fused_update is not None and not torch.allclose(
+                fused_update, reference_update, rtol=1.0e-10, atol=1.0e-10
+            ):
+                diff = (fused_update - reference_update).abs()
+                self._disable_fused_derivative_volume_aos(
+                    "correctness validation failed: "
+                    f"state max_abs={diff.max().item():.6e}"
+                )
+                return False
+        except Exception as exc:
+            self._disable_fused_derivative_volume_aos(
+                f"correctness validation failed: {_short_exception(exc)}"
+            )
+            return False
+
+        self._fused_derivative_volume_aos_checked = True
+        return True
 
     def _compute_derivative_volume_rhs(
         self,
@@ -4083,7 +4405,10 @@ class AcousticsSimulation:
         BCvar: list[dict],
     ):
         RHS_Q, RHS_Q_view = self._next_rhs_buffers()
-        if not self._use_triton_derivative_volume:
+        if (
+            not self._use_triton_derivative_volume
+            and not self._use_fused_derivative_volume_aos
+        ):
             self._compute_packed_derivatives(q_by_node)
         self._compute_interior_flux(q_by_node)
 
@@ -4132,6 +4457,7 @@ class AcousticsSimulation:
                     self._surface_by_node,
                     q_accumulate,
                     accumulate_coefficient,
+                    q_by_node,
                 )
         else:
             self._compute_volume_rhs(RHS_Q_view)

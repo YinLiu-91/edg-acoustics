@@ -29,6 +29,8 @@ def build_cuda_variant(
     fused_state_accumulation: bool = False,
     paired_interior_flux: bool = False,
     aos_state_layout: bool | None = False,
+    affine_metric_rhs: bool | None = None,
+    fused_derivative_volume_aos: bool = False,
     interior_face_order: str | None = "natural",
     interior_face_order_tile_size: int | None = None,
     interior_face_order_block_size: int | None = None,
@@ -52,6 +54,16 @@ def build_cuda_variant(
         monkeypatch.setenv(
             "EDG_ACOUSTICS_AOS_STATE_LAYOUT", "1" if aos_state_layout else "0"
         )
+    if affine_metric_rhs is None:
+        monkeypatch.delenv("EDG_ACOUSTICS_AFFINE_METRIC_RHS", raising=False)
+    else:
+        monkeypatch.setenv(
+            "EDG_ACOUSTICS_AFFINE_METRIC_RHS", "1" if affine_metric_rhs else "0"
+        )
+    monkeypatch.setenv(
+        "EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS",
+        "1" if fused_derivative_volume_aos else "0",
+    )
     if interior_face_order is None:
         monkeypatch.delenv("EDG_ACOUSTICS_INTERIOR_FACE_ORDER", raising=False)
     else:
@@ -192,6 +204,71 @@ def test_cuda_aos_state_layout_short_integration_matches_baseline(monkeypatch):
     assert optimized._use_triton_volume_surface_rhs
     # assert optimized._use_ordered_aos_flux
     assert optimized._ordered_aos_state_load_mode == "scalar"
+    assert_simulation_state_close(optimized, baseline, rtol=RTOL, atol=ATOL)
+
+
+def test_cuda_fused_derivative_volume_aos_rhs_matches_affine_aos_baseline(
+    monkeypatch,
+):
+    options = {
+        "compact_flux": True,
+        "merged_derivatives": True,
+        "aos_state_layout": True,
+        "affine_metric_rhs": True,
+        "interior_face_order": "natural",
+    }
+    baseline = build_cuda_variant(monkeypatch, **options)
+    baseline_rhs = baseline.RHS_operator(
+        baseline.P,
+        baseline.Vx,
+        baseline.Vy,
+        baseline.Vz,
+        clone_bcvar(baseline.BC.BCvar),
+    )
+
+    optimized = build_cuda_variant(
+        monkeypatch,
+        **options,
+        fused_derivative_volume_aos=True,
+    )
+    optimized_rhs = optimized.RHS_operator(
+        optimized.P,
+        optimized.Vx,
+        optimized.Vy,
+        optimized.Vz,
+        clone_bcvar(optimized.BC.BCvar),
+    )
+    torch.cuda.synchronize()
+
+    assert optimized._use_fused_derivative_volume_aos
+    assert optimized._fused_derivative_volume_aos_checked
+    assert_rhs_close(optimized_rhs, baseline_rhs, rtol=RTOL, atol=ATOL)
+
+
+def test_cuda_fused_derivative_volume_aos_short_integration_matches_baseline(
+    monkeypatch,
+):
+    options = {
+        "compact_flux": True,
+        "merged_derivatives": True,
+        "fused_state_accumulation": True,
+        "aos_state_layout": True,
+        "affine_metric_rhs": True,
+        "interior_face_order": "natural",
+    }
+    baseline = build_cuda_variant(monkeypatch, **options)
+    baseline.time_integration(n_time_steps=2, progress=False, use_cuda_graph=True)
+
+    optimized = build_cuda_variant(
+        monkeypatch,
+        **options,
+        fused_derivative_volume_aos=True,
+    )
+    optimized.time_integration(n_time_steps=2, progress=False, use_cuda_graph=True)
+    torch.cuda.synchronize()
+
+    assert optimized._use_fused_derivative_volume_aos
+    assert optimized._fused_derivative_volume_aos_checked
     assert_simulation_state_close(optimized, baseline, rtol=RTOL, atol=ATOL)
 
 

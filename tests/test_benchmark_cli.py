@@ -50,6 +50,8 @@ def assert_common_output(output: str):
         "tilelang_lift_segmented_graph_supported=",
         "tilelang_lift_segmented_graph_fallback_reason=",
         "tilelang_lift_fallback_reason=",
+        "fused_derivative_volume_aos_mode=",
+        "fused_derivative_volume_aos_fallback_reason=",
         "cuda_graph_mode=",
     ):
         assert field in output
@@ -72,6 +74,7 @@ def test_scenario1_benchmark_cli_reports_cpu_metadata():
     assert "cpu_threads=" in output
     assert "interior_face_order=natural" in output
     assert "aos_state_layout:0" in output
+    assert "fused_derivative_volume_aos:0" in output
     assert "tilelang_lift:0" in output
 
 
@@ -90,6 +93,22 @@ def test_scenario1_benchmark_cli_accepts_tilelang_lift_flags():
     assert_common_output(output)
     assert "tilelang_lift_enabled=0" in output
     assert "tilelang_lift_config=bm48_bn64_bk16_s0_t256_fullcol" in output
+
+
+def test_scenario1_benchmark_cli_accepts_fused_derivative_volume_aos_flags():
+    output = run_benchmark(
+        "--device",
+        "cpu",
+        "--steps",
+        "1",
+        "--cpu-threads",
+        "1",
+        "--no-record-receivers",
+        "--enable-fused-derivative-volume-aos",
+    )
+
+    assert_common_output(output)
+    assert "fused_derivative_volume_aos:0" in output
 
 
 def test_scenario1_benchmark_cli_accepts_tilelang_segmented_graph_flags():
