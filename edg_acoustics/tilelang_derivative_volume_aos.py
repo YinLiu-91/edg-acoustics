@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 
 TILELANG_DERIVATIVE_VOLUME_AOS_CONFIG_NAME = (
-    "bp16_be16_bn64_bk16_s0_t256_fullcol"
+    "bp16_be8_bn32_bk16_s0_t128_fullcol"
 )
 
 _M = 35
