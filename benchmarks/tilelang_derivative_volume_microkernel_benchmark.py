@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -219,18 +220,20 @@ def _fp64_derivative_volume_microkernel(
                 for kk, j in T.Parallel(_K_PAD, block_n):
                     elem = bx * block_e + j // 4
                     field = j % 4
+                    n_idx = elem * 4 + field
                     q_shared[kk, j] = T.if_then_else(
-                        (kk < K) & (elem < n_tets),
-                        Q[kk, elem * 4 + field],
+                        (kk < K) & (n_idx < N),
+                        Q[kk, n_idx],
                         T.float64(0.0),
                     )
             else:
                 for j, kk in T.Parallel(block_n, _K_PAD):
                     elem = bx * block_e + j // 4
                     field = j % 4
+                    n_idx = elem * 4 + field
                     q_shared[j, kk] = T.if_then_else(
-                        (kk < K) & (elem < n_tets),
-                        Q[kk, elem * 4 + field],
+                        (kk < K) & (n_idx < N),
+                        Q[kk, n_idx],
                         T.float64(0.0),
                     )
 
@@ -466,6 +469,8 @@ def run_config(args, inputs: aos_bench.KernelInputs, config_name: str, reference
             )
     except Exception as exc:
         print(f"candidate_build_error={type(exc).__name__}: {exc}")
+        if args.debug_traceback:
+            traceback.print_exc()
         return False
 
     baseline_rhs = torch.empty_like(q_by_node)
@@ -710,6 +715,11 @@ def parse_args():
         action="store_true",
         help="Do not pass skip_tensor_validation=True to TileLang calls.",
     )
+    parser.add_argument(
+        "--debug-traceback",
+        action="store_true",
+        help="Print full Python tracebacks for TileLang build and benchmark failures.",
+    )
     return parser.parse_args()
 
 
@@ -761,6 +771,8 @@ def main() -> None:
                 f"reference_{args.reference_config}",
             )
     except Exception as exc:
+        if args.debug_traceback:
+            traceback.print_exc()
         raise RuntimeError(
             f"failed to build reference TileLang derivative-volume kernel {args.reference_config!r}: "
             f"{type(exc).__name__}: {exc}"
