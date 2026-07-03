@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from scenario1_utils import (
+    assert_rhs_close,
     assert_simulation_state_close,
     build_scenario1_simulation,
     clone_bcvar,
@@ -50,6 +51,22 @@ def test_tilelang_lift_rejects_invalid_mode(monkeypatch):
         build_scenario1_simulation(device="cpu")
 
 
+def test_tilelang_derivative_volume_aos_disable_flag_is_reported_on_cpu(monkeypatch):
+    monkeypatch.setenv("EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS", "0")
+    sim = build_scenario1_simulation(device="cpu")
+
+    assert sim._tilelang_derivative_volume_aos_mode == "0"
+    assert not sim._use_tilelang_derivative_volume_aos
+    assert "disabled" in sim._tilelang_derivative_volume_aos_fallback_reason
+
+
+def test_tilelang_derivative_volume_aos_rejects_invalid_mode(monkeypatch):
+    monkeypatch.setenv("EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS", "invalid")
+
+    with pytest.raises(ValueError, match="EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS"):
+        build_scenario1_simulation(device="cpu")
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="TileLang lift runtime test requires CUDA",
@@ -71,6 +88,43 @@ def test_forced_tilelang_lift_falls_back_or_validates(monkeypatch):
         assert sim._tilelang_lift_fallback_reason == ""
     else:
         assert sim._tilelang_lift_fallback_reason
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TileLang derivative-volume AoS runtime test requires CUDA",
+)
+def test_forced_tilelang_derivative_volume_aos_falls_back_or_validates(monkeypatch):
+    monkeypatch.setenv("EDG_ACOUSTICS_AOS_STATE_LAYOUT", "1")
+    monkeypatch.setenv("EDG_ACOUSTICS_AFFINE_METRIC_RHS", "1")
+    monkeypatch.setenv("EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS", "1")
+
+    baseline = build_scenario1_simulation(device="cuda")
+    monkeypatch.setenv("EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS", "0")
+    reference = build_scenario1_simulation(device="cuda")
+
+    baseline_rhs = baseline.RHS_operator(
+        baseline.P,
+        baseline.Vx,
+        baseline.Vy,
+        baseline.Vz,
+        clone_bcvar(baseline.BC.BCvar),
+    )
+    reference_rhs = reference.RHS_operator(
+        reference.P,
+        reference.Vx,
+        reference.Vy,
+        reference.Vz,
+        clone_bcvar(reference.BC.BCvar),
+    )
+    torch.cuda.synchronize()
+
+    assert_rhs_close(baseline_rhs, reference_rhs, rtol=1.0e-10, atol=1.0e-10)
+    if baseline._use_tilelang_derivative_volume_aos:
+        assert baseline._tilelang_derivative_volume_aos_correctness_checked
+        assert baseline._tilelang_derivative_volume_aos_fallback_reason == ""
+    else:
+        assert baseline._tilelang_derivative_volume_aos_fallback_reason
 
 
 @pytest.mark.skipif(
@@ -108,6 +162,38 @@ def test_tilelang_lift_cuda_graph_path_matches_eager(monkeypatch):
     else:
         assert not graphed._use_tilelang_lift_surface
         assert graphed._tilelang_lift_fallback_reason
+
+
+@pytest.mark.skipif(
+    not (torch.cuda.is_available() and TILELANG_AVAILABLE and _is_maca_cuda_runtime()),
+    reason=f"requires CUDA + MACA/MetaX + TileLang: {TILELANG_UNAVAILABLE_REASON}",
+)
+def test_tilelang_derivative_volume_aos_cuda_graph_path_matches_eager(monkeypatch):
+    monkeypatch.setenv("EDG_ACOUSTICS_AOS_STATE_LAYOUT", "1")
+    monkeypatch.setenv("EDG_ACOUSTICS_AFFINE_METRIC_RHS", "1")
+    monkeypatch.setenv("EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS", "1")
+    eager = build_scenario1_simulation(device="cuda")
+    graphed = build_scenario1_simulation(device="cuda")
+
+    eager.time_integration(
+        n_time_steps=1,
+        progress=False,
+        use_cuda_graph=False,
+        record_receivers=False,
+    )
+    graphed.time_integration(
+        n_time_steps=1,
+        progress=False,
+        use_cuda_graph=True,
+        record_receivers=False,
+    )
+    torch.cuda.synchronize()
+
+    assert_simulation_state_close(graphed, eager, rtol=1.0e-10, atol=1.0e-10)
+    assert (
+        graphed._tilelang_derivative_volume_aos_correctness_checked
+        or graphed._tilelang_derivative_volume_aos_fallback_reason
+    )
 
 
 @pytest.mark.skipif(

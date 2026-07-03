@@ -30,7 +30,7 @@ def build_cuda_variant(
     paired_interior_flux: bool = False,
     aos_state_layout: bool | None = False,
     affine_metric_rhs: bool | None = None,
-    fused_derivative_volume_aos: bool = False,
+    fused_derivative_volume_aos: bool | None = False,
     interior_face_order: str | None = "natural",
     interior_face_order_tile_size: int | None = None,
     interior_face_order_block_size: int | None = None,
@@ -60,10 +60,13 @@ def build_cuda_variant(
         monkeypatch.setenv(
             "EDG_ACOUSTICS_AFFINE_METRIC_RHS", "1" if affine_metric_rhs else "0"
         )
-    monkeypatch.setenv(
-        "EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS",
-        "1" if fused_derivative_volume_aos else "0",
-    )
+    if fused_derivative_volume_aos is None:
+        monkeypatch.delenv("EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS", raising=False)
+    else:
+        monkeypatch.setenv(
+            "EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS",
+            "1" if fused_derivative_volume_aos else "0",
+        )
     if interior_face_order is None:
         monkeypatch.delenv("EDG_ACOUSTICS_INTERIOR_FACE_ORDER", raising=False)
     else:
@@ -243,6 +246,26 @@ def test_cuda_fused_derivative_volume_aos_rhs_matches_affine_aos_baseline(
     assert optimized._use_fused_derivative_volume_aos
     assert optimized._fused_derivative_volume_aos_checked
     assert_rhs_close(optimized_rhs, baseline_rhs, rtol=RTOL, atol=ATOL)
+
+
+def test_cuda_fused_derivative_volume_aos_auto_stays_disabled(monkeypatch):
+    monkeypatch.setattr(
+        "edg_acoustics.acoustics_simulation.AcousticsSimulation."
+        "_is_metax_cuda_device",
+        lambda self: True,
+    )
+    optimized = build_cuda_variant(
+        monkeypatch,
+        compact_flux=True,
+        merged_derivatives=True,
+        aos_state_layout=True,
+        affine_metric_rhs=True,
+        fused_derivative_volume_aos=None,
+        interior_face_order="natural",
+    )
+
+    assert not optimized._use_fused_derivative_volume_aos
+    assert "auto disabled" in optimized._fused_derivative_volume_aos_fallback_reason
 
 
 def test_cuda_fused_derivative_volume_aos_short_integration_matches_baseline(

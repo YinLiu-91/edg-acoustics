@@ -52,6 +52,11 @@ def assert_common_output(output: str):
         "tilelang_lift_fallback_reason=",
         "fused_derivative_volume_aos_mode=",
         "fused_derivative_volume_aos_fallback_reason=",
+        "tilelang_derivative_volume_aos_enabled=",
+        "tilelang_derivative_volume_aos_config=",
+        "tilelang_derivative_volume_aos_mode=",
+        "tilelang_derivative_volume_aos_graph_capture_supported=",
+        "tilelang_derivative_volume_aos_fallback_reason=",
         "cuda_graph_mode=",
     ):
         assert field in output
@@ -109,6 +114,23 @@ def test_scenario1_benchmark_cli_accepts_fused_derivative_volume_aos_flags():
 
     assert_common_output(output)
     assert "fused_derivative_volume_aos:0" in output
+
+
+def test_scenario1_benchmark_cli_accepts_tilelang_derivative_volume_aos_flags():
+    output = run_benchmark(
+        "--device",
+        "cpu",
+        "--steps",
+        "1",
+        "--cpu-threads",
+        "1",
+        "--no-record-receivers",
+        "--enable-tilelang-derivative-volume-aos",
+    )
+
+    assert_common_output(output)
+    assert "tilelang_derivative_volume_aos_enabled=0" in output
+    assert "tilelang_derivative_volume_aos:0" in output
 
 
 def test_scenario1_benchmark_cli_accepts_tilelang_segmented_graph_flags():

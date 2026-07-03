@@ -167,6 +167,38 @@ def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_g
         "fused_derivative_volume_aos_fallback_reason="
         f"{fused_derivative_volume_aos_fallback_reason}"
     )
+    tilelang_derivative_volume_graph_supported = getattr(
+        sim, "_tilelang_derivative_volume_aos_graph_capture_supported", None
+    )
+    if tilelang_derivative_volume_graph_supported is None:
+        tilelang_derivative_volume_graph_supported_text = "unknown"
+    else:
+        tilelang_derivative_volume_graph_supported_text = str(
+            int(tilelang_derivative_volume_graph_supported)
+        )
+    tilelang_derivative_volume_fallback_reason = getattr(
+        sim, "_tilelang_derivative_volume_aos_fallback_reason", ""
+    ) or "none"
+    print(
+        "tilelang_derivative_volume_aos_enabled="
+        f"{int(getattr(sim, '_use_tilelang_derivative_volume_aos', False))}"
+    )
+    print(
+        "tilelang_derivative_volume_aos_config="
+        f"{getattr(sim, '_tilelang_derivative_volume_aos_config', 'disabled')}"
+    )
+    print(
+        "tilelang_derivative_volume_aos_mode="
+        f"{getattr(sim, '_tilelang_derivative_volume_aos_mode', 'auto')}"
+    )
+    print(
+        "tilelang_derivative_volume_aos_graph_capture_supported="
+        f"{tilelang_derivative_volume_graph_supported_text}"
+    )
+    print(
+        "tilelang_derivative_volume_aos_fallback_reason="
+        f"{tilelang_derivative_volume_fallback_reason}"
+    )
     print(
         "optimizations="
         f"volume_rhs:{int(sim._use_triton_volume_rhs)},"
@@ -180,6 +212,8 @@ def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_g
         f"derivative_volume:{int(sim._use_triton_derivative_volume)},"
         "fused_derivative_volume_aos:"
         f"{int(getattr(sim, '_use_fused_derivative_volume_aos', False))},"
+        "tilelang_derivative_volume_aos:"
+        f"{int(getattr(sim, '_use_tilelang_derivative_volume_aos', False))},"
         f"lift_surface:{int(sim._use_triton_lift_surface)},"
         f"tilelang_lift:{int(getattr(sim, '_use_tilelang_lift_surface', False))},"
         f"compact_flux:{int(sim._use_compact_flux_coefficients)},"
@@ -396,6 +430,17 @@ def parse_args():
         action="store_true",
         help="Disable the fused derivative+volume AoS kernel.",
     )
+    tilelang_derivative_volume_group = parser.add_mutually_exclusive_group()
+    tilelang_derivative_volume_group.add_argument(
+        "--enable-tilelang-derivative-volume-aos",
+        action="store_true",
+        help="Force the experimental TileLang fused derivative+volume AoS kernel.",
+    )
+    tilelang_derivative_volume_group.add_argument(
+        "--disable-tilelang-derivative-volume-aos",
+        action="store_true",
+        help="Disable the TileLang fused derivative+volume AoS kernel.",
+    )
     parser.add_argument("--enable-triton-lift-surface", action="store_true")
     tilelang_lift_group = parser.add_mutually_exclusive_group()
     tilelang_lift_group.add_argument("--enable-tilelang-lift", action="store_true")
@@ -450,6 +495,10 @@ def main():
         os.environ["EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS"] = "1"
     if args.disable_fused_derivative_volume_aos:
         os.environ["EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS"] = "0"
+    if args.enable_tilelang_derivative_volume_aos:
+        os.environ["EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS"] = "1"
+    if args.disable_tilelang_derivative_volume_aos:
+        os.environ["EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS"] = "0"
     if args.enable_triton_lift_surface:
         os.environ["EDG_ACOUSTICS_TRITON_LIFT_SURFACE"] = "1"
     if args.enable_tilelang_lift:

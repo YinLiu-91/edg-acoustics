@@ -23,6 +23,10 @@ from edg_acoustics.tilelang_lift import (
     TILELANG_LIFT_CONFIG_NAME,
     build_tilelang_lift_kernel,
 )
+from edg_acoustics.tilelang_derivative_volume_aos import (
+    TILELANG_DERIVATIVE_VOLUME_AOS_CONFIG_NAME,
+    build_tilelang_derivative_volume_aos_kernel,
+)
 
 try:
     from line_profiler import profile
@@ -2044,6 +2048,7 @@ class AcousticsSimulation:
         self._rhs_buffer_index = 0
         self._cuda_step_graphs = {}
         self._configure_fused_derivative_volume_aos_backend()
+        self._configure_tilelang_derivative_volume_aos_backend()
         self._configure_tilelang_lift_backend()
 
     def _configure_fused_derivative_volume_aos_backend(self):
@@ -2058,6 +2063,12 @@ class AcousticsSimulation:
         if self._fused_derivative_volume_aos_mode == "0":
             self._fused_derivative_volume_aos_fallback_reason = (
                 "disabled by EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS"
+            )
+            return
+        if self._fused_derivative_volume_aos_mode == "auto":
+            self._fused_derivative_volume_aos_fallback_reason = (
+                "auto disabled after C500 benchmark regression; "
+                "set EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS=1 to force"
             )
             return
 
@@ -2102,6 +2113,231 @@ class AcousticsSimulation:
     def _disable_fused_derivative_volume_aos(self, reason: str):
         self._use_fused_derivative_volume_aos = False
         self._fused_derivative_volume_aos_fallback_reason = reason
+
+    def _configure_tilelang_derivative_volume_aos_backend(self):
+        self._tilelang_derivative_volume_aos_mode = _normalize_env_bool_mode(
+            os.environ.get("EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS"),
+            name="EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS",
+        )
+        self._tilelang_derivative_volume_aos_config = os.environ.get(
+            "EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS_CONFIG",
+            TILELANG_DERIVATIVE_VOLUME_AOS_CONFIG_NAME,
+        )
+        self._use_tilelang_derivative_volume_aos = False
+        self._tilelang_derivative_volume_aos_kernel = None
+        self._tilelang_derivative_volume_aos_update_kernel = None
+        self._tilelang_derivative_volume_aos_accepts_skip_validation = None
+        self._tilelang_derivative_volume_aos_correctness_checked = False
+        self._tilelang_derivative_volume_aos_graph_capture_supported = None
+        self._tilelang_derivative_volume_aos_fallback_reason = ""
+
+        if self._tilelang_derivative_volume_aos_mode == "0":
+            self._tilelang_derivative_volume_aos_fallback_reason = (
+                "disabled by EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS"
+            )
+            return
+        if self._tilelang_derivative_volume_aos_mode == "auto":
+            self._tilelang_derivative_volume_aos_fallback_reason = (
+                "auto disabled pending C500 fused TileLang benchmark; "
+                "set EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS=1 to force"
+            )
+            return
+
+        reason = self._tilelang_derivative_volume_aos_unsupported_reason()
+        if reason:
+            self._tilelang_derivative_volume_aos_fallback_reason = reason
+            return
+        self._use_tilelang_derivative_volume_aos = True
+
+    def _tilelang_derivative_volume_aos_unsupported_reason(self) -> str:
+        if self.device.type != "cuda":
+            return "requires CUDA tensors"
+        if self.Np != 35:
+            return f"requires Np=35, got {self.Np}"
+        if self.Nfp != 15:
+            return f"requires Nfp=15, got {self.Nfp}"
+        if device_ini.dtype != torch.float64:
+            return f"requires fp64, got {device_ini.dtype}"
+        if not self._use_aos_state_layout:
+            return "requires AoS state layout"
+        if not self._use_triton_volume_rhs:
+            return "requires Triton volume RHS"
+        if not self._use_triton_volume_surface_rhs:
+            return "requires Triton volume-surface RHS"
+        if not self._use_affine_metric_rhs:
+            return "requires affine metric RHS"
+        if not self._use_aos_volume_vector_loads:
+            return "requires AoS vector volume loads"
+        if (
+            not self.Dr.is_contiguous()
+            or not self.Ds.is_contiguous()
+            or not self.Dt.is_contiguous()
+        ):
+            return "requires contiguous derivative matrices"
+        if self._metric_p_affine.dtype != torch.float64:
+            return f"requires fp64 metric buffers, got {self._metric_p_affine.dtype}"
+        if self._surface_by_node.shape != (35, 4 * self.N_tets):
+            return (
+                "requires surface_by_node shape "
+                f"(35, {4 * self.N_tets}), got {tuple(self._surface_by_node.shape)}"
+            )
+        return ""
+
+    def _disable_tilelang_derivative_volume_aos(self, reason: str):
+        self._use_tilelang_derivative_volume_aos = False
+        self._tilelang_derivative_volume_aos_kernel = None
+        self._tilelang_derivative_volume_aos_update_kernel = None
+        self._tilelang_derivative_volume_aos_fallback_reason = reason
+
+    def _ensure_tilelang_derivative_volume_aos_kernel(
+        self,
+        *,
+        update_state: bool,
+    ) -> bool:
+        if not self._use_tilelang_derivative_volume_aos:
+            return False
+        attr = (
+            "_tilelang_derivative_volume_aos_update_kernel"
+            if update_state
+            else "_tilelang_derivative_volume_aos_kernel"
+        )
+        if getattr(self, attr) is not None:
+            return True
+        try:
+            kernel = build_tilelang_derivative_volume_aos_kernel(
+                self.N_tets,
+                config_name=self._tilelang_derivative_volume_aos_config,
+                update_state=update_state,
+            )
+        except Exception as exc:
+            self._disable_tilelang_derivative_volume_aos(
+                f"compile/import failed: {_short_exception(exc)}"
+            )
+            return False
+        setattr(self, attr, kernel)
+        return True
+
+    def _invoke_tilelang_derivative_volume_aos_kernel(
+        self,
+        q_by_node: torch.tensor,
+        rhs_by_node: torch.tensor,
+        surface_by_node: torch.tensor,
+        q_update: torch.tensor | None = None,
+        coefficient: float = 0.0,
+    ):
+        update_state = q_update is not None
+        if not self._ensure_tilelang_derivative_volume_aos_kernel(
+            update_state=update_state
+        ):
+            return False
+
+        kernel = (
+            self._tilelang_derivative_volume_aos_update_kernel
+            if update_state
+            else self._tilelang_derivative_volume_aos_kernel
+        )
+        q_update_arg = q_update if q_update is not None else rhs_by_node
+        self._coefficient_tensor.fill_(coefficient)
+        args = (
+            q_by_node,
+            self.Dr,
+            self.Ds,
+            self.Dt,
+            self._metric_p_affine,
+            self._metric_v_affine,
+            surface_by_node,
+            rhs_by_node,
+            q_update_arg,
+            self._coefficient_tensor,
+        )
+
+        if self._tilelang_derivative_volume_aos_accepts_skip_validation is not False:
+            try:
+                kernel(*args, skip_tensor_validation=True)
+                self._tilelang_derivative_volume_aos_accepts_skip_validation = True
+                return True
+            except TypeError:
+                if self._tilelang_derivative_volume_aos_accepts_skip_validation is True:
+                    raise
+                self._tilelang_derivative_volume_aos_accepts_skip_validation = False
+
+        kernel(*args)
+        return True
+
+    def _validate_tilelang_derivative_volume_aos(
+        self,
+        q_by_node: torch.tensor,
+        rhs_by_node: torch.tensor,
+        surface_by_node: torch.tensor,
+        q_update: torch.tensor | None = None,
+        coefficient: float = 0.0,
+    ) -> bool:
+        if self._tilelang_derivative_volume_aos_correctness_checked:
+            return True
+        try:
+            reference_rhs = torch.empty_like(rhs_by_node)
+            candidate_rhs = torch.empty_like(rhs_by_node)
+            reference_update = q_update.clone() if q_update is not None else None
+            candidate_update = q_update.clone() if q_update is not None else None
+
+            self._compute_packed_derivatives(q_by_node)
+            total_nodes = self.Np * self.N_tets
+            block_size = 128
+            volume_surface_rhs_affine_metric_aos_vector_kernel[
+                (triton.cdiv(total_nodes, block_size),)
+            ](
+                self._dQdr_by_node,
+                self._dQds_by_node,
+                self._dQdt_by_node,
+                self._metric_p_affine,
+                self._metric_v_affine,
+                surface_by_node,
+                reference_rhs,
+                reference_update if reference_update is not None else reference_rhs,
+                total_nodes,
+                self.N_tets,
+                4 * self.N_tets,
+                coefficient,
+                reference_update is not None,
+                BLOCK_SIZE=block_size,
+            )
+            if not self._invoke_tilelang_derivative_volume_aos_kernel(
+                q_by_node,
+                candidate_rhs,
+                surface_by_node,
+                candidate_update,
+                coefficient,
+            ):
+                return False
+            if self.device.type == "cuda":
+                torch.cuda.synchronize()
+
+            if not torch.allclose(
+                candidate_rhs, reference_rhs, rtol=1.0e-10, atol=1.0e-10
+            ):
+                diff = (candidate_rhs - reference_rhs).abs()
+                self._disable_tilelang_derivative_volume_aos(
+                    "correctness validation failed: "
+                    f"rhs max_abs={diff.max().item():.6e}"
+                )
+                return False
+            if candidate_update is not None and not torch.allclose(
+                candidate_update, reference_update, rtol=1.0e-10, atol=1.0e-10
+            ):
+                diff = (candidate_update - reference_update).abs()
+                self._disable_tilelang_derivative_volume_aos(
+                    "correctness validation failed: "
+                    f"state max_abs={diff.max().item():.6e}"
+                )
+                return False
+        except Exception as exc:
+            self._disable_tilelang_derivative_volume_aos(
+                f"correctness validation failed: {_short_exception(exc)}"
+            )
+            return False
+
+        self._tilelang_derivative_volume_aos_correctness_checked = True
+        return True
 
     def _configure_tilelang_lift_backend(self):
         self._tilelang_lift_mode = _normalize_env_bool_mode(
@@ -2745,6 +2981,38 @@ class AcousticsSimulation:
         q_source_by_node: torch.tensor | None = None,
     ):
         rhs_by_node = self._packed_rhs_buffer_for_view(rhs_view)
+        if (
+            self._use_tilelang_derivative_volume_aos
+            and surface_by_node is not None
+            and q_source_by_node is not None
+        ):
+            if self._tilelang_derivative_volume_aos_correctness_checked:
+                if self._invoke_tilelang_derivative_volume_aos_kernel(
+                    q_source_by_node,
+                    rhs_by_node,
+                    surface_by_node,
+                    q_update,
+                    coefficient,
+                ):
+                    return
+            elif not _is_cuda_graph_capture_active() and (
+                self._validate_tilelang_derivative_volume_aos(
+                    q_source_by_node,
+                    rhs_by_node,
+                    surface_by_node,
+                    q_update,
+                    coefficient,
+                )
+            ):
+                if self._invoke_tilelang_derivative_volume_aos_kernel(
+                    q_source_by_node,
+                    rhs_by_node,
+                    surface_by_node,
+                    q_update,
+                    coefficient,
+                ):
+                    return
+
         if (
             self._use_fused_derivative_volume_aos
             and surface_by_node is not None
@@ -3415,6 +3683,8 @@ class AcousticsSimulation:
             f"chunk_steps={chunk_steps} "
             f"record_receivers={int(record_receivers)} "
             f"tilelang_lift={int(self._use_tilelang_lift_surface)} "
+            "tilelang_derivative_volume_aos="
+            f"{int(self._use_tilelang_derivative_volume_aos)} "
             f"segmented_mode={self._tilelang_segmented_graph_mode}"
         )
 
@@ -3427,6 +3697,7 @@ class AcousticsSimulation:
             )
 
         tilelang_retry_done = False
+        tilelang_derivative_volume_retry_done = False
         while True:
             snapshot = self._snapshot_time_state()
             self._run_cuda_step_chunk(chunk_steps, sample_chunk)
@@ -3443,6 +3714,8 @@ class AcousticsSimulation:
                 graph = self._capture_full_cuda_step_graph(chunk_steps, sample_chunk)
                 if self._validate_cuda_step_graph(graph, snapshot, expected_snapshot):
                     self._mark_tilelang_lift_cuda_graph_validated()
+                    if self._use_tilelang_derivative_volume_aos:
+                        self._tilelang_derivative_volume_aos_graph_capture_supported = True
                     self._cuda_step_graphs[key] = (graph, sample_chunk, "full")
                     self._log_cuda_graph_selection("selected mode=full")
                     return self._cuda_step_graphs[key]
@@ -3472,6 +3745,8 @@ class AcousticsSimulation:
                     graph, snapshot, expected_snapshot
                 ):
                     self._mark_tilelang_lift_segmented_cuda_graph_validated()
+                    if self._use_tilelang_derivative_volume_aos:
+                        self._tilelang_derivative_volume_aos_graph_capture_supported = True
                     self._cuda_step_graphs[key] = (
                         graph,
                         sample_chunk,
@@ -3496,12 +3771,30 @@ class AcousticsSimulation:
                 self._log_cuda_graph_selection("fallback_full_try tilelang_lift=0")
                 graph = self._capture_full_cuda_step_graph(chunk_steps, sample_chunk)
                 if self._validate_cuda_step_graph(graph, snapshot, expected_snapshot):
+                    if self._use_tilelang_derivative_volume_aos:
+                        self._tilelang_derivative_volume_aos_graph_capture_supported = True
                     self._cuda_step_graphs[key] = (graph, sample_chunk, "full")
                     self._log_cuda_graph_selection(
                         "selected mode=full tilelang_lift=0"
                     )
                     return self._cuda_step_graphs[key]
                 self._log_cuda_graph_selection("fallback_full_valid=0")
+
+            if (
+                self._use_tilelang_derivative_volume_aos
+                and not tilelang_derivative_volume_retry_done
+            ):
+                fallback_reason = (
+                    "cuda graph replay validation failed; falling back from "
+                    "TileLang derivative-volume AoS"
+                )
+                self._tilelang_derivative_volume_aos_graph_capture_supported = False
+                self._disable_tilelang_derivative_volume_aos(fallback_reason)
+                self._log_cuda_graph_selection(
+                    f"tilelang_derivative_volume_aos_disable reason={fallback_reason}"
+                )
+                tilelang_derivative_volume_retry_done = True
+                continue
 
             if self._use_tilelang_lift_surface and not tilelang_retry_done:
                 self._tilelang_lift_graph_capture_supported = False
@@ -4408,6 +4701,10 @@ class AcousticsSimulation:
         if (
             not self._use_triton_derivative_volume
             and not self._use_fused_derivative_volume_aos
+            and not (
+                self._use_tilelang_derivative_volume_aos
+                and self._tilelang_derivative_volume_aos_correctness_checked
+            )
         ):
             self._compute_packed_derivatives(q_by_node)
         self._compute_interior_flux(q_by_node)

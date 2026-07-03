@@ -138,12 +138,15 @@ Several deeper kernels are implemented and benchmark-gated because they do not a
 - fused state accumulation fuses RHS write with `Q_flat += coefficient * RHS_Q`;
 - `EDG_ACOUSTICS_PAIRED_INTERIOR_FLUX=1` computes each physical interior face-node pair once and writes both element-side fluxes;
 - `EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME=1` combines derivative application and volume RHS;
-- `EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS=auto|1|0` fuses the AoS derivative, affine metric volume RHS, surface add, and optional state accumulation;
+- `EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS=1|0` fuses the AoS derivative, affine metric volume RHS, surface add, and optional state accumulation as an opt-in experiment;
+- `EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS=1|0` runs a forced-only TileLang GEMM-like fused AoS derivative-volume experiment;
 - `EDG_ACOUSTICS_TRITON_LIFT_SURFACE=1` replaces `lift @ Flux_flat` with a direct Triton lift kernel.
 
 Fused state accumulation is now enabled automatically for CUDA meshes with at least `10_000` tetrahedra because the generated fine-geometry profile mesh benefits from it. Override with `EDG_ACOUSTICS_FUSED_STATE_ACCUMULATION=0` or `1`. The old SOA derivative-volume and lift-surface Triton kernels remain default-off because they were slower on the tested V100/profile-mesh shape.
 
-The fused derivative-volume AoS kernel is a C500-oriented path added after profiling showed the derivative DGEMM dominated runtime on MetaX while the hand-written flux and affine volume kernels were bandwidth-favorable. In `auto` mode it only enables on CUDA MetaX/MACA devices with fp64, `Np=35`, `Nfp=15`, AoS state layout, affine metrics, and AoS vector volume loads. Forced mode (`=1`) keeps those shape/layout checks but skips the MetaX device gate for validation. The first eager call validates against the existing derivative + affine AoS volume-surface path before it can be used as the steady backend.
+The fused derivative-volume AoS kernel is a C500-oriented experiment added after profiling showed the derivative DGEMM dominated runtime on MetaX while the hand-written flux and affine volume kernels were bandwidth-favorable. It is not enabled automatically: the first implementation is correct but slower on the C500 profile mesh because it computes each `(node, element)` output independently, which loses the tile reuse of the DGEMM path and increases register pressure. Forced mode (`=1`) requires CUDA fp64, `Np=35`, `Nfp=15`, AoS state layout, affine metrics, and AoS vector volume loads. The first eager call validates against the existing derivative + affine AoS volume-surface path before it can be used as the steady backend.
+
+The TileLang derivative-volume AoS path is the replacement experiment for that per-output Triton kernel. It computes `Dr/Ds/Dt @ Q` as GEMM-like tiles, reuses the same `Q` shared tile for all three derivative matrices, and applies the affine volume/surface epilogue before writing RHS. It is forced-only because standalone derivative TileLang GEMM on C500 was measured at about `0.97x` of mcBLAS for the large derivative shape, so any win must come from fusing away the intermediate `dQ` global memory traffic. Use `benchmarks/tilelang_derivative_volume_aos_benchmark.py --sweep` before considering default enablement.
 
 ### 10. CUDA Graph replay and optional chunking
 
@@ -301,9 +304,10 @@ That is why the next-tier experiments were treated differently:
 - `EDG_ACOUSTICS_FUSED_STATE_ACCUMULATION=1`
 - `EDG_ACOUSTICS_TRITON_DERIVATIVE_VOLUME=1`
 - `EDG_ACOUSTICS_FUSED_DERIVATIVE_VOLUME_AOS=1`
+- `EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS=1`
 - `EDG_ACOUSTICS_TRITON_LIFT_SURFACE=1`
 
-On the original 305-tet scenario1 shape, these paths were **correct** but did not consistently beat the default path. On the 45,285-tet profile mesh, fused state accumulation was consistently faster and is now size-gated on by default. The old SOA derivative-volume and lift-surface Triton paths remained slower and stay opt-in. The AoS fused derivative-volume path is separate: it targets the C500 profile where standalone TileLang derivative GEMM did not beat mcBLAS, so the next step is removing the derivative intermediate traffic and folding derivative + affine volume in one kernel.
+On the original 305-tet scenario1 shape, these paths were **correct** but did not consistently beat the default path. On the 45,285-tet profile mesh, fused state accumulation was consistently faster and is now size-gated on by default. The old SOA derivative-volume and lift-surface Triton paths remained slower and stay opt-in. The AoS fused derivative-volume path is separate: standalone TileLang derivative GEMM did not beat mcBLAS, and the first per-output fused AoS kernel also regressed, so the active experiment is now the forced-only TileLang GEMM-like fused version.
 
 ### Fine-geometry profile mesh pass
 
