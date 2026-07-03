@@ -498,6 +498,8 @@ def run_config(args, inputs: KernelInputs, config_name: str) -> bool:
     print(f"block_p={config.block_p}")
     print(f"block_e={config.block_e}")
     print(f"block_n={config.block_n}")
+    print(f"field_n={config.field_n}")
+    print(f"pair_n={config.pair_n}")
     print(f"block_k={config.block_k}")
     print(f"num_stages={config.num_stages}")
     print(f"threads={config.threads}")

@@ -51,14 +51,15 @@ class DerivativeVolumeAosConfig:
 
     @property
     def field_n(self) -> int:
-        return max(self.block_e, 16)
+        return max(self.block_e, 16 * max(self.threads // 64, 1))
 
     @property
     def pair_n(self) -> int:
-        return max(2 * self.block_e, 16)
+        return max(2 * self.block_e, 16 * max(self.threads // 64, 1))
 
     @property
     def explicit_shared_memory_bytes(self) -> int:
+        output_elements = 2 * self.block_p * self.block_n
         if self.variant == "field_fragments":
             elements = 3 * self.block_p * self.block_k + self.field_n * self.block_k
         elif self.variant == "field_pairs":
@@ -75,7 +76,7 @@ class DerivativeVolumeAosConfig:
                 + self.block_n * self.block_k
                 + 3 * self.block_p * self.block_n
             )
-        return elements * 8
+        return (elements + output_elements) * 8
 
 
 _CONFIGS: dict[str, DerivativeVolumeAosConfig] = {
@@ -218,8 +219,8 @@ def _fp64_derivative_volume_aos(
     policy,
     variant,
 ):
-    field_n = max(block_e, 16)
-    pair_n = max(2 * block_e, 16)
+    field_n = max(block_e, 16 * max(threads // 64, 1))
+    pair_n = max(2 * block_e, 16 * max(threads // 64, 1))
     if variant in (_VARIANT_COPY_SHARED, _VARIANT_DIRECT_EPILOGUE):
         @T.prim_func
         def main(
@@ -244,6 +245,9 @@ def _fp64_derivative_volume_aos(
                 acc_r = T.alloc_fragment((block_p, block_n), T.float64)
                 acc_s = T.alloc_fragment((block_p, block_n), T.float64)
                 acc_t = T.alloc_fragment((block_p, block_n), T.float64)
+                rhs_shared = T.alloc_shared((block_p, block_n), T.float64)
+                if update_state:
+                    q_update_shared = T.alloc_shared((block_p, block_n), T.float64)
                 if variant == _VARIANT_COPY_SHARED:
                     acc_r_shared = T.alloc_shared((block_p, block_n), T.float64)
                     acc_s_shared = T.alloc_shared((block_p, block_n), T.float64)
@@ -345,15 +349,25 @@ def _fp64_derivative_volume_aos(
                             + surface[node, c + 3]
                         )
 
-                        rhs[node, c] = rhs_p
-                        rhs[node, c + 1] = rhs_vx
-                        rhs[node, c + 2] = rhs_vy
-                        rhs[node, c + 3] = rhs_vz
+                        rhs_shared[i, lc] = rhs_p
+                        rhs_shared[i, lc + 1] = rhs_vx
+                        rhs_shared[i, lc + 2] = rhs_vy
+                        rhs_shared[i, lc + 3] = rhs_vz
                         if update_state:
-                            q_update[node, c] = q_update[node, c] + coeff * rhs_p
-                            q_update[node, c + 1] = q_update[node, c + 1] + coeff * rhs_vx
-                            q_update[node, c + 2] = q_update[node, c + 2] + coeff * rhs_vy
-                            q_update[node, c + 3] = q_update[node, c + 3] + coeff * rhs_vz
+                            q_update_shared[i, lc] = q_update[node, c] + coeff * rhs_p
+                            q_update_shared[i, lc + 1] = (
+                                q_update[node, c + 1] + coeff * rhs_vx
+                            )
+                            q_update_shared[i, lc + 2] = (
+                                q_update[node, c + 2] + coeff * rhs_vy
+                            )
+                            q_update_shared[i, lc + 3] = (
+                                q_update[node, c + 3] + coeff * rhs_vz
+                            )
+
+                T.copy(rhs_shared, rhs[by * block_p, bx * block_n])
+                if update_state:
+                    T.copy(q_update_shared, q_update[by * block_p, bx * block_n])
 
         return main
 
@@ -378,6 +392,9 @@ def _fp64_derivative_volume_aos(
                 ds_shared = T.alloc_shared((block_p, block_k), T.float64)
                 dt_shared = T.alloc_shared((block_p, block_k), T.float64)
                 q_field_shared = T.alloc_shared((field_n, block_k), T.float64)
+                rhs_shared = T.alloc_shared((block_p, block_n), T.float64)
+                if update_state:
+                    q_update_shared = T.alloc_shared((block_p, block_n), T.float64)
                 p_r_acc = T.alloc_fragment((block_p, field_n), T.float64)
                 p_s_acc = T.alloc_fragment((block_p, field_n), T.float64)
                 p_t_acc = T.alloc_fragment((block_p, field_n), T.float64)
@@ -444,6 +461,7 @@ def _fp64_derivative_volume_aos(
                     elem = bx * block_e + e
                     if node < M and elem < n_tets:
                         c = elem * 4
+                        lc = e * 4
                         p_r = p_r_acc[i, e]
                         p_s = p_s_acc[i, e]
                         p_t = p_t_acc[i, e]
@@ -488,15 +506,25 @@ def _fp64_derivative_volume_aos(
                             + surface[node, c + 3]
                         )
 
-                        rhs[node, c] = rhs_p
-                        rhs[node, c + 1] = rhs_vx
-                        rhs[node, c + 2] = rhs_vy
-                        rhs[node, c + 3] = rhs_vz
+                        rhs_shared[i, lc] = rhs_p
+                        rhs_shared[i, lc + 1] = rhs_vx
+                        rhs_shared[i, lc + 2] = rhs_vy
+                        rhs_shared[i, lc + 3] = rhs_vz
                         if update_state:
-                            q_update[node, c] = q_update[node, c] + coeff * rhs_p
-                            q_update[node, c + 1] = q_update[node, c + 1] + coeff * rhs_vx
-                            q_update[node, c + 2] = q_update[node, c + 2] + coeff * rhs_vy
-                            q_update[node, c + 3] = q_update[node, c + 3] + coeff * rhs_vz
+                            q_update_shared[i, lc] = q_update[node, c] + coeff * rhs_p
+                            q_update_shared[i, lc + 1] = (
+                                q_update[node, c + 1] + coeff * rhs_vx
+                            )
+                            q_update_shared[i, lc + 2] = (
+                                q_update[node, c + 2] + coeff * rhs_vy
+                            )
+                            q_update_shared[i, lc + 3] = (
+                                q_update[node, c + 3] + coeff * rhs_vz
+                            )
+
+                T.copy(rhs_shared, rhs[by * block_p, bx * block_n])
+                if update_state:
+                    T.copy(q_update_shared, q_update[by * block_p, bx * block_n])
 
         return main
 
@@ -520,6 +548,9 @@ def _fp64_derivative_volume_aos(
             ds_shared = T.alloc_shared((block_p, block_k), T.float64)
             dt_shared = T.alloc_shared((block_p, block_k), T.float64)
             q_pair_shared = T.alloc_shared((pair_n, block_k), T.float64)
+            rhs_shared = T.alloc_shared((block_p, block_n), T.float64)
+            if update_state:
+                q_update_shared = T.alloc_shared((block_p, block_n), T.float64)
             pair0_r_acc = T.alloc_fragment((block_p, pair_n), T.float64)
             pair0_s_acc = T.alloc_fragment((block_p, pair_n), T.float64)
             pair0_t_acc = T.alloc_fragment((block_p, pair_n), T.float64)
@@ -581,6 +612,7 @@ def _fp64_derivative_volume_aos(
                 elem = bx * block_e + e
                 if node < M and elem < n_tets:
                     c = elem * 4
+                    lc = e * 4
                     pair_col = e * 2
                     p_r = pair0_r_shared[i, pair_col]
                     p_s = pair0_s_shared[i, pair_col]
@@ -626,15 +658,25 @@ def _fp64_derivative_volume_aos(
                         + surface[node, c + 3]
                     )
 
-                    rhs[node, c] = rhs_p
-                    rhs[node, c + 1] = rhs_vx
-                    rhs[node, c + 2] = rhs_vy
-                    rhs[node, c + 3] = rhs_vz
+                    rhs_shared[i, lc] = rhs_p
+                    rhs_shared[i, lc + 1] = rhs_vx
+                    rhs_shared[i, lc + 2] = rhs_vy
+                    rhs_shared[i, lc + 3] = rhs_vz
                     if update_state:
-                        q_update[node, c] = q_update[node, c] + coeff * rhs_p
-                        q_update[node, c + 1] = q_update[node, c + 1] + coeff * rhs_vx
-                        q_update[node, c + 2] = q_update[node, c + 2] + coeff * rhs_vy
-                        q_update[node, c + 3] = q_update[node, c + 3] + coeff * rhs_vz
+                        q_update_shared[i, lc] = q_update[node, c] + coeff * rhs_p
+                        q_update_shared[i, lc + 1] = (
+                            q_update[node, c + 1] + coeff * rhs_vx
+                        )
+                        q_update_shared[i, lc + 2] = (
+                            q_update[node, c + 2] + coeff * rhs_vy
+                        )
+                        q_update_shared[i, lc + 3] = (
+                            q_update[node, c + 3] + coeff * rhs_vz
+                        )
+
+            T.copy(rhs_shared, rhs[by * block_p, bx * block_n])
+            if update_state:
+                T.copy(q_update_shared, q_update[by * block_p, bx * block_n])
 
     return main
 
