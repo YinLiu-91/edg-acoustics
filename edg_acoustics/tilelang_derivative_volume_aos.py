@@ -115,8 +115,8 @@ def _fp64_derivative_volume_aos(
         Dr: T.Tensor((M, K), T.float64),
         Ds: T.Tensor((M, K), T.float64),
         Dt: T.Tensor((M, K), T.float64),
-        metric_p: T.Tensor((9 * n_tets,), T.float64),
-        metric_v: T.Tensor((9 * n_tets,), T.float64),
+        metric_p: T.Tensor((3, 3, n_tets), T.float64),
+        metric_v: T.Tensor((3, 3, n_tets), T.float64),
         surface: T.Tensor((M, N), T.float64),
         rhs: T.Tensor((M, N), T.float64),
         q_update: T.Tensor((M, N), T.float64),
@@ -198,16 +198,6 @@ def _fp64_derivative_volume_aos(
                     c = elem * 4
                     lc = e * 4
 
-                    m00 = elem
-                    m10 = 3 * n_tets + elem
-                    m20 = 6 * n_tets + elem
-                    m01 = n_tets + elem
-                    m11 = 4 * n_tets + elem
-                    m21 = 7 * n_tets + elem
-                    m02 = 2 * n_tets + elem
-                    m12 = 5 * n_tets + elem
-                    m22 = 8 * n_tets + elem
-
                     p_r = acc_r_shared[i, lc]
                     p_s = acc_s_shared[i, lc]
                     p_t = acc_t_shared[i, lc]
@@ -222,33 +212,33 @@ def _fp64_derivative_volume_aos(
                     vz_t = acc_t_shared[i, lc + 3]
 
                     rhs_p = (
-                        metric_p[m00] * vx_r
-                        + metric_p[m10] * vx_s
-                        + metric_p[m20] * vx_t
-                        + metric_p[m01] * vy_r
-                        + metric_p[m11] * vy_s
-                        + metric_p[m21] * vy_t
-                        + metric_p[m02] * vz_r
-                        + metric_p[m12] * vz_s
-                        + metric_p[m22] * vz_t
+                        metric_p[0, 0, elem] * vx_r
+                        + metric_p[1, 0, elem] * vx_s
+                        + metric_p[2, 0, elem] * vx_t
+                        + metric_p[0, 1, elem] * vy_r
+                        + metric_p[1, 1, elem] * vy_s
+                        + metric_p[2, 1, elem] * vy_t
+                        + metric_p[0, 2, elem] * vz_r
+                        + metric_p[1, 2, elem] * vz_s
+                        + metric_p[2, 2, elem] * vz_t
                         + surface[node, c]
                     )
                     rhs_vx = (
-                        metric_v[m00] * p_r
-                        + metric_v[m10] * p_s
-                        + metric_v[m20] * p_t
+                        metric_v[0, 0, elem] * p_r
+                        + metric_v[1, 0, elem] * p_s
+                        + metric_v[2, 0, elem] * p_t
                         + surface[node, c + 1]
                     )
                     rhs_vy = (
-                        metric_v[m01] * p_r
-                        + metric_v[m11] * p_s
-                        + metric_v[m21] * p_t
+                        metric_v[0, 1, elem] * p_r
+                        + metric_v[1, 1, elem] * p_s
+                        + metric_v[2, 1, elem] * p_t
                         + surface[node, c + 2]
                     )
                     rhs_vz = (
-                        metric_v[m02] * p_r
-                        + metric_v[m12] * p_s
-                        + metric_v[m22] * p_t
+                        metric_v[0, 2, elem] * p_r
+                        + metric_v[1, 2, elem] * p_s
+                        + metric_v[2, 2, elem] * p_t
                         + surface[node, c + 3]
                     )
 
