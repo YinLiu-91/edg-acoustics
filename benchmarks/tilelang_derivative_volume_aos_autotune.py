@@ -237,7 +237,7 @@ def _build_autotune_impl(
         warmup=tune_warmup,
         rep=tune_rep,
         skip_check=True,
-        cache_input_tensors=True,
+        cache_input_tensors=False,
     )
     @tilelang.jit(out_idx=[7, 8])
     def derivative_volume_aos(
@@ -569,13 +569,32 @@ def main() -> None:
             update_state,
         )
 
-    best_kernel = best_result.kernel
+    if hasattr(best_result, "kernel"):
+        best_kernel = best_result.kernel
+        best_latency = best_result.latency
+        best_config = best_result.config
+        best_ref_latency = best_result.ref_latency
+    else:
+        best_kernel = best_result
+        tuner_result = (
+            best_kernel.get_tuner_result()
+            if hasattr(best_kernel, "get_tuner_result")
+            else None
+        )
+        if tuner_result is None:
+            raise RuntimeError(
+                "TileLang autotune returned a kernel without tuner metadata"
+            )
+        best_latency = tuner_result["latency"]
+        best_config = tuner_result["config"]
+        best_ref_latency = tuner_result["ref_latency"]
+
     if best_kernel is None:
         raise RuntimeError("TileLang autotune did not return a compiled kernel")
 
-    print(f"autotune_best_latency_ms={best_result.latency:.6f}")
-    print(f"autotune_best_config={best_result.config}")
-    print(f"autotune_ref_latency_ms={best_result.ref_latency}")
+    print(f"autotune_best_latency_ms={best_latency:.6f}")
+    print(f"autotune_best_config={best_config}")
+    print(f"autotune_ref_latency_ms={best_ref_latency}")
     if args.export_sources is not None:
         args.export_sources.mkdir(parents=True, exist_ok=True)
         aos_bench.export_candidate_sources(
