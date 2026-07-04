@@ -66,6 +66,8 @@ def test_c500_next_configs_focus_on_fullcol_derivative_winner():
     )
     names = {config.name for config in configs}
 
+    assert "bm128_bn64_bk4_s0_t256_fullcol" in names
+    assert "bm128_bn64_bk4_s1_t256_fullcol" in names
     assert "bm112_bn64_bk12_s1_t256_fullcol" in names
     assert "bm112_bn64_bk12_s0_t256_fullcol" in names
     assert all(config.policy == "fullcol" for config in configs)

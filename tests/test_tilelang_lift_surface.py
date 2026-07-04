@@ -77,7 +77,7 @@ def test_tilelang_derivative_gemm_disable_flag_is_reported_on_cpu(monkeypatch):
 
     assert sim._tilelang_derivative_gemm_mode == "0"
     assert not sim._use_tilelang_derivative_gemm
-    assert sim._tilelang_derivative_gemm_config == "bm112_bn64_bk12_s1_t256_fullcol"
+    assert sim._tilelang_derivative_gemm_config == "bm128_bn64_bk4_s0_t256_fullcol"
     assert "disabled" in sim._tilelang_derivative_gemm_fallback_reason
 
 

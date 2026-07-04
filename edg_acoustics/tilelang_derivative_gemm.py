@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-TILELANG_DERIVATIVE_GEMM_CONFIG_NAME = "bm112_bn64_bk12_s1_t256_fullcol"
+TILELANG_DERIVATIVE_GEMM_CONFIG_NAME = "bm128_bn64_bk4_s0_t256_fullcol"
 
 _DERIVATIVE_M = 105
 _DERIVATIVE_K = 35
-_BLOCK_M = 112
+_BLOCK_M = 128
 _BLOCK_N = 64
-_BLOCK_K = 12
-_NUM_STAGES = 1
+_BLOCK_K = 4
+_NUM_STAGES = 0
 _THREADS = 256
 
 T = None

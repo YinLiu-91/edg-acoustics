@@ -50,8 +50,23 @@ long-column 规模，用来放大 steady-state kernel 差异。对配置选择�
 当前运行时固定接入的 TileLang derivative GEMM 配置为：
 
 ```text
-bm112_bn64_bk12_s1_t256_fullcol
+bm128_bn64_bk4_s0_t256_fullcol
 ```
+
+2026-07-04 更新：
+
+- repo 早先默认值是 `bm112_bn64_bk12_s1_t256_fullcol`；
+- 最新 `c500-next` focused sweep 显示，在真实 timestep 更接近的 `N=181140` 上，
+  `bm128_bn64_bk4_s0_t256_fullcol` 为 `0.541696 ms`, `2.457797 TFLOPS`,
+  `speedup=1.391x`；
+- 对比旧默认 `bm112_bn64_bk12_s1_t256_fullcol` 的 `0.583936 ms`,
+  `2.280009 TFLOPS`, `speedup=1.291x`，新配置在代表性 runtime 列规模上快约
+  `7%`；
+- 在更大的 `N=1377572` 上，新配置也仍然领先，`bm128_bn64_bk4_s1_t256_fullcol`
+  达到 `3.6348 ms`, `2.7856 TFLOPS`, `speedup=1.463x`。
+
+因此代码默认值已经切换到 `bm128_bn64_bk4_s0_t256_fullcol`。本文档后面的
+`bm112_*` 结果保留为历史测量记录，用来说明这条优化路线的演进过程。
 
 对应代码：
 
@@ -275,7 +290,11 @@ standalone sweep 中，最优 derivative GEMM 相对 baseline 大约是：
 
 ## 当前结论
 
-在 MetaX C500 上，`bm112_bn64_bk12_s1_t256_fullcol` 已经证明是：
+在 MetaX C500 上，新的 runtime 默认 `bm128_bn64_bk4_s0_t256_fullcol` 已经有充足
+standalone 证据表明它优于旧默认 `bm112_bn64_bk12_s1_t256_fullcol`，尤其是在真实
+timestep 更接近的 `N=181140` 上。
+
+同时，`bm112_bn64_bk12_s1_t256_fullcol` 仍然保留了以下已验证历史结论：
 
 - derivative GEMM standalone 最优配置；
 - 可以安全接入真实 timestep；
@@ -285,7 +304,7 @@ standalone sweep 中，最优 derivative GEMM 相对 baseline 大约是：
 因此当前推荐结论是：
 
 1. 保留 `bm48_bn64_bk16_s0_t256_fullcol` 作为 TileLang lift 默认实现；
-2. 保留 `bm112_bn64_bk12_s1_t256_fullcol` 作为 TileLang derivative GEMM 默认实现；
+2. 采用 `bm128_bn64_bk4_s0_t256_fullcol` 作为当前 TileLang derivative GEMM 默认实现；
 3. 继续使用 full CUDA Graph；
 4. 后续性能工作重点应转向新的 step 主瓶颈，而不是再回到旧的 cuBLAS derivative 路径。
 

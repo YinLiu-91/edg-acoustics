@@ -153,7 +153,7 @@ def test_scenario1_benchmark_cli_accepts_tilelang_derivative_gemm_flags():
 
     assert_common_output(output)
     assert "tilelang_derivative_gemm_enabled=0" in output
-    assert "tilelang_derivative_gemm_config=bm112_bn64_bk12_s1_t256_fullcol" in output
+    assert "tilelang_derivative_gemm_config=bm128_bn64_bk4_s0_t256_fullcol" in output
     assert "tilelang_derivative_gemm:0" in output
 
 
