@@ -1,4 +1,4 @@
-"""Benchmark TileLang manual fp64 derivative-volume microkernels.
+"""Experimental benchmark for retired manual fp64 derivative-volume microkernels.
 
 This isolates the same scenario1 hot path as the fused derivative-volume
 benchmark:
@@ -6,6 +6,11 @@ benchmark:
     baseline: torch.mm(D_merged, Q) + affine AoS volume-surface Triton kernel
     reference: current best TileLang T.gemm fused derivative-volume kernel
     candidate: manual SIMT TileLang microkernel with explicit fp64 FMAs
+
+The manual microkernel path is kept only as a correctness and profiling
+reference. Active optimization work has moved back to the T.gemm fused
+derivative-volume kernel, so the broad manual-microkernel sweep is intentionally
+retired.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ _D_SOURCE_GLOBAL = 1
 _LOOP_SERIAL = 0
 _LOOP_UNROLL = 1
 _REFERENCE_CONFIG_NAME = "bp16_be8_bn32_bk16_s0_t128_fullcol"
+MANUAL_MICROKERNEL_STATUS = "experimental_retired"
 
 T = None
 _JITTED_FP64_DERIVATIVE_VOLUME_MICROKERNEL = None
@@ -727,8 +733,16 @@ def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required.")
+    if args.sweep:
+        raise SystemExit(
+            "manual microkernel sweep is retired; use a single --config for "
+            "correctness/profiling or switch to "
+            "benchmarks/tilelang_derivative_volume_aos_autotune.py for active "
+            "T.gemm fused-kernel tuning."
+        )
 
     print(f"pid={os.getpid()}")
+    print(f"experiment_status={MANUAL_MICROKERNEL_STATUS}")
     print(f"device={torch.cuda.get_device_name(0)}")
     print(f"torch_version={torch.__version__}")
     print(f"torch_version_maca={getattr(torch.version, 'maca', None)}")
@@ -778,7 +792,7 @@ def main() -> None:
             f"{type(exc).__name__}: {exc}"
         ) from exc
 
-    configs = available_config_names() if args.sweep else (args.config,)
+    configs = (args.config,)
     any_faster = False
     for index, config_name in enumerate(configs):
         if index:

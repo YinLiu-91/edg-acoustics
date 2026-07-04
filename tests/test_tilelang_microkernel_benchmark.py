@@ -24,6 +24,7 @@ def test_tilelang_microkernel_configs_are_exposed():
     qnk_config = module.get_config("bp16_be8_t128_qnk_dshared_unroll")
     global_config = module.get_config("bp16_be8_t128_qkn_dglobal_unroll")
 
+    assert module.MANUAL_MICROKERNEL_STATUS == "experimental_retired"
     assert default_config.q_layout == "qkn"
     assert qnk_config.q_layout == "qnk"
     assert global_config.d_source == "global"
