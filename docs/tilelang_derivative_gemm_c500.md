@@ -237,14 +237,14 @@ rtk python benchmarks/scenario1_benchmark.py \
 
 | Variant | ms/step | 说明 |
 | --- | ---: | --- |
-| `TileLang lift + TileLang derivative GEMM` | `6.829143` | full CUDA Graph，成功进入 graph |
-| `TileLang lift + baseline derivative GEMM` | `7.368351` | full CUDA Graph |
+| `TileLang lift + TileLang derivative GEMM` | `6.709760` | full CUDA Graph，成功进入 graph |
+| `TileLang lift + baseline derivative GEMM` | `7.368161` | full CUDA Graph |
 
 端到端收益：
 
-- 每 step 降低 `0.539208 ms`
-- 整体加速 `1.07896x`
-- step 时间下降 `7.32%`
+- 每 step 降低 `0.658401 ms`
+- 整体加速 `1.09813x`
+- step 时间下降 `8.94%`
 
 运行时状态也符合预期：
 
@@ -256,14 +256,19 @@ rtk python benchmarks/scenario1_benchmark.py \
 这说明该 kernel 不只是 standalone benchmark 漂亮，而是真正进入了完整 timestep
 路径，并且可以被 full CUDA Graph 捕获和 replay。
 
-## 如何理解 1.34x kernel 提升只换来 1.08x step 提升
+同时，这个真实 timestep 结果也验证了新的 runtime 默认
+`bm128_bn64_bk4_s0_t256_fullcol` 确实优于前一个 TileLang derivative 默认
+`bm112_bn64_bk12_s1_t256_fullcol`。后者的历史 full-step 结果是 `6.829143 ms/step`，
+因此这次默认切换又额外减少了 `0.119383 ms/step`，约 `1.78%`。
+
+## 如何理解 1.39x kernel 提升只换来 1.10x step 提升
 
 这是正常现象。
 
-standalone sweep 中，最优 derivative GEMM 相对 baseline 大约是：
+standalone sweep 中，新的 runtime 默认在真实 timestep 更接近的 `N=181140` 上相对
+baseline 大约是：
 
-- `1.342x`
-- `1.351x`
+- `1.391x`
 
 但 timestep 里还有：
 
@@ -276,11 +281,11 @@ standalone sweep 中，最优 derivative GEMM 相对 baseline 大约是：
 
 根据观测到的：
 
-- old step = `7.368351 ms`
-- new step = `6.829143 ms`
-- delta = `0.539208 ms`
+- old step = `7.368161 ms`
+- new step = `6.709760 ms`
+- delta = `0.658401 ms`
 
-结合 standalone derivative GEMM 的 `1.34x ~ 1.35x` 加速，可以反推出一个近似结论：
+结合 standalone derivative GEMM 的 `1.391x` 加速，可以反推出一个近似结论：
 
 - 旧 timestep 中，derivative GEMM 大约占 `2.0 ~ 2.1 ms/step`
 - 约为总 step 的 `28%` 左右
@@ -294,9 +299,9 @@ standalone sweep 中，最优 derivative GEMM 相对 baseline 大约是：
 standalone 证据表明它优于旧默认 `bm112_bn64_bk12_s1_t256_fullcol`，尤其是在真实
 timestep 更接近的 `N=181140` 上。
 
-同时，`bm112_bn64_bk12_s1_t256_fullcol` 仍然保留了以下已验证历史结论：
+同时，旧默认 `bm112_bn64_bk12_s1_t256_fullcol` 仍然保留了以下已验证历史结论：
 
-- derivative GEMM standalone 最优配置；
+- derivative GEMM 在此前 sweep 中的阶段性最优配置；
 - 可以安全接入真实 timestep；
 - 可以进入 full CUDA Graph；
 - 可以在 `scenario1_profile_lc0p20.msh` 上带来稳定端到端收益。
