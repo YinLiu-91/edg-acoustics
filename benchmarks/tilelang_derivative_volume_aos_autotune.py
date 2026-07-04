@@ -274,6 +274,30 @@ def _build_autotune_impl(
     return derivative_volume_aos
 
 
+def _build_inplace_kernel_from_tuned_config(
+    *,
+    inputs: aos_bench.KernelInputs,
+    tuned_config: dict[str, object],
+    update_state: bool,
+):
+    jitted = tl_aos._jitted_fp64_derivative_volume_aos()
+    return jitted(
+        inputs.n_p,
+        inputs.n_columns,
+        inputs.n_p,
+        inputs.n_tets,
+        int(tuned_config["block_p"]),
+        int(tuned_config["block_n"]),
+        int(tuned_config["block_e"]),
+        int(tuned_config["block_k"]),
+        int(tuned_config["num_stages"]),
+        int(tuned_config["threads"]),
+        update_state,
+        tuned_config["policy"],
+        int(tuned_config["variant"]),
+    )
+
+
 def _benchmark_kernel(args, inputs: aos_bench.KernelInputs, kernel) -> None:
     update_state = args.mode == "update"
     coefficient = inputs.coefficient
@@ -591,19 +615,27 @@ def main() -> None:
 
     if best_kernel is None:
         raise RuntimeError("TileLang autotune did not return a compiled kernel")
+    if best_config is None:
+        raise RuntimeError("TileLang autotune did not return a best config")
 
     print(f"autotune_best_latency_ms={best_latency:.6f}")
     print(f"autotune_best_config={best_config}")
     print(f"autotune_ref_latency_ms={best_ref_latency}")
+
+    benchmark_kernel = _build_inplace_kernel_from_tuned_config(
+        inputs=inputs,
+        tuned_config=best_config,
+        update_state=update_state,
+    )
     if args.export_sources is not None:
         args.export_sources.mkdir(parents=True, exist_ok=True)
         aos_bench.export_candidate_sources(
-            best_kernel,
+            benchmark_kernel,
             args.export_sources,
             "autotuned_best_derivative_volume_aos",
         )
 
-    _benchmark_kernel(args, inputs, best_kernel)
+    _benchmark_kernel(args, inputs, benchmark_kernel)
 
 
 if __name__ == "__main__":
