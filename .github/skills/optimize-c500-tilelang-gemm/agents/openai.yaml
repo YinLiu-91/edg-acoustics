@@ -1,0 +1,4 @@
+interface:
+  display_name: "C500 TileLang GEMM"
+  short_description: "Optimize FP64 TileLang GEMM on MetaX C500"
+  default_prompt: "Use $optimize-c500-tilelang-gemm to plan and evaluate a MetaX C500 fp64 TileLang GEMM optimization."

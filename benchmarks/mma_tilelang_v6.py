@@ -378,6 +378,33 @@ def c500_derivative_configs(include_persistent: bool) -> list[KernelConfig]:
     return candidates
 
 
+def c500_next_derivative_configs() -> list[KernelConfig]:
+    candidates = [
+        named_config(112, 64, 12, 1, 256, "fullcol"),
+        named_config(112, 64, 12, 0, 256, "fullcol"),
+    ]
+
+    # Narrow search around the accepted C500 derivative winner. Square policy
+    # often fails fragment layout normalization for this M=105, K=35, warp64 shape.
+    for block_m in (96, 112, 128):
+        for block_n in (48, 64, 80, 96):
+            for block_k in (4, 8, 12):
+                for num_stages in (0, 1):
+                    for threads in (192, 256, 320, 384):
+                        candidates.append(
+                            named_config(
+                                block_m,
+                                block_n,
+                                block_k,
+                                num_stages,
+                                threads,
+                                "fullcol",
+                            )
+                        )
+
+    return candidates
+
+
 def get_configs(
     m: int,
     k: int,
@@ -390,6 +417,8 @@ def get_configs(
     if m == 105 and k == 35:
         if sweep_level == "c500-deep":
             candidates = c500_derivative_configs(include_persistent=include_persistent)
+        elif sweep_level == "c500-next":
+            candidates = c500_next_derivative_configs()
         else:
             derivative_winners = [
                 with_policy(KernelConfig("bm32_bn64_bk16_s0_t256", 32, 64, 16, 0, threads=256), "fullcol"),
@@ -946,11 +975,12 @@ def parse_args():
     parser.add_argument("--shared-memory-kb", type=int, default=64)
     parser.add_argument(
         "--sweep-level",
-        choices=["core", "reg", "wide", "c500-deep"],
+        choices=["core", "reg", "wide", "c500-deep", "c500-next"],
         default="core",
         help=(
             "core runs stable configs; reg adds larger accumulator and t256 configs; "
-            "wide adds legacy variants; c500-deep adds register-aware derivative GEMM candidates."
+            "wide adds legacy variants; c500-deep adds register-aware derivative GEMM candidates; "
+            "c500-next narrows the derivative search around the accepted C500 winner."
         ),
     )
     parser.add_argument(
