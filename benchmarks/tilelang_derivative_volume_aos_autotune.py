@@ -24,7 +24,8 @@ import tilelang_derivative_volume_aos_benchmark as aos_bench  # noqa: E402
 import edg_acoustics.tilelang_derivative_volume_aos as tl_aos  # noqa: E402
 
 
-_TARGET_VARIANTS = ("copy_shared", "direct_epilogue", "merged3")
+_TARGET_VARIANTS = ("copy_shared",)
+_EXPERIMENTAL_VARIANTS = ("direct_epilogue", "merged3")
 _TARGET_POLICIES = ("fullcol", "square")
 _K_M_PER_WARP = 16
 _K_N_PER_WARP = 16
@@ -435,8 +436,12 @@ def parse_args():
     )
     parser.add_argument(
         "--variants",
-        default="copy_shared,direct_epilogue,merged3",
-        help="Comma-separated derivative-volume variants to tune.",
+        default="copy_shared",
+        help=(
+            "Comma-separated derivative-volume variants to tune. "
+            "The direct_epilogue and merged3 variants are experimental and "
+            "must be requested explicitly."
+        ),
     )
     parser.add_argument(
         "--policies",
@@ -532,9 +537,18 @@ def main() -> None:
     print(f"mesh_name={args.mesh_name}")
     print(f"variants={args.variants}")
     print(f"policies={args.policies}")
+    requested_variants = _split_csv(args.variants)
+    experimental_requested = sorted(
+        set(requested_variants).intersection(_EXPERIMENTAL_VARIANTS)
+    )
+    if experimental_requested:
+        print(
+            "experimental_variants_requested="
+            + ",".join(experimental_requested)
+        )
 
     candidates = available_autotune_candidates(
-        variant_names=_split_csv(args.variants),
+        variant_names=requested_variants,
         policy_names=_split_csv(args.policies),
         shared_memory_limit=props.shared_memory_per_block,
         warp_size=getattr(props, "warp_size", 32),
