@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 import tilelang
 import tilelang.language as T
+from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
 
 
@@ -33,6 +34,7 @@ class KernelConfig:
     enable_swizzle: bool = True
     policy: str = "square"
     use_shared_store: bool = False
+    persistent: bool = False
 
 
 @tilelang.jit
@@ -80,6 +82,59 @@ def fp64_matmul_tn(
                 T.copy(C_shared, C[by * block_M, bx * block_N])
             else:
                 T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return main
+
+
+@tilelang.jit
+def fp64_matmul_tn_persistent(
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    num_stages,
+    threads,
+    enable_swizzle,
+    policy,
+    use_shared_store,
+):
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), T.float64),
+        B: T.Tensor((K, N), T.float64),
+        C: T.Tensor((M, N), T.float64),
+    ):
+        sm_num = driver.get_num_sms()
+        with T.Kernel(sm_num, threads=threads) as block_id:
+            A_shared = T.alloc_shared((block_M, block_K), T.float64)
+            B_shared = T.alloc_shared((block_N, block_K), T.float64)
+            C_local = T.alloc_fragment((block_M, block_N), T.float64)
+            if use_shared_store:
+                C_shared = T.alloc_shared((block_M, block_N), T.float64)
+
+            T.use_swizzle(panel_size=10, enable=enable_swizzle)
+            for by, bx in T.Persistent(
+                [T.ceildiv(M, block_M), T.ceildiv(N, block_N)], sm_num, block_id
+            ):
+                T.clear(C_local)
+                for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+                    T.copy(A[by * block_M, ko * block_K], A_shared)
+                    for j, kk in T.Parallel(block_N, block_K):
+                        k_idx = ko * block_K + kk
+                        n_idx = bx * block_N + j
+                        B_shared[j, kk] = T.if_then_else(
+                            (k_idx < K) & (n_idx < N),
+                            B[k_idx, n_idx],
+                            T.float64(0.0),
+                        )
+                    T.gemm(A_shared, B_shared, C_local, transpose_B=True, policy=policy)
+                if use_shared_store:
+                    T.copy(C_local, C_shared)
+                    T.copy(C_shared, C[by * block_M, bx * block_N])
+                else:
+                    T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
 
@@ -173,6 +228,7 @@ def dedupe_configs(configs: list[KernelConfig]) -> list[KernelConfig]:
             config.enable_swizzle,
             config.policy,
             config.use_shared_store,
+            config.persistent,
         )
         if key not in seen:
             seen.add(key)
@@ -193,21 +249,158 @@ def with_policy(config: KernelConfig, policy: str) -> KernelConfig:
         config.enable_swizzle,
         policy,
         config.use_shared_store,
+        config.persistent,
     )
 
 
-def get_configs(m: int, k: int, shared_memory_limit: int, sweep_level: str, warp_size: int) -> list[KernelConfig]:
+def with_shared_store(config: KernelConfig) -> KernelConfig:
+    suffix = "_ss" if not config.name.endswith("_ss") else ""
+    return KernelConfig(
+        f"{config.name}{suffix}",
+        config.block_M,
+        config.block_N,
+        config.block_K,
+        config.num_stages,
+        config.threads,
+        config.enable_swizzle,
+        config.policy,
+        True,
+        config.persistent,
+    )
+
+
+def with_persistent(config: KernelConfig) -> KernelConfig:
+    suffix = "_persistent" if not config.name.endswith("_persistent") else ""
+    return KernelConfig(
+        f"{config.name}{suffix}",
+        config.block_M,
+        config.block_N,
+        config.block_K,
+        config.num_stages,
+        config.threads,
+        config.enable_swizzle,
+        config.policy,
+        config.use_shared_store,
+        True,
+    )
+
+
+def named_config(
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_stages: int,
+    threads: int,
+    policy: str,
+    *,
+    use_shared_store: bool = False,
+) -> KernelConfig:
+    name = f"bm{block_m}_bn{block_n}_bk{block_k}_s{num_stages}_t{threads}"
+    config = KernelConfig(
+        name,
+        block_m,
+        block_n,
+        block_k,
+        num_stages,
+        threads=threads,
+        policy=policy,
+        use_shared_store=use_shared_store,
+    )
+    if policy != "square":
+        config = with_policy(config, policy)
+    if use_shared_store:
+        config = with_shared_store(config)
+    return config
+
+
+def c500_derivative_configs(include_persistent: bool) -> list[KernelConfig]:
+    candidates = [
+        KernelConfig("bm32_bn64_bk16_s1_t128", 32, 64, 16, 1),
+        KernelConfig("bm32_bn64_bk16_s0_t256", 32, 64, 16, 0, threads=256),
+        KernelConfig("bm32_bn64_bk16_s1_t256", 32, 64, 16, 1, threads=256),
+        with_policy(KernelConfig("bm32_bn64_bk16_s0_t256", 32, 64, 16, 0, threads=256), "fullcol"),
+        with_policy(KernelConfig("bm32_bn64_bk16_s1_t256", 32, 64, 16, 1, threads=256), "fullcol"),
+    ]
+
+    # C500 has a large register file. Covering M=105 in one CTA should reduce
+    # repeated B tile loads and expose whether extra accumulator registers pay off.
+    for block_n in (32, 64, 96):
+        for block_k in (8, 12, 16):
+            for num_stages in (0, 1):
+                for threads in (128, 256):
+                    for policy in ("fullcol", "square"):
+                        candidates.append(
+                            named_config(112, block_n, block_k, num_stages, threads, policy)
+                        )
+
+    # Two-M-tile candidates trade some repeated B traffic for lower accumulator
+    # pressure. These are useful when bm112 occupancy is too low.
+    for block_m in (64, 80, 96):
+        for block_n in (64, 96):
+            for block_k in (12, 16):
+                for num_stages in (0, 1):
+                    for policy in ("fullcol", "square"):
+                        candidates.append(
+                            named_config(block_m, block_n, block_k, num_stages, 256, policy)
+                        )
+
+    # Lift-style configs validate whether the successful lift tile shape transfers.
+    for block_m in (48, 64):
+        for block_k in (12, 16):
+            for num_stages in (0, 1):
+                for policy in ("fullcol", "square"):
+                    candidates.append(named_config(block_m, 64, block_k, num_stages, 256, policy))
+
+    # C500 can benefit from register -> shared -> global epilogues. Keep this
+    # focused on configs that can fit C_shared under the 64 KiB block limit.
+    shared_store_bases = [
+        named_config(112, 32, block_k, num_stages, threads, policy)
+        for block_k in (12, 16)
+        for num_stages in (0, 1)
+        for threads in (128, 256)
+        for policy in ("fullcol", "square")
+    ]
+    shared_store_bases += [
+        named_config(80, 64, block_k, 0, 256, policy)
+        for block_k in (12, 16)
+        for policy in ("fullcol", "square")
+    ]
+    candidates += [with_shared_store(config) for config in shared_store_bases]
+
+    if include_persistent:
+        persistent_bases = [
+            named_config(112, 32, 16, 0, 128, "fullcol"),
+            named_config(112, 64, 16, 0, 256, "fullcol"),
+            named_config(80, 64, 16, 0, 256, "fullcol"),
+        ]
+        candidates += [with_persistent(config) for config in persistent_bases]
+
+    return candidates
+
+
+def get_configs(
+    m: int,
+    k: int,
+    shared_memory_limit: int,
+    sweep_level: str,
+    warp_size: int,
+    include_persistent: bool = False,
+    config_names: tuple[str, ...] = (),
+) -> list[KernelConfig]:
     if m == 105 and k == 35:
-        derivative_winners = [
-            with_policy(KernelConfig("bm32_bn64_bk16_s0_t256", 32, 64, 16, 0, threads=256), "fullcol"),
-            with_policy(KernelConfig("bm32_bn64_bk16_s1_t256", 32, 64, 16, 1, threads=256), "fullcol"),
-        ]
-        candidates = [
-            KernelConfig("bm32_bn64_bk16_s1_t128", 32, 64, 16, 1),
-            KernelConfig("bm32_bn64_bk16_s0_t256", 32, 64, 16, 0, threads=256),
-            KernelConfig("bm32_bn64_bk16_s1_t256", 32, 64, 16, 1, threads=256),
-            *derivative_winners,
-        ]
+        if sweep_level == "c500-deep":
+            candidates = c500_derivative_configs(include_persistent=include_persistent)
+        else:
+            derivative_winners = [
+                with_policy(KernelConfig("bm32_bn64_bk16_s0_t256", 32, 64, 16, 0, threads=256), "fullcol"),
+                with_policy(KernelConfig("bm32_bn64_bk16_s1_t256", 32, 64, 16, 1, threads=256), "fullcol"),
+            ]
+            candidates = [
+                KernelConfig("bm32_bn64_bk16_s1_t128", 32, 64, 16, 1),
+                KernelConfig("bm32_bn64_bk16_s0_t256", 32, 64, 16, 0, threads=256),
+                KernelConfig("bm32_bn64_bk16_s1_t256", 32, 64, 16, 1, threads=256),
+                *derivative_winners,
+            ]
         if sweep_level in ("reg", "wide"):
             square_reg = [
                 KernelConfig("bm32_bn96_bk16_s0_t256", 32, 96, 16, 0, threads=256),
@@ -335,11 +528,19 @@ def get_configs(m: int, k: int, shared_memory_limit: int, sweep_level: str, warp
             KernelConfig("bm128_bn32_bk16_s2_t128", 128, 32, 16, 2),
         ]
 
-    return [
+    configs = [
         config
         for config in dedupe_configs(candidates)
         if supported_config(config, shared_memory_limit, warp_size)
     ]
+    if config_names:
+        requested = set(config_names)
+        configs = [config for config in configs if config.name in requested]
+        missing = sorted(requested.difference(config.name for config in configs))
+        if missing:
+            known = ", ".join(config.name for config in dedupe_configs(candidates))
+            raise ValueError(f"unknown or unsupported --config entries: {missing}; known candidates: {known}")
+    return configs
 
 
 def tilelang_matmul_out(kernel, a, b, out):
@@ -354,6 +555,74 @@ def torch_matmul_out(a, b, out):
 
 def tflops(ms: float, m: int, k: int, n: int) -> float:
     return 2.0 * m * k * n * 1.0e-12 / (ms * 1.0e-3)
+
+
+def throughput_tflops(ms: float, flops: int) -> float:
+    return flops * 1.0e-12 / (ms * 1.0e-3)
+
+
+def bandwidth_tbps(ms: float, num_bytes: int) -> float:
+    return num_bytes * 1.0e-12 / (ms * 1.0e-3)
+
+
+def ceildiv_int(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def logical_flops(m: int, k: int, n: int) -> int:
+    return 2 * m * k * n
+
+
+def logical_global_bytes(m: int, k: int, n: int) -> int:
+    return (m * k + k * n + m * n) * 8
+
+
+def padded_flops(m: int, k: int, n: int, config: KernelConfig) -> int:
+    return (
+        2
+        * ceildiv_int(m, config.block_M)
+        * config.block_M
+        * ceildiv_int(n, config.block_N)
+        * config.block_N
+        * ceildiv_int(k, config.block_K)
+        * config.block_K
+    )
+
+
+def estimated_tile_global_bytes(m: int, k: int, n: int, config: KernelConfig) -> int:
+    m_tiles = ceildiv_int(m, config.block_M)
+    n_tiles = ceildiv_int(n, config.block_N)
+    k_tiles = ceildiv_int(k, config.block_K)
+    a_bytes = m_tiles * n_tiles * k_tiles * config.block_M * config.block_K * 8
+    b_bytes = m_tiles * n_tiles * k_tiles * config.block_N * config.block_K * 8
+    c_store_bytes = m_tiles * n_tiles * config.block_M * config.block_N * 8
+    return a_bytes + b_bytes + c_store_bytes
+
+
+def enrich_metrics(row, args) -> None:
+    m = row["M"]
+    k = row["K"]
+    n = row["N"]
+    config = row["config"]
+    logical_ops = logical_flops(m, k, n)
+    padded_ops = padded_flops(m, k, n, config)
+    logical_bytes = logical_global_bytes(m, k, n)
+    tile_bytes = estimated_tile_global_bytes(m, k, n, config)
+    arithmetic_intensity = logical_ops / logical_bytes
+    row.update(
+        {
+            "logical_flops": logical_ops,
+            "padded_flops": padded_ops,
+            "work_inflation": padded_ops / logical_ops,
+            "logical_global_bytes": logical_bytes,
+            "estimated_tile_global_bytes": tile_bytes,
+            "arithmetic_intensity": arithmetic_intensity,
+            "roofline_bound_tflops": min(
+                args.peak_fp64_tflops,
+                args.peak_bandwidth_tbps * arithmetic_intensity,
+            ),
+        }
+    )
 
 
 def gib(num_bytes: int) -> float:
@@ -399,7 +668,8 @@ def format_exception(exc: Exception, trace: bool = False) -> str:
 
 
 def compile_kernel(m: int, n: int, k: int, config: KernelConfig):
-    return fp64_matmul_tn(
+    kernel_builder = fp64_matmul_tn_persistent if config.persistent else fp64_matmul_tn
+    return kernel_builder(
         m,
         n,
         k,
@@ -414,8 +684,8 @@ def compile_kernel(m: int, n: int, k: int, config: KernelConfig):
     )
 
 
-def make_row(m: int, k: int, n: int, torch_ms: float, torch_q20: float, torch_q80: float, config: KernelConfig):
-    return {
+def make_row(m: int, k: int, n: int, torch_ms: float, torch_q20: float, torch_q80: float, config: KernelConfig, args):
+    row = {
         "M": m,
         "K": k,
         "N": n,
@@ -429,8 +699,35 @@ def make_row(m: int, k: int, n: int, torch_ms: float, torch_q20: float, torch_q8
         "tilelang_tflops": None,
         "tilelang_min_tflops": None,
         "tilelang_max_tflops": None,
+        "tilelang_padded_tflops": None,
+        "tilelang_logical_bandwidth_tbps": None,
+        "tilelang_estimated_tile_bandwidth_tbps": None,
+        "tilelang_fp64_peak_pct": None,
+        "tilelang_bandwidth_peak_pct": None,
         "error": None,
     }
+    row["torch_logical_bandwidth_tbps"] = bandwidth_tbps(torch_ms, logical_global_bytes(m, k, n))
+    row["torch_fp64_peak_pct"] = 100.0 * row["torch_tflops"] / args.peak_fp64_tflops
+    row["torch_bandwidth_peak_pct"] = 100.0 * row["torch_logical_bandwidth_tbps"] / args.peak_bandwidth_tbps
+    enrich_metrics(row, args)
+    return row
+
+
+def do_bench_repeated(fn, args):
+    best = None
+    for _ in range(args.repeat):
+        result = normalize_bench_result(
+            do_bench(
+                fn,
+                warmup=args.warmup,
+                rep=args.rep,
+                quantiles=[0.5, 0.2, 0.8],
+                backend=args.profile_backend,
+            )
+        )
+        if best is None or result[0] < best[0]:
+            best = result
+    return best
 
 
 def bench_config(
@@ -447,7 +744,7 @@ def bench_config(
     torch_q80: float,
     args,
 ):
-    row = make_row(m, k, n, torch_ms, torch_q20, torch_q80, config)
+    row = make_row(m, k, n, torch_ms, torch_q20, torch_q80, config, args)
     try:
         kernel = compile_kernel(m, n, k, config)
         tilelang_matmul_out(kernel, a, b, out_tilelang)
@@ -464,15 +761,9 @@ def bench_config(
                     f"validation failed: max_abs={diff.max().item()}, max_rel={rel.max().item()}"
                 )
 
-        quantiles = [0.5, 0.2, 0.8]
-        tilelang_ms, tilelang_q20, tilelang_q80 = normalize_bench_result(
-            do_bench(
-                lambda: tilelang_matmul_out(kernel, a, b, out_tilelang),
-                warmup=args.warmup,
-                rep=args.rep,
-                quantiles=quantiles,
-                backend=args.profile_backend,
-            )
+        tilelang_ms, tilelang_q20, tilelang_q80 = do_bench_repeated(
+            lambda: tilelang_matmul_out(kernel, a, b, out_tilelang),
+            args,
         )
         row.update(
             {
@@ -480,7 +771,18 @@ def bench_config(
                 "tilelang_tflops": tflops(tilelang_ms, m, k, n),
                 "tilelang_min_tflops": tflops(tilelang_q80, m, k, n),
                 "tilelang_max_tflops": tflops(tilelang_q20, m, k, n),
+                "tilelang_padded_tflops": throughput_tflops(tilelang_ms, row["padded_flops"]),
+                "tilelang_logical_bandwidth_tbps": bandwidth_tbps(
+                    tilelang_ms, row["logical_global_bytes"]
+                ),
+                "tilelang_estimated_tile_bandwidth_tbps": bandwidth_tbps(
+                    tilelang_ms, row["estimated_tile_global_bytes"]
+                ),
             }
+        )
+        row["tilelang_fp64_peak_pct"] = 100.0 * row["tilelang_tflops"] / args.peak_fp64_tflops
+        row["tilelang_bandwidth_peak_pct"] = (
+            100.0 * row["tilelang_logical_bandwidth_tbps"] / args.peak_bandwidth_tbps
         )
     except Exception as exc:
         row["error"] = format_exception(exc, trace=args.error_trace)
@@ -491,7 +793,15 @@ def bench_one(m: int, k: int, n: int, args):
     shared_memory_limit = args.shared_memory_kb * 1024
     props = torch.cuda.get_device_properties(torch.cuda.current_device())
     warp_size = getattr(props, "warp_size", 32) or 32
-    configs = get_configs(m, k, shared_memory_limit, args.sweep_level, warp_size)
+    configs = get_configs(
+        m,
+        k,
+        shared_memory_limit,
+        args.sweep_level,
+        warp_size,
+        include_persistent=args.include_persistent,
+        config_names=tuple(args.config),
+    )
     if not configs:
         raise RuntimeError(f"no candidate configs fit {args.shared_memory_kb} KiB shared memory limit")
 
@@ -503,15 +813,9 @@ def bench_one(m: int, k: int, n: int, args):
     torch_matmul_out(a, b, out_torch)
     torch.cuda.synchronize()
 
-    quantiles = [0.5, 0.2, 0.8]
-    torch_ms, torch_q20, torch_q80 = normalize_bench_result(
-        do_bench(
-            lambda: torch_matmul_out(a, b, out_torch),
-            warmup=args.warmup,
-            rep=args.rep,
-            quantiles=quantiles,
-            backend=args.profile_backend,
-        )
+    torch_ms, torch_q20, torch_q80 = do_bench_repeated(
+        lambda: torch_matmul_out(a, b, out_torch),
+        args,
     )
 
     rows = []
@@ -541,7 +845,7 @@ def print_config_row(row) -> None:
     if row["tilelang_tflops"] is None:
         print(
             f"  {config.name:<{name_width}} shared={row['shared_memory_bytes'] // 1024:>2} KiB "
-            f"policy={config.policy:<7} "
+            f"policy={config.policy:<7} persistent={int(config.persistent)} "
             f"tilelang=failed"
         )
         if row["error"] is not None:
@@ -552,8 +856,12 @@ def print_config_row(row) -> None:
     speedup = row["tilelang_tflops"] / row["torch_tflops"]
     print(
         f"  {config.name:<{name_width}} shared={row['shared_memory_bytes'] // 1024:>2} KiB "
-        f"policy={config.policy:<7} "
+        f"policy={config.policy:<7} persistent={int(config.persistent)} "
         f"tilelang={row['tilelang_tflops']:8.4f} TFLOPS ({row['tilelang_ms']:8.4f} ms) "
+        f"padded={row['tilelang_padded_tflops']:8.4f} TFLOPS "
+        f"infl={row['work_inflation']:5.2f}x "
+        f"bw={row['tilelang_logical_bandwidth_tbps']:6.3f}/{row['tilelang_estimated_tile_bandwidth_tbps']:6.3f} TB/s "
+        f"fp64={row['tilelang_fp64_peak_pct']:5.1f}% "
         f"speedup={speedup:6.3f}x"
     )
 
@@ -561,17 +869,40 @@ def print_config_row(row) -> None:
 def print_csv(rows) -> None:
     print()
     print("csv:")
-    print("M,K,N,config,policy,shared_kib,torch_ms,torch_tflops,tilelang_ms,tilelang_tflops,tilelang_speedup,error")
+    print(
+        "M,K,N,config,policy,persistent,shared_kib,work_inflation,arithmetic_intensity,"
+        "roofline_bound_tflops,torch_ms,torch_tflops,torch_logical_bandwidth_tbps,"
+        "torch_fp64_peak_pct,tilelang_ms,tilelang_tflops,tilelang_padded_tflops,"
+        "tilelang_logical_bandwidth_tbps,tilelang_estimated_tile_bandwidth_tbps,"
+        "tilelang_fp64_peak_pct,tilelang_speedup,error"
+    )
     for row in rows:
         config = row["config"]
         tilelang_ms = "" if row["tilelang_ms"] is None else f"{row['tilelang_ms']:.6f}"
         tilelang_tflops = "" if row["tilelang_tflops"] is None else f"{row['tilelang_tflops']:.6f}"
+        tilelang_padded_tflops = "" if row["tilelang_padded_tflops"] is None else f"{row['tilelang_padded_tflops']:.6f}"
+        tilelang_logical_bandwidth = (
+            "" if row["tilelang_logical_bandwidth_tbps"] is None else f"{row['tilelang_logical_bandwidth_tbps']:.6f}"
+        )
+        tilelang_estimated_tile_bandwidth = (
+            ""
+            if row["tilelang_estimated_tile_bandwidth_tbps"] is None
+            else f"{row['tilelang_estimated_tile_bandwidth_tbps']:.6f}"
+        )
+        tilelang_fp64_peak_pct = (
+            "" if row["tilelang_fp64_peak_pct"] is None else f"{row['tilelang_fp64_peak_pct']:.6f}"
+        )
         tilelang_speedup = "" if row["tilelang_tflops"] is None else f"{row['tilelang_tflops'] / row['torch_tflops']:.6f}"
         error = "" if row["error"] is None else row["error"].splitlines()[0].replace(",", ";")
         print(
-            f"{row['M']},{row['K']},{row['N']},{config.name},{config.policy},{row['shared_memory_bytes'] // 1024},"
+            f"{row['M']},{row['K']},{row['N']},{config.name},{config.policy},{int(config.persistent)},"
+            f"{row['shared_memory_bytes'] // 1024},{row['work_inflation']:.6f},"
+            f"{row['arithmetic_intensity']:.6f},{row['roofline_bound_tflops']:.6f},"
             f"{row['torch_ms']:.6f},{row['torch_tflops']:.6f},"
-            f"{tilelang_ms},{tilelang_tflops},{tilelang_speedup},{error}"
+            f"{row['torch_logical_bandwidth_tbps']:.6f},{row['torch_fp64_peak_pct']:.6f},"
+            f"{tilelang_ms},{tilelang_tflops},{tilelang_padded_tflops},"
+            f"{tilelang_logical_bandwidth},{tilelang_estimated_tile_bandwidth},"
+            f"{tilelang_fp64_peak_pct},{tilelang_speedup},{error}"
         )
 
 
@@ -615,10 +946,27 @@ def parse_args():
     parser.add_argument("--shared-memory-kb", type=int, default=64)
     parser.add_argument(
         "--sweep-level",
-        choices=["core", "reg", "wide"],
+        choices=["core", "reg", "wide", "c500-deep"],
         default="core",
-        help="core runs stable configs; reg adds larger accumulator and t256 configs; wide adds legacy variants.",
+        help=(
+            "core runs stable configs; reg adds larger accumulator and t256 configs; "
+            "wide adds legacy variants; c500-deep adds register-aware derivative GEMM candidates."
+        ),
     )
+    parser.add_argument(
+        "--config",
+        nargs="*",
+        default=[],
+        help="Run only the named candidate config(s) from the selected sweep level.",
+    )
+    parser.add_argument(
+        "--include-persistent",
+        action="store_true",
+        help="Include experimental persistent derivative GEMM configs in c500-deep.",
+    )
+    parser.add_argument("--peak-fp64-tflops", type=float, default=4.0)
+    parser.add_argument("--peak-bandwidth-tbps", type=float, default=1.8)
+    parser.add_argument("--repeat", type=int, default=1, help="Repeat each do_bench call and keep the best median.")
     parser.add_argument("--warmup", type=float, default=25)
     parser.add_argument("--rep", type=float, default=100)
     parser.add_argument(
@@ -635,6 +983,8 @@ def main() -> None:
         raise RuntimeError("CUDA is required for this FP64 TileLang benchmark.")
     if (args.m is None) != (args.k is None):
         raise ValueError("--M and --K must be provided together.")
+    if args.repeat < 1:
+        raise ValueError("--repeat must be >= 1.")
 
     if args.m is not None:
         shapes = [("custom", args.m, args.k)]
@@ -649,6 +999,12 @@ def main() -> None:
     print("tilelang B layout: B[K,N], copied into shared as B_shared[block_N,block_K]")
     print("shared memory budget KiB:", args.shared_memory_kb)
     print("sweep level:", args.sweep_level)
+    print("peak_fp64_tflops:", args.peak_fp64_tflops)
+    print("peak_bandwidth_tbps:", args.peak_bandwidth_tbps)
+    print("benchmark_repeat:", args.repeat)
+    if args.config:
+        print("config filter:", ",".join(args.config))
+    print("include_persistent:", int(args.include_persistent))
     print()
 
     all_rows = []
@@ -658,9 +1014,14 @@ def main() -> None:
             rows = bench_one(m, k, n, args)
             all_rows.extend(rows)
             torch_row = rows[0]
+            print("candidate_count:", len(rows))
             print(
                 f"M={m:>3} K={k:>3} N={n:>8} "
-                f"torch={torch_row['torch_tflops']:8.4f} TFLOPS ({torch_row['torch_ms']:8.4f} ms)"
+                f"torch={torch_row['torch_tflops']:8.4f} TFLOPS ({torch_row['torch_ms']:8.4f} ms) "
+                f"bw={torch_row['torch_logical_bandwidth_tbps']:.4f} TB/s "
+                f"fp64={torch_row['torch_fp64_peak_pct']:.1f}% "
+                f"AI={torch_row['arithmetic_intensity']:.3f} flop/byte "
+                f"roofline={torch_row['roofline_bound_tflops']:.3f} TFLOPS"
             )
             for row in rows:
                 print_config_row(row)
@@ -671,6 +1032,8 @@ def main() -> None:
                 print(
                     f"  best={best['config'].name} "
                     f"{best['tilelang_tflops']:.4f} TFLOPS ({best['tilelang_ms']:.4f} ms) "
+                    f"padded={best['tilelang_padded_tflops']:.4f} TFLOPS "
+                    f"fp64={best['tilelang_fp64_peak_pct']:.1f}% "
                     f"speedup={best_speedup:.3f}x"
                 )
         print()
