@@ -14,6 +14,7 @@ DG_RoomAcoustics is an open-source implementation of a time-domain wave-based ro
   usage_guide.md
   fp64_cuda_optimization_design.md
   tilelang_maca_cuda_graph_stream.md
+  tilelang_derivative_gemm_c500.md
 
 .. toctree::
   :maxdepth: 2

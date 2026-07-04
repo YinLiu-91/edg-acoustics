@@ -150,6 +150,8 @@ The TileLang derivative-volume AoS path is the replacement experiment for that p
 
 The separate manual SIMT fp64 microkernel benchmark is now explicitly experimental and retired from broad sweeps. That path remains in-tree only as a correctness and profiling reference because it stayed below the `T.gemm` fused kernel on C500 after multiple layout and store-path experiments.
 
+After those experiments, the accepted MetaX-specific derivative path is no longer "future work": a fixed TileLang derivative GEMM backend now exists for the merged derivative shape `D_merged[105, 35] @ Q_flat[35, N]`. The current pinned runtime config is `bm112_bn64_bk12_s1_t256_fullcol`, which was selected from a deeper C500 sweep because it reduces padded work versus the older `bm32_bn64_bk16_*` family and improves the standalone derivative GEMM by about `1.34x ~ 1.35x` over the baseline mcBLAS path. With TileLang lift also enabled, this derivative kernel reduces the full `scenario1_profile_lc0p20.msh` timestep from `7.368 ms/step` to `6.829 ms/step` on C500, an end-to-end speedup of about `1.079x`. See `docs/tilelang_derivative_gemm_c500.md` for the detailed sweep evidence, configuration rationale, and exact benchmark commands.
+
 Recommended offline tuning flow on a C500 box:
 
 ```bash
