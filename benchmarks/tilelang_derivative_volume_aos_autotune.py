@@ -255,23 +255,6 @@ def _build_autotune_impl(
         policy=default_policy,
         variant=default_variant,
     ):
-        if block_p is None:
-            block_p = default_config.block_p
-        if block_e is None:
-            block_e = default_config.block_e
-        if block_k is None:
-            block_k = default_config.block_k
-        if num_stages is None:
-            num_stages = default_config.num_stages
-        if threads is None:
-            threads = default_config.threads
-        if block_n is None:
-            block_n = 4 * block_e
-        if policy is None:
-            policy = default_policy
-        if variant is None:
-            variant = default_variant
-
         return tl_aos._fp64_derivative_volume_aos(
             M,
             N,
