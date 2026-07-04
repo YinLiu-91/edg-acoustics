@@ -227,6 +227,9 @@ def _build_autotune_impl(
     from tilelang.autotuner import autotune
 
     tl_aos.T = T
+    default_config = configs[0]
+    default_policy = policy_value(T, default_config.policy)
+    default_variant = tl_aos._VARIANT_CODES[default_config.variant]
     autotune_configs = [candidate.to_autotune_dict(T) for candidate in configs]
 
     @autotune(
@@ -243,15 +246,32 @@ def _build_autotune_impl(
         K,
         n_tets,
         update_state,
-        block_p=None,
-        block_n=None,
-        block_e=None,
-        block_k=None,
-        num_stages=None,
-        threads=None,
-        policy=None,
-        variant=None,
+        block_p=default_config.block_p,
+        block_n=default_config.block_n,
+        block_e=default_config.block_e,
+        block_k=default_config.block_k,
+        num_stages=default_config.num_stages,
+        threads=default_config.threads,
+        policy=default_policy,
+        variant=default_variant,
     ):
+        if block_p is None:
+            block_p = default_config.block_p
+        if block_e is None:
+            block_e = default_config.block_e
+        if block_k is None:
+            block_k = default_config.block_k
+        if num_stages is None:
+            num_stages = default_config.num_stages
+        if threads is None:
+            threads = default_config.threads
+        if block_n is None:
+            block_n = 4 * block_e
+        if policy is None:
+            policy = default_policy
+        if variant is None:
+            variant = default_variant
+
         return tl_aos._fp64_derivative_volume_aos(
             M,
             N,
