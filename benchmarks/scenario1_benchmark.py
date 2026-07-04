@@ -179,6 +179,18 @@ def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_g
     tilelang_derivative_volume_fallback_reason = getattr(
         sim, "_tilelang_derivative_volume_aos_fallback_reason", ""
     ) or "none"
+    tilelang_derivative_gemm_graph_supported = getattr(
+        sim, "_tilelang_derivative_gemm_graph_capture_supported", None
+    )
+    if tilelang_derivative_gemm_graph_supported is None:
+        tilelang_derivative_gemm_graph_supported_text = "unknown"
+    else:
+        tilelang_derivative_gemm_graph_supported_text = str(
+            int(tilelang_derivative_gemm_graph_supported)
+        )
+    tilelang_derivative_gemm_fallback_reason = getattr(
+        sim, "_tilelang_derivative_gemm_fallback_reason", ""
+    ) or "none"
     print(
         "tilelang_derivative_volume_aos_enabled="
         f"{int(getattr(sim, '_use_tilelang_derivative_volume_aos', False))}"
@@ -200,6 +212,26 @@ def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_g
         f"{tilelang_derivative_volume_fallback_reason}"
     )
     print(
+        "tilelang_derivative_gemm_enabled="
+        f"{int(getattr(sim, '_use_tilelang_derivative_gemm', False))}"
+    )
+    print(
+        "tilelang_derivative_gemm_config="
+        f"{getattr(sim, '_tilelang_derivative_gemm_config', 'disabled')}"
+    )
+    print(
+        "tilelang_derivative_gemm_mode="
+        f"{getattr(sim, '_tilelang_derivative_gemm_mode', 'auto')}"
+    )
+    print(
+        "tilelang_derivative_gemm_graph_capture_supported="
+        f"{tilelang_derivative_gemm_graph_supported_text}"
+    )
+    print(
+        "tilelang_derivative_gemm_fallback_reason="
+        f"{tilelang_derivative_gemm_fallback_reason}"
+    )
+    print(
         "optimizations="
         f"volume_rhs:{int(sim._use_triton_volume_rhs)},"
         f"interior_flux:{int(sim._use_triton_interior_flux)},"
@@ -212,6 +244,8 @@ def print_common_metadata(sim, *, mesh_name: str, record_receivers: bool, cuda_g
         f"derivative_volume:{int(sim._use_triton_derivative_volume)},"
         "fused_derivative_volume_aos:"
         f"{int(getattr(sim, '_use_fused_derivative_volume_aos', False))},"
+        "tilelang_derivative_gemm:"
+        f"{int(getattr(sim, '_use_tilelang_derivative_gemm', False))},"
         "tilelang_derivative_volume_aos:"
         f"{int(getattr(sim, '_use_tilelang_derivative_volume_aos', False))},"
         f"lift_surface:{int(sim._use_triton_lift_surface)},"
@@ -441,6 +475,17 @@ def parse_args():
         action="store_true",
         help="Disable the TileLang fused derivative+volume AoS kernel.",
     )
+    tilelang_derivative_gemm_group = parser.add_mutually_exclusive_group()
+    tilelang_derivative_gemm_group.add_argument(
+        "--enable-tilelang-derivative-gemm",
+        action="store_true",
+        help="Force the TileLang merged derivative GEMM kernel.",
+    )
+    tilelang_derivative_gemm_group.add_argument(
+        "--disable-tilelang-derivative-gemm",
+        action="store_true",
+        help="Disable the TileLang merged derivative GEMM kernel.",
+    )
     parser.add_argument("--enable-triton-lift-surface", action="store_true")
     tilelang_lift_group = parser.add_mutually_exclusive_group()
     tilelang_lift_group.add_argument("--enable-tilelang-lift", action="store_true")
@@ -499,6 +544,10 @@ def main():
         os.environ["EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS"] = "1"
     if args.disable_tilelang_derivative_volume_aos:
         os.environ["EDG_ACOUSTICS_TILELANG_DERIVATIVE_VOLUME_AOS"] = "0"
+    if args.enable_tilelang_derivative_gemm:
+        os.environ["EDG_ACOUSTICS_TILELANG_DERIVATIVE_GEMM"] = "1"
+    if args.disable_tilelang_derivative_gemm:
+        os.environ["EDG_ACOUSTICS_TILELANG_DERIVATIVE_GEMM"] = "0"
     if args.enable_triton_lift_surface:
         os.environ["EDG_ACOUSTICS_TRITON_LIFT_SURFACE"] = "1"
     if args.enable_tilelang_lift:

@@ -23,6 +23,10 @@ from edg_acoustics.tilelang_lift import (
     TILELANG_LIFT_CONFIG_NAME,
     build_tilelang_lift_kernel,
 )
+from edg_acoustics.tilelang_derivative_gemm import (
+    TILELANG_DERIVATIVE_GEMM_CONFIG_NAME,
+    build_tilelang_derivative_gemm_kernel,
+)
 from edg_acoustics.tilelang_derivative_volume_aos import (
     TILELANG_DERIVATIVE_VOLUME_AOS_CONFIG_NAME,
     build_tilelang_derivative_volume_aos_kernel,
@@ -2049,6 +2053,7 @@ class AcousticsSimulation:
         self._cuda_step_graphs = {}
         self._configure_fused_derivative_volume_aos_backend()
         self._configure_tilelang_derivative_volume_aos_backend()
+        self._configure_tilelang_derivative_gemm_backend()
         self._configure_tilelang_lift_backend()
 
     def _configure_fused_derivative_volume_aos_backend(self):
@@ -2148,6 +2153,150 @@ class AcousticsSimulation:
             self._tilelang_derivative_volume_aos_fallback_reason = reason
             return
         self._use_tilelang_derivative_volume_aos = True
+
+    def _configure_tilelang_derivative_gemm_backend(self):
+        self._tilelang_derivative_gemm_mode = _normalize_env_bool_mode(
+            os.environ.get("EDG_ACOUSTICS_TILELANG_DERIVATIVE_GEMM"),
+            name="EDG_ACOUSTICS_TILELANG_DERIVATIVE_GEMM",
+        )
+        self._tilelang_derivative_gemm_config = TILELANG_DERIVATIVE_GEMM_CONFIG_NAME
+        self._use_tilelang_derivative_gemm = False
+        self._tilelang_derivative_gemm_kernel = None
+        self._tilelang_derivative_gemm_accepts_skip_validation = None
+        self._tilelang_derivative_gemm_correctness_checked = False
+        self._tilelang_derivative_gemm_graph_capture_supported = None
+        self._tilelang_derivative_gemm_fallback_reason = ""
+
+        if self._tilelang_derivative_gemm_mode == "0":
+            self._tilelang_derivative_gemm_fallback_reason = (
+                "disabled by EDG_ACOUSTICS_TILELANG_DERIVATIVE_GEMM"
+            )
+            return
+        if self.device.type != "cuda":
+            self._tilelang_derivative_gemm_fallback_reason = "requires CUDA tensors"
+            return
+        if (
+            self._tilelang_derivative_gemm_mode == "auto"
+            and not self._is_metax_cuda_device()
+        ):
+            self._tilelang_derivative_gemm_fallback_reason = (
+                "auto mode requires a MetaX/MACA CUDA device"
+            )
+            return
+
+        reason = self._tilelang_derivative_gemm_unsupported_reason()
+        if reason:
+            self._tilelang_derivative_gemm_fallback_reason = reason
+            return
+        self._use_tilelang_derivative_gemm = True
+
+    def _tilelang_derivative_gemm_unsupported_reason(self) -> str:
+        if not self._use_merged_derivatives:
+            return "requires merged derivatives"
+        if self.Np != 35:
+            return f"requires Np=35, got {self.Np}"
+        if self._D_merged.shape != (105, 35):
+            return (
+                "requires merged derivative shape (105, 35), got "
+                f"{tuple(self._D_merged.shape)}"
+            )
+        if self._q_by_node.shape[0] != 35:
+            return (
+                "requires q_by_node shape (35, N), got "
+                f"{tuple(self._q_by_node.shape)}"
+            )
+        if self._dQ_merged_by_node.shape[0] != 105:
+            return (
+                "requires dQ_merged_by_node shape (105, N), got "
+                f"{tuple(self._dQ_merged_by_node.shape)}"
+            )
+        if self._D_merged.dtype != torch.float64:
+            return f"requires fp64 derivative matrix, got {self._D_merged.dtype}"
+        if self._q_by_node.dtype != torch.float64:
+            return f"requires fp64 q buffer, got {self._q_by_node.dtype}"
+        if self._dQ_merged_by_node.dtype != torch.float64:
+            return f"requires fp64 derivative output buffer, got {self._dQ_merged_by_node.dtype}"
+        if not self._D_merged.is_contiguous():
+            return "requires contiguous merged derivative matrix"
+        if not self._q_by_node.is_contiguous():
+            return "requires contiguous q buffer"
+        if not self._dQ_merged_by_node.is_contiguous():
+            return "requires contiguous derivative output buffer"
+        return ""
+
+    def _disable_tilelang_derivative_gemm(self, reason: str):
+        self._use_tilelang_derivative_gemm = False
+        self._tilelang_derivative_gemm_kernel = None
+        self._tilelang_derivative_gemm_fallback_reason = reason
+
+    def _ensure_tilelang_derivative_gemm_kernel(self, n_columns: int) -> bool:
+        if not self._use_tilelang_derivative_gemm:
+            return False
+        if self._tilelang_derivative_gemm_kernel is not None:
+            return True
+        try:
+            self._tilelang_derivative_gemm_kernel = build_tilelang_derivative_gemm_kernel(
+                n_columns
+            )
+        except Exception as exc:
+            self._disable_tilelang_derivative_gemm(
+                f"compile/import failed: {_short_exception(exc)}"
+            )
+            return False
+        return True
+
+    def _invoke_tilelang_derivative_gemm_kernel(self, q_by_node: torch.tensor) -> bool:
+        if not self._ensure_tilelang_derivative_gemm_kernel(q_by_node.shape[1]):
+            return False
+        if self._tilelang_derivative_gemm_accepts_skip_validation is not False:
+            try:
+                self._tilelang_derivative_gemm_kernel(
+                    self._D_merged,
+                    q_by_node,
+                    self._dQ_merged_by_node,
+                    skip_tensor_validation=True,
+                )
+                self._tilelang_derivative_gemm_accepts_skip_validation = True
+                return True
+            except TypeError:
+                if self._tilelang_derivative_gemm_accepts_skip_validation is True:
+                    raise
+                self._tilelang_derivative_gemm_accepts_skip_validation = False
+
+        self._tilelang_derivative_gemm_kernel(
+            self._D_merged,
+            q_by_node,
+            self._dQ_merged_by_node,
+        )
+        return True
+
+    def _validate_tilelang_derivative_gemm(self, q_by_node: torch.tensor) -> bool:
+        if self._tilelang_derivative_gemm_correctness_checked:
+            return True
+        try:
+            reference = torch.empty_like(self._dQ_merged_by_node)
+            torch.mm(self._D_merged, q_by_node, out=reference)
+            if not self._invoke_tilelang_derivative_gemm_kernel(q_by_node):
+                return False
+            if self.device.type == "cuda":
+                torch.cuda.synchronize()
+            if not torch.allclose(
+                self._dQ_merged_by_node, reference, rtol=1.0e-10, atol=1.0e-10
+            ):
+                diff = (self._dQ_merged_by_node - reference).abs()
+                self._disable_tilelang_derivative_gemm(
+                    "correctness validation failed: "
+                    f"max_abs={diff.max().item():.6e}"
+                )
+                return False
+        except Exception as exc:
+            self._disable_tilelang_derivative_gemm(
+                f"correctness validation failed: {_short_exception(exc)}"
+            )
+            return False
+
+        self._tilelang_derivative_gemm_correctness_checked = True
+        return True
 
     def _tilelang_derivative_volume_aos_unsupported_reason(self) -> str:
         if self.device.type != "cuda":
@@ -2759,6 +2908,15 @@ class AcousticsSimulation:
 
     def _compute_packed_derivatives(self, q_by_node: torch.tensor):
         if self._use_merged_derivatives:
+            if self._use_tilelang_derivative_gemm:
+                capture_active = _is_cuda_graph_capture_active()
+                if self._tilelang_derivative_gemm_correctness_checked:
+                    if self._invoke_tilelang_derivative_gemm_kernel(q_by_node):
+                        return
+                elif not capture_active and self._validate_tilelang_derivative_gemm(
+                    q_by_node
+                ):
+                    return
             torch.mm(self._D_merged, q_by_node, out=self._dQ_merged_by_node)
             return
 
@@ -3683,6 +3841,8 @@ class AcousticsSimulation:
             f"chunk_steps={chunk_steps} "
             f"record_receivers={int(record_receivers)} "
             f"tilelang_lift={int(self._use_tilelang_lift_surface)} "
+            "tilelang_derivative_gemm="
+            f"{int(self._use_tilelang_derivative_gemm)} "
             "tilelang_derivative_volume_aos="
             f"{int(self._use_tilelang_derivative_volume_aos)} "
             f"segmented_mode={self._tilelang_segmented_graph_mode}"
@@ -3697,6 +3857,7 @@ class AcousticsSimulation:
             )
 
         tilelang_retry_done = False
+        tilelang_derivative_gemm_retry_done = False
         tilelang_derivative_volume_retry_done = False
         while True:
             snapshot = self._snapshot_time_state()
@@ -3714,6 +3875,8 @@ class AcousticsSimulation:
                 graph = self._capture_full_cuda_step_graph(chunk_steps, sample_chunk)
                 if self._validate_cuda_step_graph(graph, snapshot, expected_snapshot):
                     self._mark_tilelang_lift_cuda_graph_validated()
+                    if self._use_tilelang_derivative_gemm:
+                        self._tilelang_derivative_gemm_graph_capture_supported = True
                     if self._use_tilelang_derivative_volume_aos:
                         self._tilelang_derivative_volume_aos_graph_capture_supported = True
                     self._cuda_step_graphs[key] = (graph, sample_chunk, "full")
@@ -3745,6 +3908,8 @@ class AcousticsSimulation:
                     graph, snapshot, expected_snapshot
                 ):
                     self._mark_tilelang_lift_segmented_cuda_graph_validated()
+                    if self._use_tilelang_derivative_gemm:
+                        self._tilelang_derivative_gemm_graph_capture_supported = True
                     if self._use_tilelang_derivative_volume_aos:
                         self._tilelang_derivative_volume_aos_graph_capture_supported = True
                     self._cuda_step_graphs[key] = (
@@ -3771,6 +3936,8 @@ class AcousticsSimulation:
                 self._log_cuda_graph_selection("fallback_full_try tilelang_lift=0")
                 graph = self._capture_full_cuda_step_graph(chunk_steps, sample_chunk)
                 if self._validate_cuda_step_graph(graph, snapshot, expected_snapshot):
+                    if self._use_tilelang_derivative_gemm:
+                        self._tilelang_derivative_gemm_graph_capture_supported = True
                     if self._use_tilelang_derivative_volume_aos:
                         self._tilelang_derivative_volume_aos_graph_capture_supported = True
                     self._cuda_step_graphs[key] = (graph, sample_chunk, "full")
@@ -3812,6 +3979,22 @@ class AcousticsSimulation:
                     f"tilelang_disable reason={fallback_reason}"
                 )
                 tilelang_retry_done = True
+                continue
+
+            if (
+                self._use_tilelang_derivative_gemm
+                and not tilelang_derivative_gemm_retry_done
+            ):
+                fallback_reason = (
+                    "cuda graph replay validation failed; falling back from "
+                    "TileLang derivative GEMM"
+                )
+                self._tilelang_derivative_gemm_graph_capture_supported = False
+                self._disable_tilelang_derivative_gemm(fallback_reason)
+                self._log_cuda_graph_selection(
+                    f"tilelang_derivative_gemm_disable reason={fallback_reason}"
+                )
+                tilelang_derivative_gemm_retry_done = True
                 continue
 
             self._log_cuda_graph_selection("failed")
