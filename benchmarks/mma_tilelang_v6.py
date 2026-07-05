@@ -405,6 +405,60 @@ def c500_next_derivative_configs() -> list[KernelConfig]:
     return candidates
 
 
+def c500_bm128_derivative_configs() -> list[KernelConfig]:
+    candidates = [
+        named_config(128, 64, 4, 0, 256, "fullcol"),
+        named_config(128, 64, 4, 1, 256, "fullcol"),
+    ]
+
+    # Search around the current runtime winner. Keep K tiles small because
+    # previous full-K/full-A experiments regressed heavily on C500.
+    for block_m in (112, 128, 144, 160, 176):
+        for block_n in (32, 48, 64, 80, 96, 112, 128, 144, 160):
+            for block_k in (4, 8, 12, 16):
+                for num_stages in (0, 1, 2):
+                    for threads in (128, 192, 256, 320, 384):
+                        candidates.append(
+                            named_config(
+                                block_m,
+                                block_n,
+                                block_k,
+                                num_stages,
+                                threads,
+                                "fullcol",
+                            )
+                        )
+
+    # A smaller set of two-M-tile candidates checks whether reduced accumulator
+    # pressure can beat bm128 without paying too much repeated-B traffic.
+    for block_m in (64, 80, 96):
+        for block_n in (32, 48, 64, 80, 96, 128):
+            for block_k in (4, 8, 12):
+                for num_stages in (0, 1):
+                    for threads in (192, 256, 320):
+                        candidates.append(
+                            named_config(
+                                block_m,
+                                block_n,
+                                block_k,
+                                num_stages,
+                                threads,
+                                "fullcol",
+                            )
+                        )
+
+    # Spot-check square policy only where the tile is close to the known winner;
+    # many wider square configs fail fragment layout normalization on C500.
+    for block_n in (48, 64, 80):
+        for block_k in (4, 8):
+            for num_stages in (0, 1):
+                candidates.append(
+                    named_config(128, block_n, block_k, num_stages, 256, "square")
+                )
+
+    return candidates
+
+
 def get_configs(
     m: int,
     k: int,
@@ -419,6 +473,8 @@ def get_configs(
             candidates = c500_derivative_configs(include_persistent=include_persistent)
         elif sweep_level == "c500-next":
             candidates = c500_next_derivative_configs()
+        elif sweep_level == "c500-bm128":
+            candidates = c500_bm128_derivative_configs()
         else:
             derivative_winners = [
                 with_policy(KernelConfig("bm32_bn64_bk16_s0_t256", 32, 64, 16, 0, threads=256), "fullcol"),
@@ -975,12 +1031,13 @@ def parse_args():
     parser.add_argument("--shared-memory-kb", type=int, default=64)
     parser.add_argument(
         "--sweep-level",
-        choices=["core", "reg", "wide", "c500-deep", "c500-next"],
+        choices=["core", "reg", "wide", "c500-deep", "c500-next", "c500-bm128"],
         default="core",
         help=(
             "core runs stable configs; reg adds larger accumulator and t256 configs; "
             "wide adds legacy variants; c500-deep adds register-aware derivative GEMM candidates; "
-            "c500-next narrows the derivative search around the accepted C500 winner."
+            "c500-next narrows the derivative search around the accepted C500 winner; "
+            "c500-bm128 searches around the current bm128/bk4 runtime winner."
         ),
     )
     parser.add_argument(

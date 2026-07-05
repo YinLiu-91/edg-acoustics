@@ -122,7 +122,7 @@ sim.time_integration(
     delta_step=save_every_Nstep,
     save_step=temporary_save_Nstep,
     format="mat",
-    use_cuda_graph=True,
+    use_cuda_graph=False,
 )
 
 results = edg_acoustics.Monopole_postprocessor(sim, 1)

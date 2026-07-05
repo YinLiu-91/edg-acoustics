@@ -77,6 +77,34 @@ def test_c500_next_configs_focus_on_fullcol_derivative_winner():
     assert any(config.threads == 384 for config in configs)
 
 
+def test_c500_bm128_configs_broaden_current_runtime_winner_search():
+    module = load_mma_tilelang_module()
+
+    configs = module.get_configs(
+        105,
+        35,
+        shared_memory_limit=64 * 1024,
+        sweep_level="c500-bm128",
+        warp_size=64,
+    )
+    names = {config.name for config in configs}
+
+    assert "bm128_bn64_bk4_s0_t256_fullcol" in names
+    assert "bm128_bn64_bk4_s1_t256_fullcol" in names
+    assert "bm112_bn64_bk4_s0_t256_fullcol" in names
+    assert "bm96_bn64_bk4_s0_t256_fullcol" in names
+    assert "bm128_bn64_bk4_s0_t256" in names
+    assert all(config.block_K % 4 == 0 for config in configs)
+    assert all(config.policy in ("fullcol", "square") for config in configs)
+    assert all(not config.use_shared_store for config in configs)
+    assert all(not config.persistent for config in configs)
+    assert any(config.block_M == 64 for config in configs)
+    assert any(config.block_M == 176 for config in configs)
+    assert any(config.block_N == 160 for config in configs)
+    assert any(config.block_K == 16 for config in configs)
+    assert any(config.threads == 384 for config in configs)
+
+
 def test_roofline_metrics_report_padding_and_peak_percentages():
     module = load_mma_tilelang_module()
     args = SimpleNamespace(peak_fp64_tflops=4.0, peak_bandwidth_tbps=1.8)
