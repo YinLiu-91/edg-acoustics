@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import numpy
 import scipy
+import meshio
 import modepy
 from scipy.spatial.qhull import Delaunay
 import edg_acoustics
@@ -4968,7 +4969,10 @@ class AcousticsSimulation:
             total_time (float): total simulation time to be performed, determines the number of time steps given the current time step.
             delta_step (int): print solution every delta_step time steps.
             save_step (int): save solution every save_step time steps.
+            save_mesh_step (int): export a gmsh mesh snapshot every save_mesh_step time steps.
+            save_mesh_dir (str): output directory for gmsh snapshots.
             format (str): the format of the file to save the results. Can be either 'mat' or 'npy'. The default format is 'mat'.
+            save_mesh_format (str): mesh export format for snapshots. The default is 'gmsh22'.
             progress (bool): print progress and timing information. The default is True.
             synchronize_timing (bool): synchronize CUDA before final timing. The default is False.
             use_cuda_graph (bool): replay a captured CUDA graph for each packed time step. The default is False.
@@ -5000,6 +5004,10 @@ class AcousticsSimulation:
         progress = kwargs.get("progress", True)
         synchronize_timing = kwargs.get("synchronize_timing", False)
         record_receivers = kwargs.get("record_receivers", True)
+        save_step = int(kwargs.get("save_step", 0) or 0)
+        save_mesh_step = int(kwargs.get("save_mesh_step", 0) or 0)
+        save_mesh_dir = kwargs.get("save_mesh_dir", None)
+        save_mesh_format = kwargs.get("save_mesh_format", "gmsh22")
         cuda_graph_chunk_steps = max(1, int(kwargs.get("cuda_graph_chunk_steps", 1)))
         use_cuda_graph = (
             kwargs.get("use_cuda_graph", False)
@@ -5103,8 +5111,15 @@ class AcousticsSimulation:
                 )
                 print(f"P at mic locations {self.prec[:,StepIndex]}")
 
-            if "save_step" in kwargs and StepIndex % kwargs["save_step"] == 0:
+            if save_step > 0 and StepIndex % save_step == 0:
                 self.save_results_on_the_run(format=kwargs.get("format", "mat"))
+            if save_mesh_step > 0 and StepIndex % save_mesh_step == 0:
+                self.save_mesh_results_on_the_run(
+                    output_dir=save_mesh_dir,
+                    step_index=StepIndex + 1,
+                    real_time=(StepIndex + 1) * self.time_integrator.dt,
+                    file_format=save_mesh_format,
+                )
             StepIndex += 1
         if synchronize_timing and torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -5171,3 +5186,83 @@ class AcousticsSimulation:
             raise ValueError(
                 "Invalid format, the format should be either 'mat' or 'npy'."
             )
+
+    def _reference_tetra_vertex_node_indices(self) -> tuple[int, int, int, int]:
+        """Return the local nodal indices of the four tetrahedron vertices."""
+        cache_name = "_reference_tetra_vertex_node_indices_cache"
+        if hasattr(self, cache_name):
+            return getattr(self, cache_name)
+
+        rst = numpy.asarray(self.rst)
+        vertex_targets = numpy.array(
+            (
+                (-1.0, -1.0, -1.0),
+                (1.0, -1.0, -1.0),
+                (-1.0, 1.0, -1.0),
+                (-1.0, -1.0, 1.0),
+            ),
+            dtype=rst.dtype,
+        )
+        vertex_indices: list[int] = []
+        for target in vertex_targets:
+            distances = numpy.linalg.norm(rst.T - target, axis=1)
+            index = int(distances.argmin())
+            if not numpy.allclose(rst[:, index], target, rtol=0.0, atol=1.0e-12):
+                raise RuntimeError(
+                    "Failed to identify the tetrahedron vertex nodes on the reference element."
+                )
+            vertex_indices.append(index)
+
+        vertex_indices_tuple = tuple(vertex_indices)
+        setattr(self, cache_name, vertex_indices_tuple)
+        return vertex_indices_tuple
+
+    def _build_vertex_visualization_point_data(self) -> dict[str, numpy.ndarray]:
+        """Project DG nodal state to mesh vertices for visualization snapshots."""
+        vertex_node_indices = self._reference_tetra_vertex_node_indices()
+        element_vertices = torch.Tensor.numpy(self.mesh.EToV.cpu()).T
+        n_vertices = self.mesh.N_vertices
+        point_data: dict[str, numpy.ndarray] = {}
+
+        for field_name in ("P", "Vx", "Vy", "Vz"):
+            field = getattr(self, field_name).detach().cpu().numpy()
+            accumulated = numpy.zeros(n_vertices, dtype=field.dtype)
+            counts = numpy.zeros(n_vertices, dtype=numpy.int64)
+            for local_vertex_position, local_node_index in enumerate(
+                vertex_node_indices
+            ):
+                global_vertex_ids = element_vertices[:, local_vertex_position]
+                local_values = field[local_node_index, :]
+                numpy.add.at(accumulated, global_vertex_ids, local_values)
+                numpy.add.at(counts, global_vertex_ids, 1)
+            counts = numpy.maximum(counts, 1)
+            point_data[field_name] = accumulated / counts
+
+        return point_data
+
+    def save_mesh_results_on_the_run(
+        self,
+        *,
+        output_dir: str | None = None,
+        step_index: int | None = None,
+        real_time: float | None = None,
+        file_format: str = "gmsh22",
+    ):
+        """Save a mesh snapshot with vertex visualization fields in gmsh format."""
+        if output_dir is None:
+            output_dir = "results_on_the_run_msh"
+        os.makedirs(output_dir, exist_ok=True)
+
+        if step_index is None:
+            step_index = 0
+        if real_time is None:
+            real_time = 0.0
+
+        mesh_snapshot = meshio.read(self.mesh.filename)
+        mesh_snapshot.point_data = self._build_vertex_visualization_point_data()
+        file_name = (
+            f"{os.path.splitext(os.path.basename(self.mesh.filename))[0]}_"
+            f"step{step_index:06d}_t{real_time:.6e}.msh"
+        )
+        mesh_path = os.path.join(output_dir, file_name)
+        meshio.write(mesh_path, mesh_snapshot, file_format=file_format)
