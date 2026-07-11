@@ -3528,7 +3528,11 @@ class AcousticsSimulation:
             )
             return
 
-        if self._use_triton_boundary_ade and "CP_B" in bc_cache:
+        if (
+            self._use_triton_boundary_ade
+            and "RP_A" in bc_cache
+            and "CP_B" in bc_cache
+        ):
             self._ri_tensor.fill_(bc_cache["RI_value"])
             boundary_rp_cp_flux_kernel[(triton.cdiv(n_boundary, block_size),)](
                 q_flat,
