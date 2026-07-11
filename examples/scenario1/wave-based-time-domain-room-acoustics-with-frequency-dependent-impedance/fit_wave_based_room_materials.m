@@ -20,7 +20,9 @@ niter = 20;
 materials = {
     'carpet',  'wave_based_room_admittance_carpet.zh_CN.txt',  5, false;
     'ceiling', 'wave_based_room_admittance_ceiling.zh_CN.txt', 5, false;
-    'sofa',    'wave_based_room_admittance_sofa.zh_CN.txt',    5, true;
+    % Keep the sofa real pole. Deleting it without refitting the remaining
+    % residues makes the CP-only EDG boundary unstable in time integration.
+    'sofa',    'wave_based_room_admittance_sofa.zh_CN.txt',    5, false;
     'walls',   'wave_based_room_admittance_wall.zh_CN.txt',    5, false;
 };
 

@@ -74,6 +74,7 @@ temporary_save_msh_Nstep = int(os.environ.get("WAVE_ROOM_SAVE_MSH_STEP", "0"))
 temporary_save_msh_dir = SCRIPT_DIR / "results_on_the_run_msh"
 result_filename = os.environ.get("WAVE_ROOM_RESULT_NAME", "wave_based_room_result")
 skip_postprocess = os.environ.get("WAVE_ROOM_SKIP_POSTPROCESS", "0") != "0"
+cuda_graph_chunk_steps = int(os.environ.get("WAVE_ROOM_CUDA_GRAPH_CHUNK_STEPS", "1"))
 
 
 def _as_row_vector(mat_file: dict, key: str) -> numpy.ndarray:
@@ -237,6 +238,7 @@ def main() -> None:
         "format": "mat",
         "progress": os.environ.get("WAVE_ROOM_PROGRESS", "1") != "0",
         "use_cuda_graph": os.environ.get("WAVE_ROOM_CUDA_GRAPH", "1") != "0",
+        "cuda_graph_chunk_steps": cuda_graph_chunk_steps,
     }
     if save_every_Nstep > 0:
         time_integration_kwargs["delta_step"] = save_every_Nstep
