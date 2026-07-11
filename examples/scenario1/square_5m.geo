@@ -1,8 +1,8 @@
 SetFactory("OpenCASCADE");
 Mesh.MshFileVersion = 2.2;
-// gmsh ./square_5m.geo -format msh22 -3  -o square_hardwall.msh ,59GB for lc 0.0785
+
 DefineConstant[
-  lc = {0.0785, Name "Parameters/lc"}
+  lc = {0.0775, Name "Parameters/lc"}
 ];
 
 Box(1) = {0.0, 0.0, 0.0, 5.0, 5.0, 5.0};

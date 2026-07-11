@@ -187,9 +187,7 @@ def _init_receivers(sim: edg_acoustics.AcousticsSimulation) -> None:
         numpy.asarray(sim.mesh.EToV.cpu()),
         nodeindex,
     )
-    shape = modepy.Simplex(sim.dim)
-    space = modepy.space_for_shape(shape, sim.Nx)
-    simplex_basis = modepy.orthonormal_basis_for_space(space, shape).functions
+    simplex_basis = modepy.simplex_onb(sim.dim, sim.Nx)
     v_new = modepy.vandermonde(simplex_basis, rst_rec)
     sample_weight = v_new @ numpy.linalg.inv(sim.V.cpu().numpy())
 
