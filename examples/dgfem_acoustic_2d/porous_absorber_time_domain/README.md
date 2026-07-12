@@ -7,6 +7,16 @@
     --save-step 1000 \
     --save-mesh-at-ms 5.5
 ```
+如果重新生成网格
+```bash
+  PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics \
+  python main.py \
+    --thickness both \
+    --force-fit \
+    --save-step 1000 \
+    --save-mesh-at-ms 5.5 \
+    --force-mesh
+```
 
 # 画图
 

@@ -35,7 +35,7 @@ PHYSICAL_YMAX = L0
 SOURCE_XYZ = numpy.array([-1.0, 0.5, 0.0], dtype=numpy.float64)
 RECEIVER_XYZ = numpy.array([[1.0], [0.5], [0.0]], dtype=numpy.float64)
 PULSE_B = 0.045
-DEFAULT_ORDER = 3
+DEFAULT_ORDER = 4
 DEFAULT_NT = 4
 DEFAULT_CFL = 0.25
 DOMAIN_LABELS = {"Air": 1, "Porous": 2, "Sponge": 3}
