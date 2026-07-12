@@ -17,13 +17,23 @@ class Mesh2D(SimplexMesh):
     faces_per_element = 3
     face_vertex_ids = torch.tensor([[0, 1], [1, 2], [0, 2]], dtype=torch.long)
 
-    def __init__(self, filename: str, BC_labels: dict[str, int]):
-        self._init_common(filename, BC_labels)
+    def __init__(
+        self,
+        filename: str,
+        BC_labels: dict[str, int],
+        domain_labels: dict[str, int] | None = None,
+    ):
+        self._init_common(filename, BC_labels, domain_labels)
         if not filename.endswith(".msh"):
             raise ValueError("Mesh2D currently supports Gmsh .msh files.")
-        self.init_from_mesh_file(filename, BC_labels)
+        self.init_from_mesh_file(filename, BC_labels, domain_labels)
 
-    def init_from_mesh_file(self, filename: str, BC_labels: dict[str, int]):
+    def init_from_mesh_file(
+        self,
+        filename: str,
+        BC_labels: dict[str, int],
+        domain_labels: dict[str, int] | None = None,
+    ):
         mesh_data = meshio.read(filename)
         if self.element_cell_type not in mesh_data.cells_dict:
             raise ValueError("Mesh2D requires triangle elements.")

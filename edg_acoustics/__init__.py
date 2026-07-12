@@ -4,12 +4,17 @@ import logging
 from .acoustics_simulation import AcousticsSimulation
 from .mesh import Mesh
 from .boundary_condition import BoundaryCondition, AbsorbBC
-from .initial_condition import InitialCondition, Monopole_IC
-from .preprocessing import Flux, UpwindFlux
+from .initial_condition import InitialCondition, Monopole_IC, RadialPressurePulse2D_IC
+from .preprocessing import Flux, UpwindFlux, MaterialUpwindFlux2D
 from .time_integration import TimeIntegrator, TSI_TI
 from .postprocessing import Monopole_postprocessor
 from .mesh2d import Mesh2D
 from .acoustics_simulation_2d import AcousticsSimulation2D
+from .acoustics_simulation_2d_er import (
+    ExtendedReactionMaterialFit,
+    ExtendedReactionSimulation2D,
+    VectorFittedSISO,
+)
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 

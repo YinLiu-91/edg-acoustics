@@ -19,9 +19,15 @@ class SimplexMesh(abc.ABC):
     faces_per_element: int
     face_vertex_ids: torch.Tensor
 
-    def _init_common(self, filename: str, BC_labels: dict[str, int]):
+    def _init_common(
+        self,
+        filename: str,
+        BC_labels: dict[str, int],
+        domain_labels: dict[str, int] | None = None,
+    ):
         self.filename = filename
         self.BC_labels = BC_labels
+        self.domain_labels = {} if domain_labels is None else dict(domain_labels)
 
     def _load_vertices(self, mesh_data):
         self.N_vertices = mesh_data.points.shape[0]
@@ -52,6 +58,28 @@ class SimplexMesh(abc.ABC):
         self.N_elements = elements.shape[0]
         self.EToV = torch.from_numpy(elements.transpose()).to(device_ini.device)
         self.EToE, self.EToF = self.compute_element_connectivity(self.EToV)
+        physical = mesh_data.cell_data_dict["gmsh:physical"][self.element_cell_type]
+        self.element_physical_labels = torch.from_numpy(physical).to(device_ini.device)
+        self.N_element_labels = {
+            int(label): int((physical == label).sum()) for label in numpy.unique(physical)
+        }
+        self.domain_elements = {}
+        self.N_domain_elements = {}
+        if self.domain_labels:
+            labels_in_mesh = sorted(numpy.unique(physical))
+            labels_in_input = sorted(self.domain_labels.values())
+            missing = sorted(set(labels_in_input).difference(labels_in_mesh))
+            if missing:
+                raise ValueError(
+                    "[edg_acoustics.SimplexMesh] Domain labels missing from the mesh: "
+                    + ", ".join(str(label) for label in missing)
+                )
+            for name, label in self.domain_labels.items():
+                selector = physical == label
+                self.domain_elements[name] = torch.nonzero(
+                    torch.from_numpy(selector), as_tuple=False
+                ).reshape(-1).to(device_ini.device)
+                self.N_domain_elements[name] = int(selector.sum())
 
     def compute_element_connectivity(self, EToV: torch.Tensor):
         """Build element-to-element and element-to-face adjacency."""

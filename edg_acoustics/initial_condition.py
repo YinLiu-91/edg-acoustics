@@ -11,7 +11,7 @@ import torch
 import math
 import edg_acoustics.device_ini as device_ini
 
-__all__ = ["InitialCondition", "Monopole_IC"]
+__all__ = ["InitialCondition", "Monopole_IC", "RadialPressurePulse2D_IC"]
 
 
 class InitialCondition(abc.ABC):
@@ -111,6 +111,39 @@ class Monopole_IC(InitialCondition):
 
     def VZinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in z-direction."""
+        return torch.zeros(
+            [xyz.shape[1], xyz.shape[2]], device=xyz.device, dtype=device_ini.dtype
+        )
+
+
+class RadialPressurePulse2D_IC(InitialCondition):
+    """Axisymmetric 2D pressure pulse used by the porous absorber example."""
+
+    def __init__(self, source_xyz: torch.tensor, halfwidth: float):
+        self.source_xyz = numpy.asarray(source_xyz, dtype=float)
+        self.halfwidth = float(halfwidth)
+
+    def Pinit(self, xyz: torch.tensor):
+        dx = xyz[0] - self.source_xyz[0]
+        dy = xyz[1] - self.source_xyz[1]
+        radius_squared = dx**2 + dy**2
+        halfwidth_squared = self.halfwidth**2
+        pressure = (1.0 - radius_squared / halfwidth_squared) * torch.exp(
+            -radius_squared / (2.0 * halfwidth_squared)
+        )
+        return pressure.to(device=xyz.device, dtype=device_ini.dtype)
+
+    def VXinit(self, xyz: torch.tensor):
+        return torch.zeros(
+            [xyz.shape[1], xyz.shape[2]], device=xyz.device, dtype=device_ini.dtype
+        )
+
+    def VYinit(self, xyz: torch.tensor):
+        return torch.zeros(
+            [xyz.shape[1], xyz.shape[2]], device=xyz.device, dtype=device_ini.dtype
+        )
+
+    def VZinit(self, xyz: torch.tensor):
         return torch.zeros(
             [xyz.shape[1], xyz.shape[2]], device=xyz.device, dtype=device_ini.dtype
         )

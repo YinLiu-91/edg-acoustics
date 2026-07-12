@@ -99,6 +99,12 @@ class TSI_TI(TimeIntegrator):
         )
         if not getattr(owner, "_use_fused_state_accumulation", False):
             self.L_operator_packed_accumulate = None
+        self._prepare_auxiliary_state = getattr(
+            owner, "_prepare_taylor_auxiliary_state", None
+        )
+        self._accumulate_auxiliary_state = getattr(
+            owner, "_accumulate_taylor_auxiliary_state", None
+        )
         self._state_buffers = None
         self._packed_state_buffer = None
         print("TSI_TI initialized.")
@@ -213,6 +219,8 @@ class TSI_TI(TimeIntegrator):
         ##########################
         P0, Vx0, Vy0, Vz0 = self._copy_state_to_buffers(P, Vx, Vy, Vz)
         self._copy_boundary_derivatives(BC)
+        if self._prepare_auxiliary_state is not None:
+            self._prepare_auxiliary_state()
 
         ##########################
         for Tind, coefficient in enumerate(self.taylor_coefficients, start=1):
@@ -224,5 +232,7 @@ class TSI_TI(TimeIntegrator):
             Vy.add_(Vy0, alpha=coefficient)
             Vz.add_(Vz0, alpha=coefficient)
             P.add_(P0, alpha=coefficient)
+            if self._accumulate_auxiliary_state is not None:
+                self._accumulate_auxiliary_state(coefficient)
 
             self._accumulate_boundary_derivatives(BC, coefficient)

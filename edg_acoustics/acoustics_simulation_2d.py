@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import meshio
+import modepy
 import numpy
 import scipy.io
 import torch
+from scipy.spatial.qhull import Delaunay
 
 import edg_acoustics.device_ini as device_ini
 import edg_acoustics.simplex_dg as simplex_dg
@@ -61,6 +63,7 @@ class AcousticsSimulation2D:
         self.BC = None
         self.flux = None
         self.time_integrator = None
+        self.rec = None
 
     def _init_local_system(self):
         vertices = torch.from_numpy(self.mesh.vertices).to(
@@ -164,6 +167,73 @@ class AcousticsSimulation2D:
 
     def init_TimeIntegrator(self, time_integrator: TimeIntegrator):
         self.time_integrator = time_integrator
+
+    @staticmethod
+    def locate_simplex_2d(
+        node_coordinates: numpy.ndarray,
+        EToV: numpy.ndarray,
+        rec: numpy.ndarray,
+        methodLocate: str = "scipy",
+    ):
+        """Locate the triangles containing the requested sample points."""
+        rec_xy = rec[:2]
+        node_xy = node_coordinates[:2]
+        if methodLocate == "scipy":
+            tri = Delaunay(node_xy.T, qhull_options="QJ")
+            tri.simplices = EToV.T  # type: ignore
+            tri.nsimplex = EToV.shape[1]  # type: ignore
+            nodeindex = tri.find_simplex(rec_xy.T)  # type: ignore
+        else:
+            raise ValueError(
+                f"{methodLocate} is not an available 2D search method."
+            )
+
+        if numpy.any(nodeindex < 0):
+            raise ValueError("Some receiver points are outside of the 2D mesh.")
+        return nodeindex
+
+    def sample2D(self, methodLocate: str = "scipy"):
+        """Compute interpolation weights for 2D receiver sampling."""
+        nodeindex = AcousticsSimulation2D.locate_simplex_2d(
+            self.mesh.vertices,
+            torch.Tensor.numpy(self.mesh.EToV.cpu()),
+            self.rec,
+            methodLocate,
+        )
+        old_nodes = self.xyz[:, :, nodeindex]
+        simplex_basis = modepy.simplex_onb(self.dim, self.Nx)
+        v_new = modepy.vandermonde(simplex_basis, self.rec[:2])
+        sampleWeight = numpy.zeros([self.rec.shape[1], len(simplex_basis)])
+
+        for index in range(old_nodes.shape[2]):
+            v_old = modepy.vandermonde(
+                simplex_basis, torch.Tensor.numpy(old_nodes[:, :, index].cpu())
+            )
+            sampleWeight[index] = v_new[index] @ numpy.linalg.inv(v_old)
+
+        return (
+            torch.from_numpy(sampleWeight).to(self.device).to(device_ini.dtype),
+            nodeindex,
+        )
+
+    def init_rec(self, rec: numpy.ndarray, methodLocate: str = "scipy"):
+        """Initialize receiver interpolation metadata for 2D runs."""
+        self.rec = rec
+        self.sampleWeight, self.nodeindex = self.sample2D(methodLocate)
+        normalized_nodeindex = numpy.mod(self.nodeindex, self.N_elements)
+        self._nodeindex_tensor = torch.as_tensor(
+            normalized_nodeindex, device=self.device, dtype=torch.long
+        )
+        self._sample_values = torch.empty(
+            (self.Np, self.rec.shape[1]), device=self.device, dtype=device_ini.dtype
+        )
+        self._sample_output = torch.empty(
+            (self.rec.shape[1],), device=self.device, dtype=device_ini.dtype
+        )
+
+    def _sample_receivers(self, out: torch.tensor):
+        torch.index_select(self.P, 1, self._nodeindex_tensor, out=self._sample_values)
+        torch.sum(self.sampleWeight * self._sample_values.T, dim=1, out=out)
 
     def _cache_boundary_parameters(self):
         self._BC_cache = []
@@ -461,6 +531,15 @@ class AcousticsSimulation2D:
             "Nt": self.time_integrator.Nt,
             "CFL": self.time_integrator.CFL,
         }
+        if hasattr(self, "extra_results_metadata"):
+            data.update(self.extra_results_metadata)
+        if self.rec is not None:
+            time_steps = int(step_index)
+            data["rec"] = self.rec
+            data["prec"] = self.prec[:, :time_steps].detach().cpu().numpy()
+            data["time"] = (
+                numpy.arange(1, time_steps + 1) * self.time_integrator.dt
+            )
         if format == "mat":
             scipy.io.savemat(output_dir / "results_on_the_run.mat", data)
         elif format == "npy":
@@ -478,9 +557,11 @@ class AcousticsSimulation2D:
         total_time = kwargs.get("total_time")
         progress = kwargs.get("progress", False)
         save_step = int(kwargs.get("save_step", 0) or 0)
+        save_steps = {int(step) for step in kwargs.get("save_steps", [])}
         save_results_dir = kwargs.get("save_results_dir", None)
         save_format = kwargs.get("format", "mat")
         save_mesh_step = int(kwargs.get("save_mesh_step", 0) or 0)
+        save_mesh_steps = {int(step) for step in kwargs.get("save_mesh_steps", [])}
         save_mesh_dir = kwargs.get("save_mesh_dir", None)
         save_mesh_format = kwargs.get("save_mesh_format", "gmsh22")
         if n_time_steps is None:
@@ -488,22 +569,40 @@ class AcousticsSimulation2D:
                 raise ValueError("Set n_time_steps or total_time.")
             n_time_steps = math.floor(total_time / self.time_integrator.dt)
         self.Ntimesteps = int(n_time_steps)
+        if self.rec is not None:
+            self.prec = torch.zeros(
+                (self.rec.shape[1], self.Ntimesteps),
+                device=self.device,
+                dtype=device_ini.dtype,
+            )
 
         for step in range(self.Ntimesteps):
             self.time_integrator.step_dt(self.P, self.Vx, self.Vy, self.Vz, self.BC)
+            step_index = step + 1
+            if self.rec is not None:
+                self._sample_receivers(self._sample_output)
+                self.prec[:, step].copy_(self._sample_output)
             if progress and (step % 10 == 0 or step + 1 == self.Ntimesteps):
-                print(f"2D acoustic step {step + 1}/{self.Ntimesteps}")
-            if save_step > 0 and step % save_step == 0:
+                print(f"2D acoustic step {step_index}/{self.Ntimesteps}")
+            should_save_results = (
+                (save_step > 0 and step_index % save_step == 0)
+                or step_index in save_steps
+            )
+            if should_save_results:
                 self.save_results_on_the_run(
                     output_dir=save_results_dir,
                     format=save_format,
-                    step_index=step + 1,
+                    step_index=step_index,
                 )
-            if save_mesh_step > 0 and step % save_mesh_step == 0:
+            should_save_mesh = (
+                (save_mesh_step > 0 and step_index % save_mesh_step == 0)
+                or step_index in save_mesh_steps
+            )
+            if should_save_mesh:
                 self.save_mesh_results_on_the_run(
                     output_dir=save_mesh_dir,
-                    step_index=step + 1,
-                    real_time=(step + 1) * self.time_integrator.dt,
+                    step_index=step_index,
+                    real_time=step_index * self.time_integrator.dt,
                     file_format=save_mesh_format,
                 )
 

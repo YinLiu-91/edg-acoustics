@@ -6,7 +6,7 @@ import numpy
 import torch
 import edg_acoustics.device_ini as device_ini
 
-__all__ = ["Flux", "UpwindFlux"]
+__all__ = ["Flux", "UpwindFlux", "MaterialUpwindFlux2D"]
 
 
 class Flux(abc.ABC):
@@ -210,3 +210,68 @@ class UpwindFlux(Flux):
             + (self.cn3s) * dvz
             + (self.n3rho) * dp
         )
+
+
+class MaterialUpwindFlux2D(Flux):
+    """2D upwind flux with element-wise acoustic material properties."""
+
+    def __init__(
+        self,
+        n_xyz: torch.tensor,
+        rho_left: torch.tensor,
+        rho_right: torch.tensor,
+        c_left: torch.tensor,
+        c_right: torch.tensor,
+    ):
+        self.device = device_ini.device
+        self.nx = n_xyz[0]
+        self.ny = n_xyz[1]
+        self.rho_left = rho_left
+        self.rho_right = rho_right
+        self.c_left = c_left
+        self.c_right = c_right
+        self.z_left = self.rho_left * self.c_left
+        self.z_right = self.rho_right * self.c_right
+        self.k_left = self.rho_left * self.c_left**2
+        self.denominator = self.z_left + self.z_right
+        self.normal_flux = torch.empty_like(self.nx)
+
+    def FluxP(self, dvx: torch.tensor, dvy: torch.tensor, dvz: torch.tensor, dp: torch.tensor):
+        dvn = self.nx * dvx + self.ny * dvy
+        return self.k_left * (self.z_right * dvn - dp) / self.denominator
+
+    def FluxVx(self, dvx: torch.tensor, dvy: torch.tensor, dvz: torch.tensor, dp: torch.tensor):
+        dvn = self.nx * dvx + self.ny * dvy
+        normal_flux = (self.c_right * dp - self.c_left * self.z_right * dvn) / self.denominator
+        return self.nx * normal_flux
+
+    def FluxVy(self, dvx: torch.tensor, dvy: torch.tensor, dvz: torch.tensor, dp: torch.tensor):
+        dvn = self.nx * dvx + self.ny * dvy
+        normal_flux = (self.c_right * dp - self.c_left * self.z_right * dvn) / self.denominator
+        return self.ny * normal_flux
+
+    def FluxVz(self, dvx: torch.tensor, dvy: torch.tensor, dvz: torch.tensor, dp: torch.tensor):
+        return torch.zeros_like(dp)
+
+    def compute_all(
+        self,
+        dvx: torch.tensor,
+        dvy: torch.tensor,
+        dvz: torch.tensor,
+        dp: torch.tensor,
+        out_vx: torch.tensor,
+        out_vy: torch.tensor,
+        out_vz: torch.tensor,
+        out_p: torch.tensor,
+    ):
+        torch.mul(self.nx, dvx, out=self.normal_flux)
+        self.normal_flux.addcmul_(self.ny, dvy)
+        out_p.copy_(
+            self.k_left * (self.z_right * self.normal_flux - dp) / self.denominator
+        )
+        normal_velocity_flux = (
+            self.c_right * dp - self.c_left * self.z_right * self.normal_flux
+        ) / self.denominator
+        torch.mul(self.nx, normal_velocity_flux, out=out_vx)
+        torch.mul(self.ny, normal_velocity_flux, out=out_vy)
+        out_vz.zero_()
