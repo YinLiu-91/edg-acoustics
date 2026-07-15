@@ -36,6 +36,8 @@
   当前目录里已经生成的一张示例图，包含压力曲线和与 COMSOL 的误差图。
 - `MinerU_markdown_models.aco.porous_absorber_time_domain.zh_CN_2076138063190925312.md`
   COMSOL 教程的 Markdown 转写稿，用来核对几何、参数、物理设置和参考图。
+- `MinerU_markdown_Wang_and_Hornikx_-_2023_-_Extended_reacting_boundary_modeling_of_porous_materials_with_thin_coverings_for_time-domain_room_aco.md`
+  Wang 和 Hornikx (2023) 论文的 Markdown 转写稿，是本 README 中扩展反应性多孔材料、ADE 状态变量和界面通量说明的理论来源。
 
 ## 2. 运行前提
 
@@ -232,22 +234,468 @@ rtk python plot_results.py \
 - `--save-mesh-at-ms 5.5`
   在最接近 `5.5 ms` 的时刻额外导出一份 `.msh`
 
-## 7. 主要代码在做什么
+## 7. 文献公式与代码对应
 
-这个 case 的核心不只是“把空气波动方程搬到 2D”。
+本算例对应 Wang 和 Hornikx (2023) 的 extended reacting porous material time-domain formulation。当前实现包含多孔材料的频率相关反应性，但没有实现论文中的薄覆盖层状态变量；因此覆盖层界面阻抗在本算例中取为 `Z_t=0`，代码实际求解的是无遮盖层的相邻介质界面。
 
-它实际做了三件更具体的事：
+### 7.0 三类区域分别求解什么
 
-1. 在空气域内求解标准线性声学方程。
-2. 在多孔域内用拟合后的 `beta(s)` 和 `rho(s)` 引入辅助状态，把频率相关材料转成时域可推进的形式。
-3. 在几何外圈加 sponge 吸收层，减少有限计算域带来的边界反射。
+几何文件把三角形单元标记为 Air=1、Porous=2 和 Sponge=3。这三个标签不是三个完全独立的 PDE：
 
-这三部分分别对应：
+| 区域 | 主变量方程 | 额外状态 | 代码中的处理 |
+| --- | --- | --- | --- |
+| Air | 标准线性声学方程 | 无 | 使用空气的 rho0、c0 |
+| Porous | 仍然求解 P/Vx/Vy，但本构关系变为频率相关的 ER 模型 | z_beta、z_rho_x、z_rho_y | 用 beta_D/rho_D 和 A/B/C 状态空间项替换空气右端 |
+| Sponge | 标准声学方程加空间阻尼 | 无 | 只在 Sponge 单元中令 sigma>0 |
 
-- 空气域和边界基础框架：`edg_acoustics/acoustics_simulation_2d.py`
-- ER 多孔材料与 sponge：`edg_acoustics/acoustics_simulation_2d_er.py`
-- 跨材料界面的数值通量：`edg_acoustics/preprocessing.py` 里的 `MaterialUpwindFlux2D`
-- 时间推进：`edg_acoustics/time_integration.py` 里的 `TSI_TI`
+因此，二维代码的主未知量可以写成
+
+$$
+U=(p,v_x,v_y),
+$$
+
+多孔单元还要附带材料记忆状态
+
+$$
+Z=(z_\beta,z_{\rho,x},z_{\rho,y}).
+$$
+
+RHS_operator(P, Vx, Vy, Vz, BCvar) 每次被时间积分器调用时，执行如下顺序：
+
+1. P/Vx/Vy 是所有单元上的主变量；_gradient() 计算单元内部梯度，得到 dPdx、dPdy、dVxdx、dVydy 和 divV。
+2. MaterialUpwindFlux2D 根据相邻单元的材料参数计算所有内部面的数值通量。
+3. 先用 k_inf 和 inv_rho_inf 形成所有单元的标准声学右端，再用 _porous_mask_2d 只覆盖多孔单元的右端。
+4. 用 z_beta、z_rho_x、z_rho_y 计算材料记忆项，并同时计算三个 ADE 状态的右端。
+5. 用 Fscale 和 lift 把面通量加入体积分右端，最后在 Sponge 单元中加入 -sigma*field。
+
+这个顺序很重要：材料记忆项属于多孔单元内部的体方程；空气-多孔交界面本身不存储一个单独的“界面压力”或“界面速度”，而是由数值通量弱形式地施加界面条件。
+
+#### 7.0.1 空气区域的方程和代码
+
+空气区域求解的是无耗散、无平均流背景下的线性一阶声学方程：
+
+$$
+\frac{\partial \boldsymbol v}{\partial t}
+  + \frac{1}{\rho_a}\nabla p = 0,
+\qquad
+\frac{\partial p}{\partial t}
+  + \rho_a c_a^2\nabla\cdot\boldsymbol v = 0.
+$$
+
+本算例中空气参数来自 main.py：
+
+$$
+\rho_a=\text{RHO0}=1.213,
+\qquad
+c_a=\text{C0}=343.0,
+\qquad
+K_a=\rho_a c_a^2.
+$$
+
+在 ExtendedReactionSimulation2D._build_material_model() 中，所有单元先默认填入
+
+$$
+\beta_a=\frac{1}{\rho_a c_a^2},
+\qquad
+\rho_a=\text{RHO0},
+\qquad
+K_a=\frac{1}{\beta_a}.
+$$
+
+因此，对空气单元，RHS_operator() 的基础右端就是
+
+$$
+\dot p=-K_a
+\left(\frac{\partial v_x}{\partial x}
+      +\frac{\partial v_y}{\partial y}\right),
+\qquad
+\dot v_x=-\frac{1}{\rho_a}\frac{\partial p}{\partial x},
+\qquad
+\dot v_y=-\frac{1}{\rho_a}\frac{\partial p}{\partial y}.
+$$
+
+对应代码逻辑为：
+
+```text
+dPdx, dPdy = self._gradient(P)
+dVxdx, _ = self._gradient(Vx)
+_, dVydy = self._gradient(Vy)
+divV = dVxdx + dVydy
+
+rhs_P  = -self.k_inf_elements * divV
+rhs_Vx = -self.inv_rho_inf_elements * dPdx
+rhs_Vy = -self.inv_rho_inf_elements * dPdy
+```
+
+_gradient() 不是有限差分，而是利用 DG 基函数导数矩阵 Dr、Ds 和单元几何映射得到物理坐标梯度。P、Vx、Vy 的张量形状为 (Np, N_elements)，所以每个单元内部都有一组独立的 DG 多项式自由度。
+
+#### 7.0.2 多孔材料区域的方程和代码
+
+多孔区域的主变量仍然是压力 p 和速度 v，但材料本构关系不再是常数 rho_a、K_a，而是频率相关的有效密度 rho_eff 和有效压缩率 beta_eff：
+
+$$
+i\omega\rho_{\mathrm{eff}}(\omega)\widehat{\boldsymbol v}
+  +\nabla\widehat p=0,
+\qquad
+i\omega\beta_{\mathrm{eff}}(\omega)\widehat p
+  +\nabla\cdot\widehat{\boldsymbol v}=0.
+$$
+
+fit_er_material.m 先用 vectfit3 将频域数据拟合为
+
+$$
+\rho_{\mathrm{eff}}(s)
+  =D_\rho+C_\rho(sI-A_\rho)^{-1}B_\rho,
+\qquad
+\beta_{\mathrm{eff}}(s)
+  =D_\beta+C_\beta(sI-A_\beta)^{-1}B_\beta.
+$$
+
+代码把 D_beta、D_rho 作为多孔材料主方程的瞬时系数：
+
+$$
+\beta_D=D_\beta,
+\qquad
+\rho_D=D_\rho,
+\qquad
+K_\infty=\frac{1}{\beta_D},
+\qquad
+c_\infty=\sqrt{\frac{K_\infty}{\rho_D}}.
+$$
+
+对应的多孔区域主方程为
+
+$$
+\begin{aligned}
+\beta_D\dot p
+  &=-\nabla\cdot\boldsymbol v
+    -C_\beta A_\beta z_\beta
+    -C_\beta B_\beta p,\\
+\rho_D\dot v_x
+  &=-\frac{\partial p}{\partial x}
+    -C_\rho A_\rho z_{\rho,x}
+    -C_\rho B_\rho v_x,\\
+\rho_D\dot v_y
+  &=-\frac{\partial p}{\partial y}
+    -C_\rho A_\rho z_{\rho,y}
+    -C_\rho B_\rho v_y.
+\end{aligned}
+$$
+
+三个材料状态满足
+
+$$
+\dot z_\beta=A_\beta z_\beta+B_\beta p,
+\qquad
+\dot z_{\rho,x}=A_\rho z_{\rho,x}+B_\rho v_x,
+\qquad
+\dot z_{\rho,y}=A_\rho z_{\rho,y}+B_\rho v_y.
+$$
+
+代码对应关系如下：
+
+| 数学量 | 代码 |
+| --- | --- |
+| z_beta、z_rho_x、z_rho_y | _aux_state_names 和对应的状态张量 |
+| A_beta*z_beta+B_beta*p | _material_rhs(beta_A, beta_B, z_beta, masked_P) |
+| A_rho*z_rho_x+B_rho*Vx | _material_rhs(rho_A, rho_B, z_rho_x, masked_Vx) |
+| C_beta*A_beta*z_beta | beta_memory = _collapse_memory(beta_CA, z_beta, P) |
+| C_rho*A_rho*z_rho_x/y | rho_memory_x/y = _collapse_memory(rho_CA, z_rho_x/y, Vx/Vy) |
+| 多孔压力右端 | rhs_porous_P = -(divV + beta_memory + beta_CB*P) / beta_D |
+| 多孔速度右端 | rhs_porous_Vx/Vy = -(dPdx/dPdy + rho_memory_x/y + rho_CB*Vx/Vy) / rho_D |
+
+_init_material_state_space() 读入 A/B/C/D，_allocate_auxiliary_state() 为每个多孔单元分配 (n_state, Np, N_elements) 的状态张量并置零。_material_rhs() 执行 Az+Bu，_collapse_memory() 执行 C z 的收缩。
+
+注意，基础声学右端会先对全部单元计算。随后代码用
+
+```text
+rhs_P  = torch.where(self._porous_mask_2d, rhs_porous_P, rhs_P)
+rhs_Vx = torch.where(self._porous_mask_2d, rhs_porous_Vx, rhs_Vx)
+rhs_Vy = torch.where(self._porous_mask_2d, rhs_porous_Vy, rhs_Vy)
+```
+
+只把 Porous 单元切换到 ER 方程。材料状态的输入也先乘以 _porous_mask_2d，因此 Air 和 Sponge 单元不会推进多孔材料 ADE。
+
+### 7.1 空气域：标准线性声学
+
+论文中的空气域方程为
+
+$$
+\frac{\partial \boldsymbol v}{\partial t}
+  + \frac{1}{\rho_a}\nabla p = 0,
+\qquad
+\frac{\partial p}{\partial t}
+  + \rho_a c_a^2\nabla\cdot\boldsymbol v = 0.
+$$
+
+其中 `p` 是声压，`v=(v_x,v_y)` 是质点速度，`rho_a` 和 `c_a` 分别是空气密度和声速。代码中的对应参数是 `main.py` 的 `RHO0=1.213` 和 `C0=343.0`；`build_simulation()` 将它们传入 `ExtendedReactionSimulation2D`。在 `RHS_operator()` 中，非多孔单元使用
+
+$$
+\frac{\partial p}{\partial t}=-K_\infty\nabla\cdot\boldsymbol v,
+\qquad
+\frac{\partial \boldsymbol v}{\partial t}
+  =-\frac{1}{\rho_\infty}\nabla p,
+$$
+
+其中 `K_inf=rho_inf*c_inf^2`。对于空气，`rho_inf=rho_a`、`c_inf=c_a`，所以它就是上面的线性声学方程。
+
+### 7.2 多孔材料：频域模型到时间域 ADE
+
+论文在频域中用有效密度和有效压缩率描述反应性多孔材料：
+
+$$
+i\omega\rho_{\mathrm{eff}}(\omega)\widehat{\boldsymbol v}
+  +\nabla\widehat p=0,
+\qquad
+i\omega\mathcal C_{\mathrm{eff}}(\omega)\widehat p
+  +\nabla\cdot\widehat{\boldsymbol v}=0.
+$$
+
+代码使用 `beta` 表示论文中的 `\mathcal C`（压缩率）。有理函数拟合可写成
+
+$$
+\rho_{\mathrm{eff}}(s)\approx \rho_m
+  +\sum_k\frac{B_{\rho k}}{s+\zeta_{\rho k}},
+\qquad
+\beta_{\mathrm{eff}}(s)\approx \beta_m
+  +\sum_k\frac{B_{\beta k}}{s+\zeta_{\beta k}}.
+$$
+
+论文中的逐极点 ADE 形式为
+
+$$
+\dot{\phi}_{\rho k}+\zeta_{\rho k}\phi_{\rho k}=v,
+\qquad
+\dot{\phi}_{\beta k}+\zeta_{\beta k}\phi_{\beta k}=p.
+$$
+
+因此，代码里的 `z_rho_x`、`z_rho_y` 和 `z_beta` 是这些逐极点变量经过状态空间组合后的向量表示，而不是额外的物理场。`A/B` 矩阵负责状态演化，`C` 矩阵把记忆状态反馈到压力或速度方程，`D` 则给出瞬时高频项。
+
+在本目录的 `fit_er_material.m` 中，`vectfit3` 将实测/计算的频域 `beta` 和 `rho` 数据分别拟合成实状态空间形式
+
+$$
+H(s)=D+C(sI-A)^{-1}B,
+\qquad
+\dot z=Az+Bu.
+$$
+
+拟合结果保存为 `A_beta/B_beta/C_beta/D_beta` 和 `A_rho/B_rho/C_rho/D_rho`。`n_poles=8` 表示每个材料响应使用 8 个极点；`.mat` 文件由 `ExtendedReactionMaterialFit.from_mat()` 读入。
+
+### 7.3 `RHS_operator()` 中的材料记忆项
+
+`ExtendedReactionSimulation2D._build_material_model()` 从拟合结果取出 `D_beta`、`D_rho` 作为高频常数 `beta_D`、`rho_D`，并计算
+
+$$
+K_\infty=\frac{1}{\beta_D},
+\qquad
+c_\infty=\sqrt{\frac{K_\infty}{\rho_D}},
+\qquad
+Z_\infty=\rho_Dc_\infty.
+$$
+
+对每个多孔单元，代码保存三组材料状态：一个压力状态 `z_beta`，以及两个方向的速度状态 `z_rho_x`、`z_rho_y`。在 `RHS_operator()` 中，压缩率状态对应
+
+$$
+\dot z_\beta=A_\beta z_\beta+B_\beta p,
+$$
+
+并通过
+
+$$
+\beta_D\frac{\partial p}{\partial t}
+ +\nabla\cdot\boldsymbol v
+ +C_\beta A_\beta z_\beta
+ +C_\beta B_\beta p=0
+$$
+
+得到压力右端项。代码中这两项分别预先存成 `beta_CA=C_beta@A_beta` 和 `beta_CB=C_beta@B_beta`，然后实现为：
+
+```text
+beta_memory = beta_CA * z_beta
+rhs_porous_P = -(divV + beta_memory + beta_CB * P) / beta_D
+```
+
+有效密度对两个速度分量分别使用同一个材料模型：
+
+$$
+\dot z_{\rho,x}=A_\rho z_{\rho,x}+B_\rho v_x,
+\qquad
+\rho_D\frac{\partial v_x}{\partial t}
+ +\partial_xp+C_\rho A_\rho z_{\rho,x}
+ +C_\rho B_\rho v_x=0,
+$$
+
+`y` 方向完全相同。对应代码为 `rho_memory_x`、`rho_memory_y` 和 `rhs_porous_Vx/Vy`。这正是论文中把卷积型频域材料关系改写为 auxiliary differential equations (ADE) 后的时间域实现。
+
+### 7.4 DG 空间离散与材料界面上风通量
+
+论文的统一一阶双曲系统可抽象写成
+
+$$
+\frac{\partial q}{\partial t}
+ +A_x\frac{\partial q}{\partial x}
+ +A_y\frac{\partial q}{\partial y}
+ +Dq=g,
+\qquad
+q=[v_x,v_y,p]^T,
+$$
+
+材料记忆状态被包含在 `Dq` 和额外的 ADE 方程中。空间离散使用 DG-FEM：`Mesh2D` 提供单元和面信息，基函数梯度计算体积分项，数值通量通过 lifting 加回单元右端。
+
+`MaterialUpwindFlux2D.compute_all()` 在每个面上使用左右状态的
+
+$$
+Z_L=\rho_Lc_L,
+\qquad
+Z_R=\rho_Rc_R,
+\qquad
+K_L=\rho_Lc_L^2,
+$$
+
+并令 `Delta v_n = n_x Delta v_x + n_y Delta v_y`，计算压力和法向速度通量：
+
+$$
+F_p=K_L\frac{Z_R\,\Delta v_n-\Delta p}{Z_L+Z_R},
+\qquad
+F_{v,n}=\frac{c_R\,\Delta p-c_LZ_R\,\Delta v_n}{Z_L+Z_R}.
+$$
+
+代码再用面法向量把 `F_v,n` 投影为 `F_vx` 和 `F_vy`。这对应论文的 Riemann/upwind 界面处理；本算例的 `BC_PARA` 只配置了外边界吸收 (`RI=0`) 和刚性边界 (`RI=1`)。论文薄覆盖层的界面条件为
+
+$$
+\boldsymbol v_a\cdot\boldsymbol n_a=-\boldsymbol v_m\cdot\boldsymbol n_m,
+\qquad
+p_a-p_m=Z_t(\boldsymbol v_a\cdot\boldsymbol n_a),
+$$
+
+但当前 `MaterialUpwindFlux2D` 没有额外的 `Z_t` 或覆盖层 ADE，因此这里相当于 `Z_t=0`。
+
+#### 7.4.1 空气-多孔材料交界面的实际求解
+
+空气和多孔材料之间没有单独的界面未知量。对于无遮盖层界面，论文条件可以写成
+
+$$
+p_a-p_m=0,
+\qquad
+\boldsymbol v_a\cdot\boldsymbol n_a
+  =-\boldsymbol v_m\cdot\boldsymbol n_m.
+$$
+
+如果两侧都使用同一个面法向 n，则第二个条件就是法向速度通量连续。DG 方法不在离散层面直接把两侧的 p 和 v 赋成相同数值，而是通过数值通量在弱形式中施加上述条件。
+
+一个内部面的代码路径是：
+
+1. AcousticsSimulation2D._jump() 使用 vmapM 和 vmapP 取出面两侧的差值：
+
+   `dP = P[vmapM] - P[vmapP]`，
+   `dVx = Vx[vmapM] - Vx[vmapP]`，
+   `dVy = Vy[vmapM] - Vy[vmapP]`。
+
+2. ExtendedReactionSimulation2D._facewise_property() 将当前单元属性放在 left，将 mesh.EToE 指向的邻居属性放在 right。也就是说：
+
+   - Air-Air 面的两侧都是 rho_a、c_a；
+   - Porous-Porous 面的两侧都是 rho_D、c_infty；
+   - Air-Porous 面的两侧分别使用空气和多孔材料的参数。
+
+3. MaterialUpwindFlux2D.compute_all() 计算法向速度差和两侧阻抗：
+
+   $$
+   \Delta v_n=n_x\Delta v_x+n_y\Delta v_y,
+   \qquad
+   Z_L=\rho_Lc_L,
+   \qquad
+   Z_R=\rho_Rc_R,
+   \qquad
+   K_L=\rho_Lc_L^2.
+   $$
+
+   压力通量和法向速度通量为
+
+   $$
+   F_p=K_L
+   \frac{Z_R\Delta v_n-\Delta p}{Z_L+Z_R},
+   \qquad
+   F_{v,n}=
+   \frac{c_R\Delta p-c_LZ_R\Delta v_n}{Z_L+Z_R}.
+   $$
+
+   最后用面法向投影速度通量：
+
+   $$
+   F_{v_x}=n_xF_{v,n},
+   \qquad
+   F_{v_y}=n_yF_{v,n}.
+   $$
+
+4. 这些面通量乘以几何缩放 Fscale，再通过 lift 加回单元右端：
+
+   ```text
+   fluxP  *= Fscale
+   fluxVx *= Fscale
+   fluxVy *= Fscale
+
+   rhs_P  += lift @ fluxP
+   rhs_Vx += lift @ fluxVx
+   rhs_Vy += lift @ fluxVy
+   ```
+
+因此，Air-Porous 面的主要作用是使用不同的左右阻抗 Z_L、Z_R 自动产生反射和透射；多孔材料的频率记忆并不直接进入 MaterialUpwindFlux2D，而是通过多孔单元内部的 z_beta、z_rho_x、z_rho_y 进入体方程。二者分工如下：
+
+| 物理效应 | 离散位置 | 代码 |
+| --- | --- | --- |
+| 单元内声压/速度梯度 | DG 体积分 | _gradient() |
+| 多孔材料频率记忆、耗散 | Porous 单元体方程 | _material_rhs()、_collapse_memory() |
+| 空气-多孔阻抗不连续 | 共享内部面 | MaterialUpwindFlux2D |
+| 面积分和单元耦合 | DG lifting | Fscale、lift |
+
+当前界面通量只使用 D_beta、D_rho 导出的高频主部参数 rho_inf、c_inf。若要实现论文中的薄覆盖层，需要在界面通量中引入 Z_t，并额外推进覆盖层的 ADE 状态；当前代码没有这组界面状态，因此本算例对应 Z_t=0 的无遮盖层界面。
+
+#### 7.4.2 外边界不是材料交界面
+
+材料内部交界面有邻居单元，可以使用 left/right Riemann 通量；Outer 和 Rigid 是几何外边界，没有邻居单元，由 _compute_boundary_flux() 单独处理。代码先根据边界法向速度和边界阻抗计算出射特征
+
+$$
+u_{\mathrm{out}}=v_n+\frac{p}{Z},
+$$
+
+再设置入射特征
+
+$$
+u_{\mathrm{in}}=R_Iu_{\mathrm{out}}.
+$$
+
+main.py 中的参数是：
+
+```text
+Outer: RI = 0.0  -> 入射特征为 0，吸收边界
+Rigid: RI = 1.0  -> 入射特征等于出射特征，刚性反射
+```
+
+所以 RI 不参与 Air-Porous 内部交界面；内部界面的反射和透射完全由左右材料参数以及 MaterialUpwindFlux2D 的上风通量决定。
+
+### 7.5 激励、吸收层和时间推进
+
+初始条件 `RadialPressurePulse2D_IC` 使用 COMSOL 对照算例中的二维径向压力脉冲：
+
+$$
+p_0(r)=\left(1-\frac{r^2}{B^2}\right)
+\exp\left(-\frac{r^2}{2B^2}\right),
+\qquad
+r^2=(x-x_s)^2+(y-y_s)^2,
+$$
+
+脉冲中心为 `SOURCE_XYZ=(-1.0,0.5,0.0)`，宽度由 `PULSE_B=0.045` 控制，初始速度为零。`RECEIVER_XYZ` 指定接收点，时间历程由 `TSI_TI` 采样并保存到 `outputs/`。
+
+几何文件中的 `Air=1`、`Porous=2`、`Sponge=3` 与 `main.py` 的 `DOMAIN_LABELS` 一致。海绵层不是论文 ADE 材料模型的一部分，而是代码在 `RHS_operator()` 最后加入的空间阻尼：
+
+$$
+\frac{\partial p}{\partial t}\leftarrow\frac{\partial p}{\partial t}-\sigma p,
+\qquad
+\frac{\partial \boldsymbol v}{\partial t}
+\leftarrow\frac{\partial \boldsymbol v}{\partial t}-\sigma\boldsymbol v.
+$$
+
+`SPONGE_THICKNESS=L0/5` 决定阻尼带厚度；它只作用于 `Sponge` 标签内的单元。最后，`TSI_TI` 对上述半离散右端进行时间积分，`DEFAULT_ORDER=4`、`DEFAULT_NT=4` 和 `DEFAULT_CFL=0.25` 控制本算例的 DG 阶数、时间积分阶数和 CFL 步长。
 
 ## 8. 输出结果说明
 
