@@ -120,6 +120,58 @@ def test_porous_absorber_example_short_run(tmp_path: Path):
     assert data["time"].reshape(-1)[0] == pytest.approx(sim.time_integrator.dt)
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="2D porous CUDA graph parity requires CUDA"
+)
+def test_porous_absorber_cuda_graph_matches_eager():
+    module = load_example_module(EXAMPLE_MAIN)
+    mesh_path = module.default_mesh_path(0.05)
+    fit_path = module.DEFAULT_FIT
+
+    with acoustic_device("cuda"):
+        eager = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+        )
+        graphed = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+        )
+
+        eager.time_integration(n_time_steps=5, progress=False, use_cuda_graph=False)
+        graphed.time_integration(
+            n_time_steps=5,
+            progress=False,
+            use_cuda_graph=True,
+            cuda_graph_chunk_steps=2,
+        )
+        torch.cuda.synchronize()
+
+    for field_name in ("P", "Vx", "Vy", "Vz", "Q", "prec"):
+        torch.testing.assert_close(
+            getattr(graphed, field_name),
+            getattr(eager, field_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
+        torch.testing.assert_close(
+            getattr(graphed, state_name),
+            getattr(eager, state_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    assert graphed.last_time_integration_used_cuda_graph is True
+    assert graphed.last_time_integration_cuda_graph_mode == "full"
+    assert graphed.last_time_integration_cuda_graph_chunk_steps == 2
+
+
 @pytest.mark.skipif(shutil.which("gmsh") is None, reason="gmsh is required for mesh validation")
 def test_porous_absorber_rejects_wrong_thickness_mesh(tmp_path: Path):
     module = load_example_module(EXAMPLE_MAIN)

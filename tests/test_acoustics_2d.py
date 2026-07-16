@@ -87,6 +87,40 @@ def test_acoustics_simulation_2d_short_tsi_cuda_matches_cpu():
     torch.testing.assert_close(cuda_sim.Q.cpu(), cpu_sim.Q, rtol=1.0e-9, atol=1.0e-9)
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="2D CUDA graph parity requires CUDA"
+)
+def test_acoustics_simulation_2d_cuda_graph_matches_eager():
+    module = load_example_module(SQUARE_MAIN)
+    receiver_xyz = numpy.array([[0.0], [0.0], [0.0]], dtype=numpy.float64)
+
+    with acoustic_device("cuda"):
+        eager = module.build_simulation(Nx=1, Nt=2, cfl=0.5)
+        eager.init_rec(receiver_xyz)
+        graphed = module.build_simulation(Nx=1, Nt=2, cfl=0.5)
+        graphed.init_rec(receiver_xyz)
+
+        eager.time_integration(n_time_steps=5, progress=False, use_cuda_graph=False)
+        graphed.time_integration(
+            n_time_steps=5,
+            progress=False,
+            use_cuda_graph=True,
+            cuda_graph_chunk_steps=2,
+        )
+        torch.cuda.synchronize()
+
+    for field_name in ("P", "Vx", "Vy", "Vz", "Q", "prec"):
+        torch.testing.assert_close(
+            getattr(graphed, field_name),
+            getattr(eager, field_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    assert graphed.last_time_integration_used_cuda_graph is True
+    assert graphed.last_time_integration_cuda_graph_mode == "full"
+    assert graphed.last_time_integration_cuda_graph_chunk_steps == 2
+
+
 def test_square_example_writes_snapshot(tmp_path):
     module = load_example_module(SQUARE_MAIN)
     snapshot_path = tmp_path / "square_snapshot.mat"

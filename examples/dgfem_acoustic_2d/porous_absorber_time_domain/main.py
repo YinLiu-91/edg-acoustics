@@ -24,6 +24,8 @@ DEFAULT_FIT = CASE_DIR / "er_material_fit.mat"
 DEFAULT_OUTPUT_ROOT = CASE_DIR / "outputs"
 DEFAULT_TOTAL_TIME = 0.01
 DEFAULT_SAVE_MESH_AT_MS = 5.5
+DEFAULT_USE_CUDA_GRAPH = True
+DEFAULT_CUDA_GRAPH_CHUNK_STEPS = 1
 
 RHO0 = 1.213
 C0 = 343.0
@@ -205,6 +207,8 @@ def run_case(
     mesh_path: Path | None = None,
     force_mesh: bool = False,
     sponge_sigma_max: float = 2500.0,
+    use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
+    cuda_graph_chunk_steps: int = DEFAULT_CUDA_GRAPH_CHUNK_STEPS,
 ):
     fit_path = ensure_material_fit(fit_path=fit_path, force=force_fit)
     mesh_path = ensure_mesh(thickness, mesh_path=mesh_path, force=force_mesh)
@@ -229,6 +233,12 @@ def run_case(
         if mesh_step > 0:
             exact_mesh_steps.append(mesh_step)
 
+    sim.extra_results_metadata.update(
+        {
+            "use_cuda_graph_requested": bool(use_cuda_graph),
+            "cuda_graph_chunk_steps_requested": int(cuda_graph_chunk_steps),
+        }
+    )
     sim.time_integration(
         n_time_steps=n_time_steps,
         total_time=total_time if n_time_steps is None else None,
@@ -238,6 +248,21 @@ def run_case(
         save_mesh_steps=exact_mesh_steps,
         save_mesh_dir=str(mesh_output_dir),
         progress=progress,
+        use_cuda_graph=use_cuda_graph,
+        cuda_graph_chunk_steps=cuda_graph_chunk_steps,
+    )
+    sim.extra_results_metadata.update(
+        {
+            "use_cuda_graph": bool(
+                getattr(sim, "last_time_integration_used_cuda_graph", False)
+            ),
+            "cuda_graph_mode": getattr(
+                sim, "last_time_integration_cuda_graph_mode", "disabled"
+            ),
+            "cuda_graph_chunk_steps": int(
+                getattr(sim, "last_time_integration_cuda_graph_chunk_steps", 0)
+            ),
+        }
     )
     sim.save_results_on_the_run(output_dir=output_dir, format="mat", step_index=sim.Ntimesteps)
     snapshot_path = default_snapshot_path(output_dir)
@@ -335,6 +360,18 @@ def parse_args():
         default=True,
         help="Print time-step progress.",
     )
+    parser.add_argument(
+        "--use-cuda-graph",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_USE_CUDA_GRAPH,
+        help="Enable CUDA graph replay for time stepping when running on CUDA.",
+    )
+    parser.add_argument(
+        "--cuda-graph-chunk-steps",
+        type=int,
+        default=DEFAULT_CUDA_GRAPH_CHUNK_STEPS,
+        help="Number of time steps captured in one CUDA graph replay.",
+    )
     return parser.parse_args()
 
 
@@ -367,6 +404,8 @@ def main():
             mesh_path=args.mesh_path,
             force_mesh=args.force_mesh,
             sponge_sigma_max=args.sponge_sigma_max,
+            use_cuda_graph=args.use_cuda_graph,
+            cuda_graph_chunk_steps=args.cuda_graph_chunk_steps,
         )
         print(f"Wrote ER porous absorber outputs to {case_info['output_dir']}")
 

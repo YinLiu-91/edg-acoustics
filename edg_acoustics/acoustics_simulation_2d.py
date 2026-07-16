@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -64,6 +65,11 @@ class AcousticsSimulation2D:
         self.flux = None
         self.time_integrator = None
         self.rec = None
+        self._cuda_step_graphs = {}
+
+    def _clear_cuda_step_graphs(self):
+        if hasattr(self, "_cuda_step_graphs"):
+            self._cuda_step_graphs.clear()
 
     def _init_local_system(self):
         vertices = torch.from_numpy(self.mesh.vertices).to(
@@ -157,16 +163,20 @@ class AcousticsSimulation2D:
         self.Vx.copy_(Vx)
         self.Vy.copy_(Vy)
         self.Vz.copy_(Vz)
+        self._clear_cuda_step_graphs()
 
     def init_BC(self, BC: AbsorbBC):
         self.BC = BC
         self._cache_boundary_parameters()
+        self._clear_cuda_step_graphs()
 
     def init_Flux(self, Flux: Flux):
         self.flux = Flux
+        self._clear_cuda_step_graphs()
 
     def init_TimeIntegrator(self, time_integrator: TimeIntegrator):
         self.time_integrator = time_integrator
+        self._clear_cuda_step_graphs()
 
     @staticmethod
     def locate_simplex_2d(
@@ -230,6 +240,7 @@ class AcousticsSimulation2D:
         self._sample_output = torch.empty(
             (self.rec.shape[1],), device=self.device, dtype=device_ini.dtype
         )
+        self._clear_cuda_step_graphs()
 
     def _sample_receivers(self, out: torch.tensor):
         torch.index_select(self.P, 1, self._nodeindex_tensor, out=self._sample_values)
@@ -549,13 +560,157 @@ class AcousticsSimulation2D:
                 "Invalid format, the format should be either 'mat' or 'npy'."
             )
 
+    @staticmethod
+    def _tensor_state_matches(
+        actual: torch.Tensor,
+        expected: torch.Tensor,
+        *,
+        rtol: float,
+        atol: float,
+    ) -> bool:
+        if actual.is_floating_point() or actual.is_complex():
+            return torch.allclose(actual, expected, rtol=rtol, atol=atol)
+        return torch.equal(actual, expected)
+
+    def _snapshot_time_state(self):
+        auxiliary_state = {}
+        for name in getattr(self, "_aux_state_names", ()):
+            if hasattr(self, name):
+                auxiliary_state[name] = getattr(self, name).clone()
+        return (
+            self.Q_flat.clone(),
+            [
+                {
+                    key: value.clone()
+                    for key, value in state.items()
+                    if torch.is_tensor(value)
+                }
+                for state in self.BC.BCvar
+            ],
+            auxiliary_state,
+        )
+
+    def _restore_time_state(self, snapshot):
+        q_snapshot, bc_snapshot, auxiliary_state = snapshot
+        self.Q_flat.copy_(q_snapshot)
+        for state, state_snapshot in zip(self.BC.BCvar, bc_snapshot):
+            for key, value in state_snapshot.items():
+                state[key].copy_(value)
+        for name, value in auxiliary_state.items():
+            getattr(self, name).copy_(value)
+
+    def _time_state_matches(
+        self,
+        snapshot,
+        *,
+        rtol: float = 1.0e-10,
+        atol: float = 1.0e-10,
+    ) -> bool:
+        q_snapshot, bc_snapshot, auxiliary_state = snapshot
+        if not self._tensor_state_matches(
+            self.Q_flat, q_snapshot, rtol=rtol, atol=atol
+        ):
+            return False
+        for state, state_snapshot in zip(self.BC.BCvar, bc_snapshot):
+            for key, value in state_snapshot.items():
+                if not self._tensor_state_matches(
+                    state[key], value, rtol=rtol, atol=atol
+                ):
+                    return False
+        for name, value in auxiliary_state.items():
+            if not self._tensor_state_matches(
+                getattr(self, name), value, rtol=rtol, atol=atol
+            ):
+                return False
+        return True
+
+    def _run_cuda_step_chunk(
+        self,
+        chunk_steps: int,
+        sample_chunk: torch.Tensor | None,
+    ):
+        for step_index in range(chunk_steps):
+            self.time_integrator.step_dt(self.P, self.Vx, self.Vy, self.Vz, self.BC)
+            if sample_chunk is not None:
+                self._sample_receivers(sample_chunk[step_index])
+
+    @staticmethod
+    def _capture_cuda_graph_segment(fn):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            fn()
+        return graph
+
+    def _capture_full_cuda_step_graph(
+        self,
+        chunk_steps: int,
+        sample_chunk: torch.Tensor | None,
+    ):
+        return self._capture_cuda_graph_segment(
+            lambda: self._run_cuda_step_chunk(chunk_steps, sample_chunk)
+        )
+
+    def _validate_cuda_step_graph(self, graph, snapshot, expected_snapshot) -> bool:
+        self._restore_time_state(snapshot)
+        graph.replay()
+        torch.cuda.synchronize()
+        graph_matches = self._time_state_matches(expected_snapshot)
+        self._restore_time_state(snapshot)
+        return graph_matches
+
+    def _ensure_cuda_step_graph(
+        self,
+        chunk_steps: int = 1,
+        record_receivers: bool = False,
+    ):
+        key = (chunk_steps, record_receivers)
+        if key in self._cuda_step_graphs:
+            return self._cuda_step_graphs[key]
+        if (
+            not torch.cuda.is_available()
+            or not hasattr(self, "Q_flat")
+            or self.Q_flat.device.type != "cuda"
+        ):
+            raise RuntimeError("CUDA graph time stepping requires CUDA tensors.")
+
+        sample_chunk = None
+        if record_receivers:
+            sample_chunk = torch.empty(
+                (chunk_steps, self.rec.shape[1]),
+                device=self.device,
+                dtype=device_ini.dtype,
+            )
+
+        snapshot = self._snapshot_time_state()
+        self._run_cuda_step_chunk(chunk_steps, sample_chunk)
+        torch.cuda.synchronize()
+        expected_snapshot = self._snapshot_time_state()
+        self._restore_time_state(snapshot)
+
+        graph = self._capture_full_cuda_step_graph(chunk_steps, sample_chunk)
+        if not self._validate_cuda_step_graph(graph, snapshot, expected_snapshot):
+            raise RuntimeError("CUDA graph replay validation failed.")
+
+        self._cuda_step_graphs[key] = (graph, sample_chunk, "full")
+        return self._cuda_step_graphs[key]
+
     def time_integration(self, **kwargs):
+        """Perform 2D time integration.
+
+        Optional keyword arguments include ``n_time_steps``, ``total_time``,
+        ``progress``, save controls, ``use_cuda_graph`` and
+        ``cuda_graph_chunk_steps``. ``synchronize_timing`` optionally forces a
+        CUDA synchronize before reading the final wall time. When
+        ``use_cuda_graph`` is true and the state tensors live on CUDA, a
+        validated CUDA graph is replayed for the time-step loop.
+        """
         if self.time_integrator is None:
             raise RuntimeError("Time integrator must be initialized before time integration.")
 
         n_time_steps = kwargs.get("n_time_steps")
         total_time = kwargs.get("total_time")
         progress = kwargs.get("progress", False)
+        synchronize_timing = kwargs.get("synchronize_timing", False)
         save_step = int(kwargs.get("save_step", 0) or 0)
         save_steps = {int(step) for step in kwargs.get("save_steps", [])}
         save_results_dir = kwargs.get("save_results_dir", None)
@@ -564,22 +719,78 @@ class AcousticsSimulation2D:
         save_mesh_steps = {int(step) for step in kwargs.get("save_mesh_steps", [])}
         save_mesh_dir = kwargs.get("save_mesh_dir", None)
         save_mesh_format = kwargs.get("save_mesh_format", "gmsh22")
+        cuda_graph_chunk_steps = max(1, int(kwargs.get("cuda_graph_chunk_steps", 1)))
+        use_cuda_graph = (
+            kwargs.get("use_cuda_graph", False)
+            and torch.cuda.is_available()
+            and hasattr(self, "Q_flat")
+            and self.Q_flat.device.type == "cuda"
+        )
+        if use_cuda_graph and cuda_graph_chunk_steps > 1 and (
+            progress
+            or save_step > 0
+            or save_steps
+            or save_mesh_step > 0
+            or save_mesh_steps
+        ):
+            cuda_graph_chunk_steps = 1
         if n_time_steps is None:
             if total_time is None:
                 raise ValueError("Set n_time_steps or total_time.")
             n_time_steps = math.floor(total_time / self.time_integrator.dt)
         self.Ntimesteps = int(n_time_steps)
+        if self.Ntimesteps <= 0:
+            use_cuda_graph = False
+        elif use_cuda_graph:
+            cuda_graph_chunk_steps = min(cuda_graph_chunk_steps, self.Ntimesteps)
         if self.rec is not None:
             self.prec = torch.zeros(
                 (self.rec.shape[1], self.Ntimesteps),
                 device=self.device,
                 dtype=device_ini.dtype,
             )
+        simulated_total_time = self.Ntimesteps * self.time_integrator.dt
 
-        for step in range(self.Ntimesteps):
-            self.time_integrator.step_dt(self.P, self.Vx, self.Vy, self.Vz, self.BC)
+        cuda_step_graph = None
+        cuda_sample_chunk = None
+        cuda_graph_mode = "disabled"
+        if use_cuda_graph:
+            (
+                cuda_step_graph,
+                cuda_sample_chunk,
+                cuda_graph_mode,
+            ) = self._ensure_cuda_step_graph(
+                cuda_graph_chunk_steps,
+                self.rec is not None,
+            )
+
+        start_time = time.time()
+        step = 0
+        while step < self.Ntimesteps:
+            if (
+                cuda_step_graph is not None
+                and cuda_graph_chunk_steps > 1
+                and step + cuda_graph_chunk_steps <= self.Ntimesteps
+            ):
+                cuda_step_graph.replay()
+                if cuda_sample_chunk is not None:
+                    self.prec[
+                        :, step : step + cuda_graph_chunk_steps
+                    ].copy_(cuda_sample_chunk.T)
+                step += cuda_graph_chunk_steps
+                continue
+
+            receiver_sampled_by_graph = False
+            if cuda_step_graph is not None and cuda_graph_chunk_steps == 1:
+                cuda_step_graph.replay()
+                if cuda_sample_chunk is not None:
+                    self.prec[:, step].copy_(cuda_sample_chunk[0])
+                    receiver_sampled_by_graph = True
+            else:
+                self.time_integrator.step_dt(self.P, self.Vx, self.Vy, self.Vz, self.BC)
+
             step_index = step + 1
-            if self.rec is not None:
+            if self.rec is not None and not receiver_sampled_by_graph:
                 self._sample_receivers(self._sample_output)
                 self.prec[:, step].copy_(self._sample_output)
             if progress and (step % 10 == 0 or step + 1 == self.Ntimesteps):
@@ -605,7 +816,21 @@ class AcousticsSimulation2D:
                     real_time=step_index * self.time_integrator.dt,
                     file_format=save_mesh_format,
                 )
+            step += 1
 
+        if synchronize_timing and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        end_time = time.time()
+        self.last_time_integration_elapsed_s = end_time - start_time
+        self.last_time_integration_steps = self.Ntimesteps
+        self.last_time_integration_total_time = simulated_total_time
+        self.last_time_integration_used_cuda_graph = cuda_step_graph is not None
+        self.last_time_integration_cuda_graph_mode = cuda_graph_mode
+        self.last_time_integration_cuda_graph_chunk_steps = (
+            cuda_graph_chunk_steps if cuda_step_graph is not None else 0
+        )
+        if progress:
+            print(f"time: {self.last_time_integration_elapsed_s} s")
         return self.P, self.Vx, self.Vy, self.Vz
 
     def write_snapshot(self, path: str | Path):
