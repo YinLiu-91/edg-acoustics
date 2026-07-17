@@ -183,6 +183,8 @@ class TSI_TI(TimeIntegrator):
 
         Q0 = self._copy_packed_state_to_buffer(Q_flat)
         self._copy_boundary_derivatives(BC)
+        if self._prepare_auxiliary_state is not None:
+            self._prepare_auxiliary_state()
 
         for coefficient in self.taylor_coefficients:
             if self.L_operator_packed_accumulate is not None:
@@ -192,6 +194,8 @@ class TSI_TI(TimeIntegrator):
             else:
                 Q0, BC.BCvar = self.L_operator_packed(Q0, BC.BCvar)
                 Q_flat.add_(Q0, alpha=coefficient)
+            if self._accumulate_auxiliary_state is not None:
+                self._accumulate_auxiliary_state(coefficient)
             self._accumulate_boundary_derivatives(BC, coefficient)
 
     def step_dt(

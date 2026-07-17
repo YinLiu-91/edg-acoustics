@@ -32,6 +32,9 @@ DEFAULT_SNAPSHOT = CASE_DIR / "square_snapshot.mat"
 DEFAULT_MESH = CASE_DIR / "square.msh"
 DEFAULT_RESULTS_ON_THE_RUN = CASE_DIR / "results_on_the_run.mat"
 DEFAULT_RESULTS_ON_THE_RUN_MSH_DIR = CASE_DIR / "results_on_the_run_msh"
+DEFAULT_USE_2D_PACKED_RHS = False
+DEFAULT_USE_2D_TRITON_KERNELS = False
+DEFAULT_USE_2D_DEEP_FUSED_RHS = True
 
 
 def build_simulation(
@@ -40,6 +43,9 @@ def build_simulation(
     Nt: int = NT,
     cfl: float = CFL,
     mesh_path: Path | None = None,
+    use_packed_rhs: bool = DEFAULT_USE_2D_PACKED_RHS,
+    use_triton_kernels: bool = DEFAULT_USE_2D_TRITON_KERNELS,
+    use_triton_deep_rhs: bool = DEFAULT_USE_2D_DEEP_FUSED_RHS,
 ):
     """Build a fully initialized 2D acoustic simulation."""
     mesh = edg_acoustics.Mesh2D(
@@ -47,6 +53,11 @@ def build_simulation(
         BC_LABELS,
     )
     sim = edg_acoustics.AcousticsSimulation2D(RHO0, C0, Nx, mesh, BC_LABELS)
+    sim.configure_fast_paths(
+        use_packed_rhs=use_packed_rhs,
+        use_triton_kernels=use_triton_kernels,
+        use_triton_deep_rhs=use_triton_deep_rhs,
+    )
     sim.init_BC(edg_acoustics.AbsorbBC(sim.BCnode, BC_PARA))
     sim.init_IC(edg_acoustics.Monopole_IC(MONOPOLE_XYZ, FREQ_UPPER_LIMIT))
     sim.init_Flux(edg_acoustics.UpwindFlux(RHO0, C0, sim.n_xyz))
@@ -70,9 +81,20 @@ def run_case(
     save_mesh_dir: Path | None = None,
     save_mesh_format: str = "gmsh22",
     progress: bool = True,
+    use_packed_rhs: bool = DEFAULT_USE_2D_PACKED_RHS,
+    use_triton_kernels: bool = DEFAULT_USE_2D_TRITON_KERNELS,
+    use_triton_deep_rhs: bool = DEFAULT_USE_2D_DEEP_FUSED_RHS,
 ):
     """Run the square case and write the final state snapshot."""
-    sim = build_simulation(Nx=Nx, Nt=Nt, cfl=cfl, mesh_path=mesh_path)
+    sim = build_simulation(
+        Nx=Nx,
+        Nt=Nt,
+        cfl=cfl,
+        mesh_path=mesh_path,
+        use_packed_rhs=use_packed_rhs,
+        use_triton_kernels=use_triton_kernels,
+        use_triton_deep_rhs=use_triton_deep_rhs,
+    )
     if save_results_dir is None and save_step > 0:
         save_results_dir = CASE_DIR
     if save_mesh_dir is None and save_mesh_step > 0:
@@ -165,6 +187,24 @@ def parse_args():
         default=True,
         help="Print periodic step progress.",
     )
+    parser.add_argument(
+        "--use-2d-packed-rhs",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_USE_2D_PACKED_RHS,
+        help="Enable the 2D packed RHS/time-integration fast path.",
+    )
+    parser.add_argument(
+        "--use-2d-triton-kernels",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_USE_2D_TRITON_KERNELS,
+        help="Enable optional 2D Triton flux/boundary kernels.",
+    )
+    parser.add_argument(
+        "--use-2d-deep-fused-rhs",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_USE_2D_DEEP_FUSED_RHS,
+        help="Enable the deeper 2D Triton timestep fusion path when packed RHS is enabled.",
+    )
     return parser.parse_args()
 
 
@@ -186,6 +226,9 @@ def main():
         save_mesh_dir=args.save_mesh_dir,
         save_mesh_format=args.save_mesh_format,
         progress=args.progress,
+        use_packed_rhs=args.use_2d_packed_rhs,
+        use_triton_kernels=args.use_2d_triton_kernels,
+        use_triton_deep_rhs=args.use_2d_deep_fused_rhs,
     )
     print(f"Wrote 2D acoustic snapshot to {snapshot_path}")
 

@@ -26,6 +26,9 @@ DEFAULT_TOTAL_TIME = 0.01
 DEFAULT_SAVE_MESH_AT_MS = 5.5
 DEFAULT_USE_CUDA_GRAPH = True
 DEFAULT_CUDA_GRAPH_CHUNK_STEPS = 1
+DEFAULT_USE_2D_PACKED_RHS = False
+DEFAULT_USE_2D_TRITON_KERNELS = False
+DEFAULT_USE_2D_DEEP_FUSED_RHS = True
 
 RHO0 = 1.213
 C0 = 343.0
@@ -158,6 +161,9 @@ def build_simulation(
     Nt: int = DEFAULT_NT,
     cfl: float = DEFAULT_CFL,
     sponge_sigma_max: float = 2500.0,
+    use_packed_rhs: bool = DEFAULT_USE_2D_PACKED_RHS,
+    use_triton_kernels: bool = DEFAULT_USE_2D_TRITON_KERNELS,
+    use_triton_deep_rhs: bool = DEFAULT_USE_2D_DEEP_FUSED_RHS,
 ):
     mesh = edg_acoustics.Mesh2D(str(mesh_path), BC_LABELS, DOMAIN_LABELS)
     material_fit = edg_acoustics.ExtendedReactionMaterialFit.from_mat(fit_path)
@@ -172,6 +178,11 @@ def build_simulation(
         physical_bbox=(PHYSICAL_XMIN, PHYSICAL_XMAX, -float(thickness), PHYSICAL_YMAX),
         sponge_thickness=SPONGE_THICKNESS,
         sponge_sigma_max=sponge_sigma_max,
+    )
+    sim.configure_fast_paths(
+        use_packed_rhs=use_packed_rhs,
+        use_triton_kernels=use_triton_kernels,
+        use_triton_deep_rhs=use_triton_deep_rhs,
     )
     sim.init_BC(edg_acoustics.AbsorbBC(sim.BCnode, BC_PARA))
     sim.init_IC(edg_acoustics.RadialPressurePulse2D_IC(SOURCE_XYZ, PULSE_B))
@@ -209,6 +220,9 @@ def run_case(
     sponge_sigma_max: float = 2500.0,
     use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
     cuda_graph_chunk_steps: int = DEFAULT_CUDA_GRAPH_CHUNK_STEPS,
+    use_packed_rhs: bool = DEFAULT_USE_2D_PACKED_RHS,
+    use_triton_kernels: bool = DEFAULT_USE_2D_TRITON_KERNELS,
+    use_triton_deep_rhs: bool = DEFAULT_USE_2D_DEEP_FUSED_RHS,
 ):
     fit_path = ensure_material_fit(fit_path=fit_path, force=force_fit)
     mesh_path = ensure_mesh(thickness, mesh_path=mesh_path, force=force_mesh)
@@ -220,6 +234,9 @@ def run_case(
         Nt=Nt,
         cfl=cfl,
         sponge_sigma_max=sponge_sigma_max,
+        use_packed_rhs=use_packed_rhs,
+        use_triton_kernels=use_triton_kernels,
+        use_triton_deep_rhs=use_triton_deep_rhs,
     )
 
     output_dir = Path(output_root) / thickness_tag(thickness)
@@ -237,6 +254,9 @@ def run_case(
         {
             "use_cuda_graph_requested": bool(use_cuda_graph),
             "cuda_graph_chunk_steps_requested": int(cuda_graph_chunk_steps),
+            "use_packed_rhs_requested": bool(use_packed_rhs),
+            "use_triton_kernels_requested": bool(use_triton_kernels),
+            "use_triton_deep_rhs_requested": bool(use_triton_deep_rhs),
         }
     )
     sim.time_integration(
@@ -261,6 +281,18 @@ def run_case(
             ),
             "cuda_graph_chunk_steps": int(
                 getattr(sim, "last_time_integration_cuda_graph_chunk_steps", 0)
+            ),
+            "use_packed_rhs": bool(
+                getattr(sim, "last_time_integration_used_packed_rhs", False)
+            ),
+            "use_triton_interior_flux": bool(
+                getattr(sim, "_use_triton_interior_flux", False)
+            ),
+            "use_triton_boundary_ri": bool(
+                getattr(sim, "_use_triton_boundary_ri", False)
+            ),
+            "use_triton_deep_rhs": bool(
+                getattr(sim, "_use_triton_deep_rhs", False)
             ),
         }
     )
@@ -372,6 +404,24 @@ def parse_args():
         default=DEFAULT_CUDA_GRAPH_CHUNK_STEPS,
         help="Number of time steps captured in one CUDA graph replay.",
     )
+    parser.add_argument(
+        "--use-2d-packed-rhs",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_USE_2D_PACKED_RHS,
+        help="Enable the 2D packed RHS/time-integration fast path.",
+    )
+    parser.add_argument(
+        "--use-2d-triton-kernels",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_USE_2D_TRITON_KERNELS,
+        help="Enable optional 2D Triton flux/boundary kernels.",
+    )
+    parser.add_argument(
+        "--use-2d-deep-fused-rhs",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_USE_2D_DEEP_FUSED_RHS,
+        help="Enable the deeper 2D Triton timestep fusion path when packed RHS is enabled.",
+    )
     return parser.parse_args()
 
 
@@ -406,6 +456,9 @@ def main():
             sponge_sigma_max=args.sponge_sigma_max,
             use_cuda_graph=args.use_cuda_graph,
             cuda_graph_chunk_steps=args.cuda_graph_chunk_steps,
+            use_packed_rhs=args.use_2d_packed_rhs,
+            use_triton_kernels=args.use_2d_triton_kernels,
+            use_triton_deep_rhs=args.use_2d_deep_fused_rhs,
         )
         print(f"Wrote ER porous absorber outputs to {case_info['output_dir']}")
 

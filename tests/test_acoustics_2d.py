@@ -72,6 +72,23 @@ def test_acoustics_simulation_2d_short_tsi_cpu():
     torch.testing.assert_close(sim.Vz, torch.zeros_like(sim.Vz))
 
 
+def test_acoustics_simulation_2d_packed_rhs_matches_reference_cpu():
+    module = load_example_module(SQUARE_MAIN)
+    with acoustic_device("cpu"):
+        reference = module.build_simulation(Nx=1, Nt=3, cfl=0.5)
+        packed = module.build_simulation(
+            Nx=1,
+            Nt=3,
+            cfl=0.5,
+            use_packed_rhs=True,
+        )
+        reference.time_integration(n_time_steps=3, progress=False)
+        packed.time_integration(n_time_steps=3, progress=False)
+
+    torch.testing.assert_close(packed.Q, reference.Q, rtol=1.0e-11, atol=1.0e-11)
+    assert packed.last_time_integration_used_packed_rhs is True
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="2D CUDA parity requires CUDA")
 def test_acoustics_simulation_2d_short_tsi_cuda_matches_cpu():
     module = load_example_module(SQUARE_MAIN)
@@ -119,6 +136,109 @@ def test_acoustics_simulation_2d_cuda_graph_matches_eager():
     assert graphed.last_time_integration_used_cuda_graph is True
     assert graphed.last_time_integration_cuda_graph_mode == "full"
     assert graphed.last_time_integration_cuda_graph_chunk_steps == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="2D Triton parity requires CUDA")
+def test_acoustics_simulation_2d_triton_matches_packed_cuda():
+    module = load_example_module(SQUARE_MAIN)
+    with acoustic_device("cuda"):
+        packed = module.build_simulation(
+            Nx=1,
+            Nt=2,
+            cfl=0.5,
+            use_packed_rhs=True,
+            use_triton_kernels=False,
+        )
+        triton_sim = module.build_simulation(
+            Nx=1,
+            Nt=2,
+            cfl=0.5,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=False,
+        )
+        packed.time_integration(n_time_steps=5, progress=False)
+        triton_sim.time_integration(n_time_steps=5, progress=False)
+        torch.cuda.synchronize()
+
+    torch.testing.assert_close(triton_sim.Q, packed.Q, rtol=1.0e-10, atol=1.0e-10)
+    assert triton_sim._use_triton_interior_flux is True
+    assert triton_sim._use_triton_boundary_ri is True
+    assert triton_sim._use_triton_deep_rhs is False
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="2D deep fused parity requires CUDA")
+def test_acoustics_simulation_2d_deep_fused_matches_triton_cuda():
+    module = load_example_module(SQUARE_MAIN)
+    with acoustic_device("cuda"):
+        triton_sim = module.build_simulation(
+            Nx=1,
+            Nt=2,
+            cfl=0.5,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=False,
+        )
+        deep_sim = module.build_simulation(
+            Nx=1,
+            Nt=2,
+            cfl=0.5,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=True,
+        )
+        triton_sim.time_integration(n_time_steps=5, progress=False, use_cuda_graph=False)
+        deep_sim.time_integration(n_time_steps=5, progress=False, use_cuda_graph=False)
+        torch.cuda.synchronize()
+
+    torch.testing.assert_close(deep_sim.Q, triton_sim.Q, rtol=1.0e-10, atol=1.0e-10)
+    assert deep_sim._use_triton_deep_rhs is True
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="2D deep fused CUDA graph parity requires CUDA"
+)
+def test_acoustics_simulation_2d_deep_fused_cuda_graph_matches_eager():
+    module = load_example_module(SQUARE_MAIN)
+    receiver_xyz = numpy.array([[0.0], [0.0], [0.0]], dtype=numpy.float64)
+
+    with acoustic_device("cuda"):
+        eager = module.build_simulation(
+            Nx=1,
+            Nt=2,
+            cfl=0.5,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=True,
+        )
+        eager.init_rec(receiver_xyz)
+        graphed = module.build_simulation(
+            Nx=1,
+            Nt=2,
+            cfl=0.5,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=True,
+        )
+        graphed.init_rec(receiver_xyz)
+
+        eager.time_integration(n_time_steps=5, progress=False, use_cuda_graph=False)
+        graphed.time_integration(
+            n_time_steps=5,
+            progress=False,
+            use_cuda_graph=True,
+            cuda_graph_chunk_steps=2,
+        )
+        torch.cuda.synchronize()
+
+    for field_name in ("P", "Vx", "Vy", "Vz", "Q", "prec"):
+        torch.testing.assert_close(
+            getattr(graphed, field_name),
+            getattr(eager, field_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    assert graphed._use_triton_deep_rhs is True
 
 
 def test_square_example_writes_snapshot(tmp_path):

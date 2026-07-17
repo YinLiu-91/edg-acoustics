@@ -10,6 +10,7 @@ import scipy.io
 import torch
 
 import edg_acoustics.device_ini as device_ini
+from . import acoustics_2d_triton
 from .acoustics_simulation_2d import AcousticsSimulation2D
 from .preprocessing import MaterialUpwindFlux2D
 
@@ -132,6 +133,10 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         self._porous_mask = element_labels == self.porous_label
         self._sponge_mask = element_labels == self.sponge_label
         self._porous_mask_2d = self._porous_mask.reshape(1, -1)
+        self._porous_mask_int = self._porous_mask.to(dtype=torch.int32)
+        self._porous_element_ids = torch.nonzero(
+            self._porous_mask, as_tuple=False
+        ).reshape(-1)
 
         beta_air = 1.0 / (self.rho0 * self.c0**2)
         rho_air = self.rho0
@@ -167,6 +172,7 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             self._facewise_property(self.c_inf_vector, neighbor_elements, "left"),
             self._facewise_property(self.c_inf_vector, neighbor_elements, "right"),
         )
+        self._cache_flux_coefficients()
         self._build_sponge_sigma()
         self._init_material_state_space()
 
@@ -202,6 +208,7 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         sigma = self.sponge_sigma_max * normalized_depth**2
         sigma = torch.where(self._sponge_mask, sigma, torch.zeros_like(sigma))
         self.sponge_sigma = sigma.reshape(1, -1)
+        self._sponge_sigma_contiguous = self.sponge_sigma.reshape(-1).contiguous()
 
     def _init_material_state_space(self):
         self.beta_A = torch.as_tensor(
@@ -223,6 +230,9 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             )[0]
         )
         self.beta_D = float(self.material_fit.beta.D)
+        self._beta_A_diag = self._extract_diagonal(self.beta_A)
+        self._beta_CA_contiguous = self.beta_CA.contiguous()
+        self._beta_B_contiguous = self.beta_B.contiguous()
 
         self.rho_A = torch.as_tensor(
             self.material_fit.rho.A, device=self.device, dtype=device_ini.dtype
@@ -243,8 +253,37 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             ]
         )
         self.rho_D = float(self.material_fit.rho.D)
+        self._rho_A_diag = self._extract_diagonal(self.rho_A)
+        self._rho_CA_contiguous = self.rho_CA.contiguous()
+        self._rho_B_contiguous = self.rho_B.contiguous()
+
+        self._k_inf_contiguous = self.k_inf_vector.contiguous()
+        self._inv_rho_inf_contiguous = self.inv_rho_inf_vector.contiguous()
 
         self._aux_state_names = ["z_beta", "z_rho_x", "z_rho_y"]
+
+    @staticmethod
+    def _extract_diagonal(matrix: torch.Tensor):
+        if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+            return None
+        diagonal = torch.diagonal(matrix)
+        if torch.count_nonzero(matrix - torch.diag(diagonal)).item() != 0:
+            return None
+        return diagonal.contiguous()
+
+    def _supports_triton_deep_rhs(self) -> bool:
+        if not super()._supports_triton_deep_rhs():
+            return False
+        if not all(
+            hasattr(self, name)
+            for name in ("beta_CA", "rho_CA", "_beta_A_diag", "_rho_A_diag")
+        ):
+            return False
+        if self.beta_CA.numel() != self.rho_CA.numel():
+            return False
+        if self._beta_A_diag is None or self._rho_A_diag is None:
+            return False
+        return self._beta_A_diag.numel() == self._rho_A_diag.numel()
 
     def init_IC(self, IC):
         super().init_IC(IC)
@@ -276,6 +315,8 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             self._taylor_aux_work[name].copy_(getattr(self, name))
 
     def _accumulate_taylor_auxiliary_state(self, coefficient: float):
+        if self._has_triton_deep_rhs():
+            return
         for name in self._aux_state_names:
             state = getattr(self, name)
             rhs = self._taylor_aux_rhs[name]
@@ -298,6 +339,62 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         if coefficients.numel() == 0:
             return torch.zeros_like(like)
         return torch.tensordot(coefficients, state, dims=([0], [0]))
+
+    def _compute_fused_packed_rhs_triton(
+        self,
+        q_by_node: torch.Tensor,
+        rhs_by_node: torch.Tensor,
+        q_accumulate: torch.Tensor | None,
+        coefficient: float,
+    ):
+        acoustics_2d_triton.launch_fused_er_rhs_2d(
+            q_by_node=q_by_node,
+            flux_by_face=self._flux_by_face,
+            dr=self._dr_contiguous,
+            ds=self._ds_contiguous,
+            lift=self._lift_contiguous,
+            metric_x=self._surface_metric_x_contiguous,
+            metric_y=self._surface_metric_y_contiguous,
+            metric_dx=self._surface_metric_dx_contiguous,
+            metric_dy=self._surface_metric_dy_contiguous,
+            porous_mask=self._porous_mask_int,
+            k_inf=self._k_inf_contiguous,
+            inv_rho_inf=self._inv_rho_inf_contiguous,
+            sponge_sigma=self._sponge_sigma_contiguous,
+            beta_ca=self._beta_CA_contiguous,
+            rho_ca=self._rho_CA_contiguous,
+            z_beta_work=self._taylor_aux_work["z_beta"],
+            z_rho_x_work=self._taylor_aux_work["z_rho_x"],
+            z_rho_y_work=self._taylor_aux_work["z_rho_y"],
+            rhs_by_node=rhs_by_node,
+            q_accumulate=q_accumulate,
+            coefficient=coefficient,
+            beta_cb=self.beta_CB,
+            rho_cb=self.rho_CB,
+            beta_d=self.beta_D,
+            rho_d=self.rho_D,
+        )
+
+    def _compute_fused_taylor_auxiliary_update_triton(
+        self,
+        q_by_node: torch.Tensor,
+        coefficient: float,
+    ):
+        acoustics_2d_triton.launch_fused_er_aux_update_diag_2d(
+            q_by_node=q_by_node,
+            porous_element_ids=self._porous_element_ids,
+            z_beta=self.z_beta,
+            z_rho_x=self.z_rho_x,
+            z_rho_y=self.z_rho_y,
+            z_beta_work=self._taylor_aux_work["z_beta"],
+            z_rho_x_work=self._taylor_aux_work["z_rho_x"],
+            z_rho_y_work=self._taylor_aux_work["z_rho_y"],
+            beta_diag=self._beta_A_diag,
+            beta_b=self._beta_B_contiguous,
+            rho_diag=self._rho_A_diag,
+            rho_b=self._rho_B_contiguous,
+            coefficient=coefficient,
+        )
 
     def _cache_boundary_parameters(self):
         super()._cache_boundary_parameters()
@@ -398,7 +495,112 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             fluxVy_flat[node["map"]] = boundary_flux[2]
             fluxVz_flat[node["map"]] = boundary_flux[3]
 
-    def RHS_operator(
+    def _compute_volume_rhs_packed(
+        self,
+        q_by_node: torch.tensor,
+        rhs_view: torch.tensor,
+    ):
+        q_view = self._state_view(q_by_node)
+        P = q_view[:, 0, :]
+        Vx = q_view[:, 1, :]
+        Vy = q_view[:, 2, :]
+
+        dQdr = self._dQdr_view
+        dQds = self._dQds_view
+        dPdr = dQdr[:, 0, :]
+        dPds = dQds[:, 0, :]
+        dVxdr = dQdr[:, 1, :]
+        dVxds = dQds[:, 1, :]
+        dVydr = dQdr[:, 2, :]
+        dVyds = dQds[:, 2, :]
+
+        torch.mul(self._surface_metric_x, dPdr, out=self._dPdx)
+        self._dPdx.addcmul_(self._surface_metric_y, dPds)
+        torch.mul(self._surface_metric_dx, dPdr, out=self._dPdy)
+        self._dPdy.addcmul_(self._surface_metric_dy, dPds)
+        torch.mul(self._surface_metric_x, dVxdr, out=self._dVxdx)
+        self._dVxdx.addcmul_(self._surface_metric_y, dVxds)
+        torch.mul(self._surface_metric_dx, dVydr, out=self._dVydy)
+        self._dVydy.addcmul_(self._surface_metric_dy, dVyds)
+        torch.add(self._dVxdx, self._dVydy, out=self._divV)
+
+        rhs_P = rhs_view[:, 0, :]
+        rhs_Vx = rhs_view[:, 1, :]
+        rhs_Vy = rhs_view[:, 2, :]
+        rhs_Vz = rhs_view[:, 3, :]
+        torch.mul(self._divV, -1.0, out=rhs_P)
+        rhs_P.mul_(self.k_inf_elements)
+        torch.mul(self._dPdx, -1.0, out=rhs_Vx)
+        rhs_Vx.mul_(self.inv_rho_inf_elements)
+        torch.mul(self._dPdy, -1.0, out=rhs_Vy)
+        rhs_Vy.mul_(self.inv_rho_inf_elements)
+        rhs_Vz.zero_()
+
+        z_beta = self._active_auxiliary_state("z_beta")
+        z_rho_x = self._active_auxiliary_state("z_rho_x")
+        z_rho_y = self._active_auxiliary_state("z_rho_y")
+
+        beta_memory = self._collapse_memory(self.beta_CA, z_beta, P)
+        rho_memory_x = self._collapse_memory(self.rho_CA, z_rho_x, Vx)
+        rho_memory_y = self._collapse_memory(self.rho_CA, z_rho_y, Vy)
+        rhs_porous_P = -(self._divV + beta_memory + self.beta_CB * P) / self.beta_D
+        rhs_porous_Vx = -(self._dPdx + rho_memory_x + self.rho_CB * Vx) / self.rho_D
+        rhs_porous_Vy = -(self._dPdy + rho_memory_y + self.rho_CB * Vy) / self.rho_D
+        rhs_P.copy_(torch.where(self._porous_mask_2d, rhs_porous_P, rhs_P))
+        rhs_Vx.copy_(torch.where(self._porous_mask_2d, rhs_porous_Vx, rhs_Vx))
+        rhs_Vy.copy_(torch.where(self._porous_mask_2d, rhs_porous_Vy, rhs_Vy))
+
+        masked_P = P * self._porous_mask_2d
+        masked_Vx = Vx * self._porous_mask_2d
+        masked_Vy = Vy * self._porous_mask_2d
+        self._taylor_aux_rhs["z_beta"].copy_(
+            self._material_rhs(self.beta_A, self.beta_B, z_beta, masked_P)
+        )
+        self._taylor_aux_rhs["z_rho_x"].copy_(
+            self._material_rhs(self.rho_A, self.rho_B, z_rho_x, masked_Vx)
+        )
+        self._taylor_aux_rhs["z_rho_y"].copy_(
+            self._material_rhs(self.rho_A, self.rho_B, z_rho_y, masked_Vy)
+        )
+
+        rhs_P.addcmul_(self.sponge_sigma, P, value=-1.0)
+        rhs_Vx.addcmul_(self.sponge_sigma, Vx, value=-1.0)
+        rhs_Vy.addcmul_(self.sponge_sigma, Vy, value=-1.0)
+
+    def RHS_operator_packed(
+        self,
+        q_by_node: torch.tensor,
+        BCvar: list[dict],
+        q_accumulate: torch.tensor | None = None,
+        accumulate_coefficient: float = 0.0,
+    ):
+        use_deep_rhs = self._has_triton_deep_rhs() and q_accumulate is not None
+        RHS_Q, RHS_Q_view, BCvar = self._rhs_operator_packed_pre_lift(
+            q_by_node,
+            BCvar,
+            compute_derivatives=not use_deep_rhs,
+        )
+        if use_deep_rhs:
+            self._compute_fused_packed_rhs_triton(
+                q_by_node,
+                RHS_Q,
+                q_accumulate,
+                accumulate_coefficient,
+            )
+            self._compute_fused_taylor_auxiliary_update_triton(
+                q_by_node,
+                accumulate_coefficient,
+            )
+            return RHS_Q, BCvar
+
+        self._compute_lift_surface()
+        self._compute_volume_rhs_packed(q_by_node, RHS_Q_view)
+        RHS_Q.add_(self._surface_by_node)
+        if q_accumulate is not None:
+            q_accumulate.add_(RHS_Q, alpha=accumulate_coefficient)
+        return RHS_Q, BCvar
+
+    def _RHS_operator_reference(
         self,
         P: torch.Tensor,
         Vx: torch.Tensor,
@@ -474,3 +676,24 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         rhs_Vy.addcmul_(self.sponge_sigma, Vy, value=-1.0)
 
         return rhs_P, rhs_Vx, rhs_Vy, rhs_Vz, BCvar
+
+    def RHS_operator(
+        self,
+        P: torch.Tensor,
+        Vx: torch.Tensor,
+        Vy: torch.Tensor,
+        Vz: torch.Tensor,
+        BCvar: list[dict],
+    ):
+        if not self._use_packed_rhs:
+            return self._RHS_operator_reference(P, Vx, Vy, Vz, BCvar)
+        q_by_node = self._pack_fields_by_node(P, Vx, Vy, Vz)
+        rhs_by_node, BCvar = self.RHS_operator_packed(q_by_node, BCvar)
+        rhs_view = self._state_view(rhs_by_node)
+        return (
+            rhs_view[:, 0, :],
+            rhs_view[:, 1, :],
+            rhs_view[:, 2, :],
+            rhs_view[:, 3, :],
+            BCvar,
+        )

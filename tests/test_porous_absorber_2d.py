@@ -120,6 +120,48 @@ def test_porous_absorber_example_short_run(tmp_path: Path):
     assert data["time"].reshape(-1)[0] == pytest.approx(sim.time_integrator.dt)
 
 
+def test_porous_absorber_packed_rhs_matches_reference_cpu():
+    module = load_example_module(EXAMPLE_MAIN)
+    mesh_path = module.default_mesh_path(0.05)
+    fit_path = module.DEFAULT_FIT
+
+    with acoustic_device("cpu"):
+        reference = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=False,
+        )
+        packed = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=True,
+        )
+        reference.time_integration(n_time_steps=3, progress=False, use_cuda_graph=False)
+        packed.time_integration(n_time_steps=3, progress=False, use_cuda_graph=False)
+
+    for field_name in ("P", "Vx", "Vy", "Vz", "Q", "prec"):
+        torch.testing.assert_close(
+            getattr(packed, field_name),
+            getattr(reference, field_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
+        torch.testing.assert_close(
+            getattr(packed, state_name),
+            getattr(reference, state_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    assert packed.last_time_integration_used_packed_rhs is True
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="2D porous CUDA graph parity requires CUDA"
 )
@@ -170,6 +212,159 @@ def test_porous_absorber_cuda_graph_matches_eager():
     assert graphed.last_time_integration_used_cuda_graph is True
     assert graphed.last_time_integration_cuda_graph_mode == "full"
     assert graphed.last_time_integration_cuda_graph_chunk_steps == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="2D porous Triton parity requires CUDA")
+def test_porous_absorber_triton_matches_packed_cuda():
+    module = load_example_module(EXAMPLE_MAIN)
+    mesh_path = module.default_mesh_path(0.05)
+    fit_path = module.DEFAULT_FIT
+
+    with acoustic_device("cuda"):
+        packed = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=True,
+            use_triton_kernels=False,
+        )
+        triton_sim = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=False,
+        )
+        packed.time_integration(n_time_steps=5, progress=False, use_cuda_graph=False)
+        triton_sim.time_integration(n_time_steps=5, progress=False, use_cuda_graph=False)
+        torch.cuda.synchronize()
+
+    for field_name in ("P", "Vx", "Vy", "Vz", "Q", "prec"):
+        torch.testing.assert_close(
+            getattr(triton_sim, field_name),
+            getattr(packed, field_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
+        torch.testing.assert_close(
+            getattr(triton_sim, state_name),
+            getattr(packed, state_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    assert triton_sim._use_triton_interior_flux is True
+    assert triton_sim._use_triton_boundary_ri is True
+    assert triton_sim._use_triton_deep_rhs is False
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="2D porous deep fused parity requires CUDA")
+def test_porous_absorber_deep_fused_matches_triton_cuda():
+    module = load_example_module(EXAMPLE_MAIN)
+    mesh_path = module.default_mesh_path(0.05)
+    fit_path = module.DEFAULT_FIT
+
+    with acoustic_device("cuda"):
+        triton_sim = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=False,
+        )
+        deep_sim = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=True,
+        )
+        triton_sim.time_integration(n_time_steps=5, progress=False, use_cuda_graph=False)
+        deep_sim.time_integration(n_time_steps=5, progress=False, use_cuda_graph=False)
+        torch.cuda.synchronize()
+
+    for field_name in ("P", "Vx", "Vy", "Vz", "Q", "prec"):
+        torch.testing.assert_close(
+            getattr(deep_sim, field_name),
+            getattr(triton_sim, field_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
+        torch.testing.assert_close(
+            getattr(deep_sim, state_name),
+            getattr(triton_sim, state_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    assert deep_sim._use_triton_deep_rhs is True
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="2D porous deep fused CUDA graph parity requires CUDA"
+)
+def test_porous_absorber_deep_fused_cuda_graph_matches_eager():
+    module = load_example_module(EXAMPLE_MAIN)
+    mesh_path = module.default_mesh_path(0.05)
+    fit_path = module.DEFAULT_FIT
+
+    with acoustic_device("cuda"):
+        eager = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=True,
+        )
+        graphed = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=True,
+        )
+
+        eager.time_integration(n_time_steps=5, progress=False, use_cuda_graph=False)
+        graphed.time_integration(
+            n_time_steps=5,
+            progress=False,
+            use_cuda_graph=True,
+            cuda_graph_chunk_steps=2,
+        )
+        torch.cuda.synchronize()
+
+    for field_name in ("P", "Vx", "Vy", "Vz", "Q", "prec"):
+        torch.testing.assert_close(
+            getattr(graphed, field_name),
+            getattr(eager, field_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
+        torch.testing.assert_close(
+            getattr(graphed, state_name),
+            getattr(eager, state_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    assert graphed._use_triton_deep_rhs is True
 
 
 @pytest.mark.skipif(shutil.which("gmsh") is None, reason="gmsh is required for mesh validation")
