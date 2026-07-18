@@ -52,4 +52,6 @@ data/tests/mesh/*
 *.nsys-rep
 *.sqlite
 *.png
+!examples/dgfem_acoustic_2d/porous_absorber_time_domain/boundary_comparison_all_time.png
+!examples/dgfem_acoustic_2d/porous_absorber_time_domain/boundary_error_after_8ms.png
 *.pos

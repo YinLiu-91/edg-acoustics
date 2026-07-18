@@ -631,6 +631,103 @@ if TRITON_AVAILABLE:
         )
 
 
+    @triton.jit
+    def pml_auxiliary_rhs_2d_kernel(
+        q_ptr,
+        rhs_ptr,
+        q_accumulate_ptr,
+        pml_sigma_ptr,
+        pml_psi_ptr,
+        pml_psi_work_ptr,
+        coefficient,
+        inv_rho_c2,
+        rho_c2,
+        n_elements: tl.constexpr,
+        n_var_elements: tl.constexpr,
+        NP: tl.constexpr,
+        ACCUMULATE: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        element_offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        node = tl.program_id(1)
+        mask = element_offsets < n_elements
+        node_base = node * n_var_elements + element_offsets
+
+        pressure = tl.load(q_ptr + node_base, mask=mask, other=0.0)
+        rhs_p_base = tl.load(rhs_ptr + node_base, mask=mask, other=0.0)
+        rhs_vx_base = tl.load(
+            rhs_ptr + node_base + n_elements, mask=mask, other=0.0
+        )
+        rhs_vy_base = tl.load(
+            rhs_ptr + node_base + 2 * n_elements, mask=mask, other=0.0
+        )
+
+        sigma_offset = node * n_elements + element_offsets
+        sigma_x = tl.load(pml_sigma_ptr + sigma_offset, mask=mask, other=0.0)
+        sigma_y = tl.load(
+            pml_sigma_ptr + NP * n_elements + sigma_offset, mask=mask, other=0.0
+        )
+
+        psi_offset = node * 2 * n_elements + element_offsets
+        psi_x = tl.load(pml_psi_work_ptr + psi_offset, mask=mask, other=0.0)
+        psi_y = tl.load(
+            pml_psi_work_ptr + psi_offset + n_elements, mask=mask, other=0.0
+        )
+
+        correction_p = -(sigma_x + sigma_y) * pressure
+        correction_vx = -inv_rho_c2 * psi_x
+        correction_vy = -inv_rho_c2 * psi_y
+        rhs_p = rhs_p_base + correction_p
+        rhs_vx = rhs_vx_base + correction_vx
+        rhs_vy = rhs_vy_base + correction_vy
+        psi_rhs_x = rho_c2 * (sigma_x - sigma_y) * rhs_vx - sigma_y * psi_x
+        psi_rhs_y = rho_c2 * (sigma_y - sigma_x) * rhs_vy - sigma_x * psi_y
+
+        tl.store(rhs_ptr + node_base, rhs_p, mask=mask)
+        tl.store(rhs_ptr + node_base + n_elements, rhs_vx, mask=mask)
+        tl.store(rhs_ptr + node_base + 2 * n_elements, rhs_vy, mask=mask)
+        tl.store(pml_psi_work_ptr + psi_offset, psi_rhs_x, mask=mask)
+        tl.store(pml_psi_work_ptr + psi_offset + n_elements, psi_rhs_y, mask=mask)
+
+        if ACCUMULATE:
+            tl.store(
+                q_accumulate_ptr + node_base,
+                tl.load(q_accumulate_ptr + node_base, mask=mask, other=0.0)
+                + coefficient * correction_p,
+                mask=mask,
+            )
+            tl.store(
+                q_accumulate_ptr + node_base + n_elements,
+                tl.load(
+                    q_accumulate_ptr + node_base + n_elements, mask=mask, other=0.0
+                )
+                + coefficient * correction_vx,
+                mask=mask,
+            )
+            tl.store(
+                q_accumulate_ptr + node_base + 2 * n_elements,
+                tl.load(
+                    q_accumulate_ptr + node_base + 2 * n_elements, mask=mask, other=0.0
+                )
+                + coefficient * correction_vy,
+                mask=mask,
+            )
+            tl.store(
+                pml_psi_ptr + psi_offset,
+                tl.load(pml_psi_ptr + psi_offset, mask=mask, other=0.0)
+                + coefficient * psi_rhs_x,
+                mask=mask,
+            )
+            tl.store(
+                pml_psi_ptr + psi_offset + n_elements,
+                tl.load(
+                    pml_psi_ptr + psi_offset + n_elements, mask=mask, other=0.0
+                )
+                + coefficient * psi_rhs_y,
+                mask=mask,
+            )
+
+
 def _require_triton():
     if not TRITON_AVAILABLE:
         raise RuntimeError("Triton is not available in this environment.")
@@ -965,6 +1062,45 @@ def launch_fused_er_aux_update_diag_2d(
         NP=int(q_by_node.shape[0]),
         NSTATES=int(beta_diag.numel()),
         COMPACT_ADE=compact_state,
+        BLOCK_SIZE=block_size,
+        num_warps=num_warps,
+    )
+
+
+def launch_pml_auxiliary_rhs_2d(
+    *,
+    q_by_node: torch.Tensor,
+    rhs_by_node: torch.Tensor,
+    q_accumulate: torch.Tensor | None,
+    pml_sigma: torch.Tensor,
+    pml_psi: torch.Tensor,
+    pml_psi_work: torch.Tensor,
+    coefficient: float,
+    rho_c2: float,
+    block_size: int | None = None,
+    num_warps: int | None = None,
+):
+    _require_triton()
+    n_elements = int(q_by_node.shape[1] // 4)
+    if block_size is None:
+        block_size = 64 if _is_v100(q_by_node) and q_by_node.shape[0] == 15 else 128
+    if num_warps is None:
+        num_warps = 2 if block_size == 64 else 4
+    grid = (triton.cdiv(n_elements, block_size), int(q_by_node.shape[0]))
+    pml_auxiliary_rhs_2d_kernel[grid](
+        q_by_node,
+        rhs_by_node,
+        rhs_by_node if q_accumulate is None else q_accumulate,
+        pml_sigma,
+        pml_psi,
+        pml_psi_work,
+        coefficient,
+        1.0 / float(rho_c2),
+        float(rho_c2),
+        n_elements,
+        4 * n_elements,
+        NP=int(q_by_node.shape[0]),
+        ACCUMULATE=q_accumulate is not None,
         BLOCK_SIZE=block_size,
         num_warps=num_warps,
     )

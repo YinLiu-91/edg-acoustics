@@ -14,6 +14,7 @@ import edg_acoustics.device_ini as device_ini
 from . import acoustics_2d_er_large_rhs_triton
 from . import acoustics_2d_triton
 from .acoustics_simulation_2d import AcousticsSimulation2D
+from .pml import PMLAugmentation, PMLDamping, PMLRegion
 from .preprocessing import MaterialUpwindFlux2D
 
 
@@ -75,7 +76,7 @@ class ExtendedReactionMaterialFit:
 
 
 class ExtendedReactionSimulation2D(AcousticsSimulation2D):
-    """2D acoustics with an ER porous subdomain and sponge absorbing layers."""
+    """2D acoustics with an ER porous subdomain and an exterior absorbing layer."""
 
     def __init__(
         self,
@@ -88,15 +89,29 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         material_fit: ExtendedReactionMaterialFit,
         *,
         physical_bbox: tuple[float, float, float, float],
-        sponge_thickness: float,
+        sponge_thickness: float | None = None,
         sponge_sigma_max: float = 2500.0,
+        absorbing_layer: str = "sponge",
+        pml_region: PMLRegion | None = None,
+        pml_damping: PMLDamping | None = None,
         node_tolerance: float = 1.0e-7,
     ):
         self.domain_labels = dict(domain_labels)
         self.material_fit = material_fit
         self.physical_bbox = tuple(float(value) for value in physical_bbox)
-        self.sponge_thickness = float(sponge_thickness)
+        self.sponge_thickness = (
+            None if sponge_thickness is None else float(sponge_thickness)
+        )
         self.sponge_sigma_max = float(sponge_sigma_max)
+        self.absorbing_layer = str(absorbing_layer).strip().lower()
+        if self.absorbing_layer not in {"pml", "sponge"}:
+            raise ValueError("absorbing_layer must be 'pml' or 'sponge'.")
+        if self.absorbing_layer == "sponge" and self.sponge_thickness is None:
+            raise ValueError("sponge_thickness is required for the sponge layer.")
+        if self.absorbing_layer == "pml" and pml_region is None:
+            raise ValueError("pml_region is required for the PML layer.")
+        self.pml_region = pml_region
+        self.pml_damping = pml_damping or PMLDamping()
         self._er_rhs_backend_requested = _DEFAULT_ER_RHS_BACKEND
         self._er_rhs_backend_active = "legacy"
         self._er_rhs_backend_fallback_reason = "material model not initialized"
@@ -139,21 +154,34 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             if self.material_fit.rho.rmserr is None
             else self.material_fit.rho.rmserr,
             "physical_bbox": numpy.asarray(self.physical_bbox, dtype=float),
+            "absorbing_layer": self.absorbing_layer,
             "sponge_sigma_max": self.sponge_sigma_max,
-            "sponge_thickness": self.sponge_thickness,
+            "sponge_thickness": -1.0
+            if self.sponge_thickness is None
+            else self.sponge_thickness,
+            "pml_amp_sigma": float(self.pml_damping.amp_sigma),
+            "pml_profile": str(self.pml_damping.profile),
+            "pml_sigma_max": float(self.pml_sigma.max().item()),
         }
         self._update_er_rhs_backend_metadata()
 
     def _build_material_model(self):
         self.air_label = self.domain_labels["Air"]
         self.porous_label = self.domain_labels["Porous"]
-        self.sponge_label = self.domain_labels["Sponge"]
+        layer_name = "PML" if "PML" in self.domain_labels else "Sponge"
+        if layer_name not in self.domain_labels:
+            raise ValueError("The domain labels must contain a PML or Sponge region.")
+        self.absorbing_layer_label = self.domain_labels[layer_name]
         element_labels = self.mesh.element_physical_labels.to(
             device=self.device, dtype=torch.long
         )
         self._air_mask = element_labels == self.air_label
         self._porous_mask = element_labels == self.porous_label
-        self._sponge_mask = element_labels == self.sponge_label
+        self._absorbing_layer_mask = element_labels == self.absorbing_layer_label
+        self._sponge_mask = self._absorbing_layer_mask
+        self._pml_mask = self._absorbing_layer_mask
+        if torch.any(self._porous_mask & self._pml_mask):
+            raise ValueError("Porous and PML element masks must be disjoint.")
         self._porous_mask_2d = self._porous_mask.reshape(1, -1)
         self._porous_mask_int = self._porous_mask.to(dtype=torch.int32)
         self._porous_element_ids = torch.nonzero(
@@ -162,7 +190,9 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         self._material_ranges = {
             "air": self._contiguous_mask_range(self._air_mask),
             "porous": self._contiguous_mask_range(self._porous_mask),
-            "sponge": self._contiguous_mask_range(self._sponge_mask),
+            "absorbing_layer": self._contiguous_mask_range(
+                self._absorbing_layer_mask
+            ),
         }
 
         beta_air = 1.0 / (self.rho0 * self.c0**2)
@@ -201,6 +231,7 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         )
         self._cache_flux_coefficients()
         self._build_sponge_sigma()
+        self._build_pml()
         self._init_material_state_space()
 
     @staticmethod
@@ -229,6 +260,13 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         return values.repeat_interleave(self.Nfp, dim=0)
 
     def _build_sponge_sigma(self):
+        if self.absorbing_layer != "sponge":
+            self.sponge_sigma = torch.zeros(
+                (1, self.N_elements), device=self.device, dtype=device_ini.dtype
+            )
+            self._sponge_sigma_contiguous = self.sponge_sigma.reshape(-1).contiguous()
+            return
+        assert self.sponge_thickness is not None
         xmin, xmax, _, ymax = self.physical_bbox
         vertices = torch.as_tensor(
             self.mesh.vertices[:2], device=self.device, dtype=device_ini.dtype
@@ -247,6 +285,32 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         sigma = torch.where(self._sponge_mask, sigma, torch.zeros_like(sigma))
         self.sponge_sigma = sigma.reshape(1, -1)
         self._sponge_sigma_contiguous = self.sponge_sigma.reshape(-1).contiguous()
+
+    def _build_pml(self):
+        coordinate_shape = (2, self.Np, self.N_elements)
+        if self.absorbing_layer != "pml":
+            self.pml_sigma = torch.zeros(
+                coordinate_shape, device=self.device, dtype=device_ini.dtype
+            )
+        else:
+            assert self.pml_region is not None
+            coordinates = self.xyz[:2]
+            region_mask = self.pml_region.element_mask(
+                coordinates, self.mesh.domain_elements
+            )
+            if not torch.equal(region_mask, self._pml_mask):
+                raise ValueError(
+                    "The configured PML region must match the mesh PML domain label."
+                )
+            self.pml_sigma = self.pml_damping.compute(
+                coordinates,
+                self.pml_region,
+                self.mesh.domain_elements,
+            )
+        self._pml_sigma_contiguous = self.pml_sigma.contiguous()
+        self.pml_augmentation = PMLAugmentation(
+            self.pml_sigma, self.rho0, self.c0
+        )
 
     def _init_material_state_space(self):
         self.beta_A = torch.as_tensor(
@@ -299,6 +363,8 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         self._inv_rho_inf_contiguous = self.inv_rho_inf_vector.contiguous()
 
         self._aux_state_names = ["z_beta", "z_rho_x", "z_rho_y"]
+        if self.absorbing_layer == "pml":
+            self._aux_state_names.append("pml_psi")
 
     @staticmethod
     def _extract_diagonal(matrix: torch.Tensor):
@@ -519,6 +585,12 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             dtype=device_ini.dtype,
         )
         self.z_rho_y = torch.zeros_like(self.z_rho_x)
+        if self.absorbing_layer == "pml":
+            self.pml_psi = torch.zeros(
+                (self.Np, 2, self.N_elements),
+                device=self.device,
+                dtype=device_ini.dtype,
+            )
         if getattr(self, "_use_triton_partitioned_er_rhs", False):
             self._allocate_compact_auxiliary_state()
         else:
@@ -535,14 +607,19 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         self._compact_z_beta_work = torch.empty_like(self._compact_z_beta)
         self._compact_z_rho_x_work = torch.empty_like(self._compact_z_beta)
         self._compact_z_rho_y_work = torch.empty_like(self._compact_z_beta)
+        if self.absorbing_layer == "pml":
+            self._pml_psi_work = torch.empty_like(self.pml_psi)
 
     def _time_state_auxiliary_names(self):
         if getattr(self, "_use_triton_partitioned_er_rhs", False):
-            return (
+            names = (
                 "_compact_z_beta",
                 "_compact_z_rho_x",
                 "_compact_z_rho_y",
             )
+            if self.absorbing_layer == "pml":
+                names += ("pml_psi",)
+            return names
         return super()._time_state_auxiliary_names()
 
     def _prepare_fast_time_integration_state(self):
@@ -582,6 +659,8 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
                 ("_compact_z_rho_y", "_compact_z_rho_y_work"),
             ):
                 getattr(self, work_name).copy_(getattr(self, state_name))
+            if self.absorbing_layer == "pml":
+                self._pml_psi_work.copy_(self.pml_psi)
             return
         for name in self._aux_state_names:
             self._taylor_aux_work[name].copy_(getattr(self, name))
@@ -596,9 +675,46 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             self._taylor_aux_work[name].copy_(rhs)
 
     def _active_auxiliary_state(self, name: str):
+        if name == "pml_psi" and hasattr(self, "_pml_psi_work"):
+            return self._pml_psi_work
         if hasattr(self, "_taylor_aux_work") and name in self._taylor_aux_work:
             return self._taylor_aux_work[name]
         return getattr(self, name)
+
+    def _apply_pml_rhs_torch(
+        self,
+        q_view: torch.Tensor,
+        rhs_view: torch.Tensor,
+    ):
+        if self.absorbing_layer != "pml":
+            return
+        memory = self._active_auxiliary_state("pml_psi")
+        self.pml_augmentation.apply_in_place(
+            q_view[:, :3, :],
+            memory,
+            rhs_view[:, :3, :],
+            self._taylor_aux_rhs["pml_psi"],
+        )
+
+    def _apply_pml_rhs_triton(
+        self,
+        q_by_node: torch.Tensor,
+        rhs_by_node: torch.Tensor,
+        q_accumulate: torch.Tensor | None,
+        coefficient: float,
+    ):
+        if self.absorbing_layer != "pml":
+            return
+        acoustics_2d_triton.launch_pml_auxiliary_rhs_2d(
+            q_by_node=q_by_node,
+            rhs_by_node=rhs_by_node,
+            q_accumulate=q_accumulate,
+            pml_sigma=self._pml_sigma_contiguous,
+            pml_psi=self.pml_psi,
+            pml_psi_work=self._active_auxiliary_state("pml_psi"),
+            coefficient=coefficient,
+            rho_c2=self.rho0 * self.c0 * self.c0,
+        )
 
     def _material_rhs(self, A: torch.Tensor, B: torch.Tensor, state: torch.Tensor, field: torch.Tensor):
         if A.numel() == 0:
@@ -974,12 +1090,19 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
                     q_by_node,
                     accumulate_coefficient,
                 )
+            self._apply_pml_rhs_triton(
+                q_by_node,
+                RHS_Q,
+                q_accumulate,
+                accumulate_coefficient,
+            )
             return RHS_Q, BCvar
 
         self._ensure_full_auxiliary_work_buffers()
         self._compute_lift_surface()
         self._compute_volume_rhs_packed(q_by_node, RHS_Q_view)
         RHS_Q.add_(self._surface_by_node)
+        self._apply_pml_rhs_torch(self._state_view(q_by_node), RHS_Q_view)
         if q_accumulate is not None:
             q_accumulate.add_(RHS_Q, alpha=accumulate_coefficient)
         return RHS_Q, BCvar
@@ -1058,6 +1181,16 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         rhs_P.addcmul_(self.sponge_sigma, P, value=-1.0)
         rhs_Vx.addcmul_(self.sponge_sigma, Vx, value=-1.0)
         rhs_Vy.addcmul_(self.sponge_sigma, Vy, value=-1.0)
+        if self.absorbing_layer == "pml":
+            primary = torch.stack((P, Vx, Vy), dim=1)
+            primary_rhs = torch.stack((rhs_P, rhs_Vx, rhs_Vy), dim=1)
+            self.pml_augmentation.apply_in_place(
+                primary,
+                self._active_auxiliary_state("pml_psi"),
+                primary_rhs,
+                self._taylor_aux_rhs["pml_psi"],
+            )
+            rhs_P, rhs_Vx, rhs_Vy = primary_rhs.unbind(dim=1)
 
         return rhs_P, rhs_Vx, rhs_Vy, rhs_Vz, BCvar
 

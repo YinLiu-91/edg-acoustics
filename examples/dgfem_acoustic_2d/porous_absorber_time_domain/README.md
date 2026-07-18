@@ -11,7 +11,7 @@
 - `main.py`
   这个 case 的主入口。负责生成拟合文件、生成网格、构建仿真、执行时域推进并写出结果。
 - `porous_absorber_time_domain.geo`
-  Gmsh 几何文件。参数 `w0` 控制多孔层厚度，默认 `0.05`。几何里包含空气域、多孔层和外圈 sponge 吸收层。
+  Gmsh 几何文件。参数 `w0` 控制多孔层厚度，默认 `0.05`。几何里包含空气域、多孔层和外圈 PML 吸收层。
 - `fit_er_material.m`
   用 Octave 调 `vectfit3`，把频率相关的压缩率和密度表拟合成实状态空间模型，输出 `er_material_fit.mat`。
 - `er_material_fit.mat`
@@ -31,7 +31,7 @@
 - `outputs/`
   默认输出目录。通常有 `outputs/5cm` 和 `outputs/15cm` 两个子目录。
 - `outputs_sponge_1000/`、`outputs_sponge_5000/`
-  不同 sponge 强度的对比结果目录。
+  旧 sponge 模式下不同阻尼强度的对比结果目录；当前默认入口使用 PML。
 - `receiver_history_with_error.png`
   当前目录里已经生成的一张示例图，包含压力曲线和与 COMSOL 的误差图。
 - `MinerU_markdown_models.aco.porous_absorber_time_domain.zh_CN_2076138063190925312.md`
@@ -101,6 +101,7 @@ rtk python main.py --thickness 0.15
 - `--thickness 0.05` / `0.15` 用米作为单位
 - `--force-fit` 会重新生成 `er_material_fit.mat`
 - `--force-mesh` 会重新生成 `.msh`
+- 默认外圈吸收层为 PML；显式传 `--absorbing-layer sponge` 可回到旧 sponge 阻尼
 - 默认启用 packed RHS、2D Triton kernel、deep-fused ER RHS、compact ER 和 CUDA graph，无需额外优化参数
 
 ## 4. 重新生成网格
@@ -188,7 +189,7 @@ rtk python plot_results.py \
 如果网格不存在，或者传了 `--force-mesh`，就调用 Gmsh 生成。生成后 `validate_mesh()` 会校验：
 
 - 是否同时包含 `triangle` 和 `line`
-- 三角单元物理标签是否为 `Air=1, Porous=2, Sponge=3`
+- 三角单元物理标签是否为 `Air=1, Porous=2, PML=3`
 - 边界物理标签是否为 `Outer=11, Rigid=12`
 - `ymin` 是否对应当前厚度
 
@@ -215,7 +216,8 @@ rtk python plot_results.py \
 - 默认 DG 阶数 `Nx = 4`
 - 默认 TSI 阶数 `Nt = 4`
 - 默认 CFL `0.25`
-- sponge 厚度 `L0 / 5 = 0.3`
+- PML 厚度 `L0 / 5 = 0.3`
+- 默认 PML 阻尼 `--pml-amp-sigma 1000`，profile 为 `quadratic`
 
 ### 6.4 时域推进和结果写出
 
@@ -241,13 +243,13 @@ rtk python plot_results.py \
 
 ### 7.0 三类区域分别求解什么
 
-几何文件把三角形单元标记为 Air=1、Porous=2 和 Sponge=3。这三个标签不是三个完全独立的 PDE：
+几何文件把三角形单元标记为 Air=1、Porous=2 和 PML=3。这三个标签不是三个完全独立的 PDE：
 
 | 区域 | 主变量方程 | 额外状态 | 代码中的处理 |
 | --- | --- | --- | --- |
 | Air | 标准线性声学方程 | 无 | 使用空气的 rho0、c0 |
 | Porous | 仍然求解 P/Vx/Vy，但本构关系变为频率相关的 ER 模型 | z_beta、z_rho_x、z_rho_y | 用 beta_D/rho_D 和 A/B/C 状态空间项替换空气右端 |
-| Sponge | 标准声学方程加空间阻尼 | 无 | 只在 Sponge 单元中令 sigma>0 |
+| PML | 标准声学方程加 PML 分裂场记忆项 | psi_x、psi_y | 只在 PML 单元中令 sigma_x/sigma_y>0 |
 
 因此，二维代码的主未知量可以写成
 
@@ -261,13 +263,19 @@ $$
 Z=(z_\beta,z_{\rho,x},z_{\rho,y}).
 $$
 
+PML 单元还要附带外圈吸收层记忆状态
+
+$$
+\Psi=(\psi_x,\psi_y).
+$$
+
 RHS_operator(P, Vx, Vy, Vz, BCvar) 每次被时间积分器调用时，执行如下顺序：
 
 1. P/Vx/Vy 是所有单元上的主变量；_gradient() 计算单元内部梯度，得到 dPdx、dPdy、dVxdx、dVydy 和 divV。
 2. MaterialUpwindFlux2D 根据相邻单元的材料参数计算所有内部面的数值通量。
 3. 先用 k_inf 和 inv_rho_inf 形成所有单元的标准声学右端，再用 _porous_mask_2d 只覆盖多孔单元的右端。
 4. 用 z_beta、z_rho_x、z_rho_y 计算材料记忆项，并同时计算三个 ADE 状态的右端。
-5. 用 Fscale 和 lift 把面通量加入体积分右端，最后在 Sponge 单元中加入 -sigma*field。
+5. 用 Fscale 和 lift 把面通量加入体积分右端，最后在 PML 单元中追加分裂场吸收项并推进 psi_x/psi_y。
 
 这个顺序很重要：材料记忆项属于多孔单元内部的体方程；空气-多孔交界面本身不存储一个单独的“界面压力”或“界面速度”，而是由数值通量弱形式地施加界面条件。
 
@@ -415,7 +423,7 @@ rhs_Vx = torch.where(self._porous_mask_2d, rhs_porous_Vx, rhs_Vx)
 rhs_Vy = torch.where(self._porous_mask_2d, rhs_porous_Vy, rhs_Vy)
 ```
 
-只把 Porous 单元切换到 ER 方程。材料状态的输入也先乘以 _porous_mask_2d，因此 Air 和 Sponge 单元不会推进多孔材料 ADE。
+只把 Porous 单元切换到 ER 方程。材料状态的输入也先乘以 _porous_mask_2d，因此 Air 和 PML 单元不会推进多孔材料 ADE。
 
 ### 7.1 空气域：标准线性声学
 
@@ -687,16 +695,32 @@ $$
 
 脉冲中心为 `SOURCE_XYZ=(-1.0,0.5,0.0)`，宽度由 `PULSE_B=0.045` 控制，初始速度为零。`RECEIVER_XYZ` 指定接收点，时间历程由 `TSI_TI` 采样并保存到 `outputs/`。
 
-几何文件中的 `Air=1`、`Porous=2`、`Sponge=3` 与 `main.py` 的 `DOMAIN_LABELS` 一致。海绵层不是论文 ADE 材料模型的一部分，而是代码在 `RHS_operator()` 最后加入的空间阻尼：
+几何文件中的 `Air=1`、`Porous=2`、`PML=3` 与 `main.py` 的 `DOMAIN_LABELS` 一致。PML 不是论文 ER 多孔材料 ADE 的一部分，而是外圈空气吸收层。代码先装配空气/多孔 DG 右端，再在 PML 单元追加：
 
 $$
-\frac{\partial p}{\partial t}\leftarrow\frac{\partial p}{\partial t}-\sigma p,
+\frac{\partial p}{\partial t}\leftarrow
+\frac{\partial p}{\partial t}-(\sigma_x+\sigma_y)p,
 \qquad
-\frac{\partial \boldsymbol v}{\partial t}
-\leftarrow\frac{\partial \boldsymbol v}{\partial t}-\sigma\boldsymbol v.
+\frac{\partial v_x}{\partial t}\leftarrow
+\frac{\partial v_x}{\partial t}-\frac{\psi_x}{\rho_0c_0^2},
+\qquad
+\frac{\partial v_y}{\partial t}\leftarrow
+\frac{\partial v_y}{\partial t}-\frac{\psi_y}{\rho_0c_0^2}.
 $$
 
-`SPONGE_THICKNESS=L0/5` 决定阻尼带厚度；它只作用于 `Sponge` 标签内的单元。最后，`TSI_TI` 对上述半离散右端进行时间积分，`DEFAULT_ORDER=4`、`DEFAULT_NT=4` 和 `DEFAULT_CFL=0.25` 控制本算例的 DG 阶数、时间积分阶数和 CFL 步长。
+PML 记忆状态满足：
+
+$$
+\frac{\partial \psi_x}{\partial t}
+=\rho_0c_0^2(\sigma_x-\sigma_y)
+\frac{\partial v_x}{\partial t}-\sigma_y\psi_x,
+\qquad
+\frac{\partial \psi_y}{\partial t}
+=\rho_0c_0^2(\sigma_y-\sigma_x)
+\frac{\partial v_y}{\partial t}-\sigma_x\psi_y.
+$$
+
+`PML_THICKNESS=L0/5` 决定吸收带厚度；它只作用于 `PML` 标签内的单元。最后，`TSI_TI` 对上述半离散右端进行时间积分，`DEFAULT_ORDER=4`、`DEFAULT_NT=4` 和 `DEFAULT_CFL=0.25` 控制本算例的 DG 阶数、时间积分阶数和 CFL 步长。
 
 ## 8. 输出结果说明
 
@@ -740,8 +764,12 @@ outputs/
   声源和接收点位置
 - `beta_fit_rmserr`, `rho_fit_rmserr`
   材料拟合误差
+- `absorbing_layer`
+  外圈吸收层模式，默认 `pml`
+- `pml_amp_sigma`, `pml_profile`, `pml_sigma_max`
+  PML 阻尼参数
 - `sponge_sigma_max`, `sponge_thickness`
-  sponge 参数
+  旧 sponge 兼容模式参数
 
 当前这份默认输出大致是：
 
@@ -781,54 +809,120 @@ porous_absorber_time_domain_5cm_step005802_t5.500134e-03.msh
 
 ## 9. 当前结果和 COMSOL golden 的对比
 
-以当前默认 `outputs/` 为例，用 `plot_results.py` 对比 COMSOL golden，得到的整段 `5 ms` 到 `10 ms` 相对 `L2` 误差大致是：
+下面的表使用当前提交内默认网格直接运行得到：
 
-- `5 cm`: `6.60%`
-- `15 cm`: `7.13%`
+```text
+porous_absorber_time_domain_5cm.msh
+porous_absorber_time_domain_15cm.msh
+```
 
-更细一点：
+对比对象是本目录下的 COMSOL golden：
 
-- 早期主反射段 `5-7 ms`，误差更小，约 `4.81%` 和 `5.50%`
-- 后段 `7-10 ms` 相对误差会明显变大
+```text
+5cm_er_comsol_golden.txt
+15cm_er_comsol_golden.txt
+```
+
+误差计算方式和测试里的 `compute_comsol_error_metrics()` 一致：把 EDG 接收点声压插值到 COMSOL golden 的时间点，再计算
+
+$$
+\mathrm{RMSE}=\sqrt{\operatorname{mean}((p-p_\mathrm{ref})^2)},
+\qquad
+\mathrm{rel\_L2}=\frac{\|p-p_\mathrm{ref}\|_2}{\|p_\mathrm{ref}\|_2}.
+$$
+
+`2026-07-18` 在 V100 上用默认 `Nx=4`、`Nt=4`、`CFL=0.25`、总时长 `0.01 s`、CUDA graph 开启实测如下：
+
+| 厚度 | 外圈吸收层 | 参数 | RMSE | max_abs | rel_L2 |
+| --- | --- | --- | ---: | ---: | ---: |
+| `5 cm` | `pml` | `amp_sigma=1000`, `quadratic` | `6.555751e-4` | `2.817459e-3` | `4.944831%` |
+| `5 cm` | `sponge` | `sponge_sigma_max=2500` | `8.753415e-4` | `2.817459e-3` | `6.602473%` |
+| `15 cm` | `pml` | `amp_sigma=1000`, `quadratic` | `7.062803e-4` | `3.335231e-3` | `5.570680%` |
+| `15 cm` | `sponge` | `sponge_sigma_max=2500` | `9.042279e-4` | `3.335231e-3` | `7.131963%` |
+
+全时域曲线如下。第一行是 `0-10 ms` 接收点声压历史，第二行是 `5-10 ms` 放大图；第三、四行分别是 PML/sponge 相对 COMSOL 的绝对误差和逐点相对误差。COMSOL golden 文件本身覆盖 `5-10 ms`，所以误差图也只在这个重叠时间窗内计算。
+
+![COMSOL、PML 和 sponge 的全时域接收点声压与误差对比](boundary_comparison_all_time.png)
+
+这组默认网格上，PML 相比旧 sponge 的整段误差更低：
+
+- `5 cm` 的 `rel_L2` 从 `6.60%` 降到 `4.94%`
+- `15 cm` 的 `rel_L2` 从 `7.13%` 降到 `5.57%`
+- 两个厚度的 `RMSE` 也同步降低
+- `max_abs` 在这组对比中相同，说明最大点误差主要不是由外边界吸收层决定，而更可能来自主反射段的网格/界面离散差异
+
+如果只看 `0.008-0.010 s` 的尾段，PML 相对 sponge 的优势会更明显。结论是：在当前默认网格和默认参数下，`0.008 s` 之后 PML 明显比 sponge 更接近 COMSOL。两个厚度下，PML 的尾段 `RMSE`、平均绝对误差和相对 `L2` 误差都显著低于 sponge；按 COMSOL 采样点逐点比较，PML 的绝对误差在约 `92-94%` 的尾段采样点上小于 sponge。
+
+这个现象和“sponge 吸收不充分，边界反射波重新入场”这一解释是吻合的。几何中声源在 `(-1.0, 0.5)`，接收点在 `(1.0, 0.5)`，空气域顶部在 `y=1.5`。直接波从声源到接收点的距离为 `2.0 m`，按 `c0=343 m/s` 估算，到达时间约为：
+
+```text
+2.0 / 343 = 5.83 ms
+```
+
+而最早可能影响接收点的外圈吸收层反射主要来自顶部方向。用镜像法粗估，声源关于顶部边界 `y=1.5` 的镜像点是 `(-1.0, 2.5)`，它到接收点 `(1.0, 0.5)` 的距离为：
+
+```text
+sqrt((1 - (-1))^2 + (0.5 - 2.5)^2) = 2.828 m
+2.828 / 343 = 8.25 ms
+```
+
+所以 `5-7 ms` 主反射段里 PML 和 sponge 的误差接近，是因为主要波形尚未携带明显的外圈边界反射；到 `8 ms` 之后，顶部吸收层反射开始回到接收点，旧 sponge 的尾段误差迅速放大，而 PML 仍然贴近 COMSOL。这不是严格的反射路径分解，但从传播时间、误差曲线和尾段指标三方面看，sponge 边界反射是后段误差变大的主要嫌疑。
+
+| 厚度 | 外圈吸收层 | `0.008-0.010 s` RMSE | `0.008-0.010 s` max_abs | `0.008-0.010 s` mean_abs | `0.008-0.010 s` rel_L2 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `5 cm` | `pml` | `1.471530e-4` | `2.919840e-4` | `1.258306e-4` | `5.900332%` |
+| `5 cm` | `sponge` | `9.287683e-4` | `1.538804e-3` | `8.231479e-4` | `37.240429%` |
+| `15 cm` | `pml` | `1.136225e-4` | `2.466630e-4` | `9.178414e-5` | `10.875395%` |
+| `15 cm` | `sponge` | `8.998530e-4` | `1.419136e-3` | `7.955576e-4` | `86.129544%` |
+
+尾段曲线和绝对误差对比如下。上排是接收点声压，下排是相对 COMSOL 的绝对误差：
+
+![PML 和 sponge 在 8-10 ms 尾段相对 COMSOL 的误差对比](boundary_error_after_8ms.png)
 
 这里要注意：后段“相对误差变大”不等于“绝对误差失控”。尾波本身已经很小，`15 cm` 尤其如此，所以同量级的绝对误差会被相对指标放大。这也是 `plot_results.py` 里加入相对误差下限的原因。
-
-当前默认输出的绝对误差量级大致是：
-
-- `5 cm`: `RMSE ≈ 8.75e-4`
-- `15 cm`: `RMSE ≈ 9.04e-4`
 
 从主峰位置和幅值看，当前实现没有明显的 source、receiver、厚度或时间轴配置错误；差异更多来自：
 
 - DG 三角网格与 COMSOL 网格不完全相同
-- sponge 吸收层和 COMSOL absorbing layer 不是同一种实现
+- 外圈 PML 和 COMSOL absorbing layer 的离散实现不完全相同
 - 多孔材料时域离散与跨材料界面数值通量带来的差异
 
-## 10. 调 sponge 强度
+## 10. 调外圈吸收层
 
-sponge 强度由：
+默认 PML 参数由：
 
 ```bash
+--pml-amp-sigma
+--pml-profile
+```
+
+控制。默认 `--pml-amp-sigma 1000 --pml-profile quadratic`，对应外边界处最大 PML 阻尼约 `10000 1/s`。
+
+旧 sponge 兼容模式仍可显式启用：
+
+```bash
+--absorbing-layer sponge
 --sponge-sigma-max
 ```
 
-控制，默认 `2500`。数值越大，吸收层阻尼越强；越小则越弱。
+其中 `--sponge-sigma-max` 默认 `2500`。数值越大，吸收层阻尼越强；越小则越弱。
 
 示例：
 
 ```bash
 rtk python main.py \
   --thickness both \
-  --sponge-sigma-max 1000 \
-  --output-root outputs_sponge_1000
+  --pml-amp-sigma 1000 \
+  --output-root outputs_pml_1000
 
 rtk python main.py \
   --thickness both \
+  --absorbing-layer sponge \
   --sponge-sigma-max 5000 \
   --output-root outputs_sponge_5000
 ```
 
-建议先比较：
+旧 sponge 模式建议先比较：
 
 - `1000`
 - `2500`
@@ -1080,7 +1174,7 @@ rtk env PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics \
 - 总单元数：`126363`
 - Air：`90338`
 - Porous：`2868`
-- Sponge：`33157`
+- PML：`33157`
 - GPU：`Tesla V100-SXM2-16GB`
 - DG 阶数：`Nx = 4`，因此 `Np = 15`
 - TSI 阶数：`Nt = 4`
@@ -1096,7 +1190,7 @@ rtk env PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics \
 
 1. `torch.mm([Dr;Ds], q[:, :3N])` 一次生成 `dr/ds` 两个方向的 `P/Vx/Vy`
 2. `torch.mm(lift, flux[:, :3N])` 一次生成 surface 项
-3. Triton `nonporous` post-kernel 负责 Air/Sponge 的 metric、volume、surface、sponge 和 Taylor 累加
+3. Triton `nonporous` post-kernel 负责 Air/PML 的 metric、volume、surface 和 Taylor 累加；PML 辅助记忆项由独立 post-kernel 追加
 4. Triton `porous` post-kernel 负责 porous 的 metric、memory collapse、ADE work/update 和 Taylor 累加
 
 ### 11.9 当前大网格性能结果

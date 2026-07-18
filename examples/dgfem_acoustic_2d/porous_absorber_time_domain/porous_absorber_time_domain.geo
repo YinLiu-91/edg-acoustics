@@ -30,7 +30,7 @@ c_bottom_left[] = Curve In BoundingBox {outer_xmin - eps, ymin - eps, -eps, xmin
 c_bottom_right[] = Curve In BoundingBox {xmax - eps, ymin - eps, -eps, outer_xmax + eps, ymin + eps, eps};
 Physical Surface("Air", 1) = {2};
 Physical Surface("Porous", 2) = {3};
-Physical Surface("Sponge", 3) = {4};
+Physical Surface("PML", 3) = {4};
 
 Physical Curve("Outer", 11) = {c_left[], c_right[], c_top[], c_bottom_left[], c_bottom_right[]};
 Physical Curve("Rigid", 12) = {12};

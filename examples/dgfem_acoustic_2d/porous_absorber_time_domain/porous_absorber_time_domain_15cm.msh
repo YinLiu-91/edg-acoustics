@@ -7,7 +7,7 @@ $PhysicalNames
 1 12 "Rigid"
 2 1 "Air"
 2 2 "Porous"
-2 3 "Sponge"
+2 3 "PML"
 $EndPhysicalNames
 $Nodes
 3805

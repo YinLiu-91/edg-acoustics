@@ -30,6 +30,8 @@ COMSOL_GOLDEN_PATHS = {
     0.05: EXAMPLE_DIR / "5cm_er_comsol_golden.txt",
     0.15: EXAMPLE_DIR / "15cm_er_comsol_golden.txt",
 }
+POROUS_AUX_STATE_NAMES = ("z_beta", "z_rho_x", "z_rho_y")
+PML_AUX_STATE_NAMES = POROUS_AUX_STATE_NAMES + ("pml_psi",)
 
 
 def load_example_module(path: Path):
@@ -81,6 +83,18 @@ def cuda_device_is_v100(device: torch.device):
         and torch.cuda.get_device_capability(device) == (7, 0)
         and "V100" in torch.cuda.get_device_name(device)
     )
+
+
+def assert_auxiliary_states_close(actual, expected):
+    for state_name in PML_AUX_STATE_NAMES:
+        if not hasattr(actual, state_name) and not hasattr(expected, state_name):
+            continue
+        torch.testing.assert_close(
+            getattr(actual, state_name),
+            getattr(expected, state_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
 
 
 def test_mesh2d_loads_domain_labels():
@@ -179,15 +193,60 @@ def test_porous_absorber_packed_rhs_matches_reference_cpu():
             rtol=1.0e-10,
             atol=1.0e-10,
         )
-    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
-        torch.testing.assert_close(
-            getattr(packed, state_name),
-            getattr(reference, state_name),
-            rtol=1.0e-10,
-            atol=1.0e-10,
-        )
+    assert_auxiliary_states_close(packed, reference)
     assert packed.last_time_integration_used_packed_rhs is True
     assert packed._er_rhs_backend_active == "legacy"
+
+
+def test_porous_absorber_default_uses_pml_layer_cpu():
+    module = load_example_module(EXAMPLE_MAIN)
+
+    with acoustic_device("cpu"):
+        sim = module.build_simulation(
+            thickness=0.05,
+            fit_path=module.DEFAULT_FIT,
+            mesh_path=module.default_mesh_path(0.05),
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=False,
+        )
+
+    assert sim.absorbing_layer == "pml"
+    assert hasattr(sim, "pml_psi")
+    assert sim.pml_psi.shape == (sim.Np, 2, sim.N_elements)
+    torch.testing.assert_close(sim.sponge_sigma, torch.zeros_like(sim.sponge_sigma))
+    assert torch.count_nonzero(sim.pml_sigma[..., sim._pml_mask]) > 0
+    torch.testing.assert_close(
+        sim.pml_sigma[..., ~sim._pml_mask],
+        torch.zeros_like(sim.pml_sigma[..., ~sim._pml_mask]),
+    )
+    torch.testing.assert_close(
+        sim.pml_sigma.max(),
+        torch.tensor(10000.0, device=sim.device, dtype=sim.pml_sigma.dtype),
+        rtol=1.0e-10,
+        atol=1.0e-10,
+    )
+
+
+def test_porous_absorber_explicit_sponge_layer_cpu():
+    module = load_example_module(EXAMPLE_MAIN)
+
+    with acoustic_device("cpu"):
+        sim = module.build_simulation(
+            thickness=0.05,
+            fit_path=module.DEFAULT_FIT,
+            mesh_path=module.default_mesh_path(0.05),
+            Nx=1,
+            Nt=2,
+            absorbing_layer="sponge",
+            sponge_sigma_max=500.0,
+            use_packed_rhs=False,
+        )
+
+    assert sim.absorbing_layer == "sponge"
+    assert not hasattr(sim, "pml_psi")
+    assert torch.count_nonzero(sim.sponge_sigma) > 0
+    torch.testing.assert_close(sim.pml_sigma, torch.zeros_like(sim.pml_sigma))
 
 
 @pytest.mark.skipif(
@@ -230,13 +289,7 @@ def test_porous_absorber_cuda_graph_matches_eager():
             rtol=1.0e-10,
             atol=1.0e-10,
         )
-    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
-        torch.testing.assert_close(
-            getattr(graphed, state_name),
-            getattr(eager, state_name),
-            rtol=1.0e-10,
-            atol=1.0e-10,
-        )
+    assert_auxiliary_states_close(graphed, eager)
     assert graphed.last_time_integration_used_cuda_graph is True
     assert graphed.last_time_integration_cuda_graph_mode == "full"
     assert graphed.last_time_integration_cuda_graph_chunk_steps == 2
@@ -296,13 +349,7 @@ def test_porous_absorber_triton_matches_packed_cuda():
             rtol=1.0e-10,
             atol=1.0e-10,
         )
-    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
-        torch.testing.assert_close(
-            getattr(triton_sim, state_name),
-            getattr(packed, state_name),
-            rtol=1.0e-10,
-            atol=1.0e-10,
-        )
+    assert_auxiliary_states_close(triton_sim, packed)
     assert triton_sim._use_triton_interior_flux is True
     assert triton_sim._use_triton_boundary_ri is True
     assert triton_sim._use_triton_deep_rhs is False
@@ -380,13 +427,7 @@ def test_porous_absorber_deep_fused_matches_triton_cuda():
             rtol=1.0e-10,
             atol=1.0e-10,
         )
-    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
-        torch.testing.assert_close(
-            getattr(deep_sim, state_name),
-            getattr(triton_sim, state_name),
-            rtol=1.0e-10,
-            atol=1.0e-10,
-        )
+    assert_auxiliary_states_close(deep_sim, triton_sim)
     assert deep_sim._use_triton_deep_rhs is True
     assert deep_sim._use_triton_partitioned_er_rhs is False
 
@@ -438,13 +479,7 @@ def test_porous_absorber_partitioned_er_matches_deep_fused_cuda():
             rtol=1.0e-10,
             atol=1.0e-10,
         )
-    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
-        torch.testing.assert_close(
-            getattr(partitioned, state_name),
-            getattr(legacy, state_name),
-            rtol=1.0e-10,
-            atol=1.0e-10,
-        )
+    assert_auxiliary_states_close(partitioned, legacy)
     assert partitioned._use_triton_partitioned_er_rhs is True
     assert partitioned._combined_simple_ri_boundary is not None
 
@@ -496,13 +531,7 @@ def test_porous_absorber_er_rhs_gemm_matches_legacy_cuda():
             rtol=1.0e-10,
             atol=1.0e-10,
         )
-    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
-        torch.testing.assert_close(
-            getattr(gemm, state_name),
-            getattr(legacy, state_name),
-            rtol=1.0e-10,
-            atol=1.0e-10,
-        )
+    assert_auxiliary_states_close(gemm, legacy)
 
 
 @pytest.mark.skipif(
@@ -557,13 +586,7 @@ def test_porous_absorber_er_rhs_gemm_cuda_graph_matches_eager():
             rtol=1.0e-10,
             atol=1.0e-10,
         )
-    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
-        torch.testing.assert_close(
-            getattr(graphed, state_name),
-            getattr(eager, state_name),
-            rtol=1.0e-10,
-            atol=1.0e-10,
-        )
+    assert_auxiliary_states_close(graphed, eager)
 
 
 @pytest.mark.skipif(
@@ -614,13 +637,7 @@ def test_porous_absorber_deep_fused_cuda_graph_matches_eager():
             rtol=1.0e-10,
             atol=1.0e-10,
         )
-    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
-        torch.testing.assert_close(
-            getattr(graphed, state_name),
-            getattr(eager, state_name),
-            rtol=1.0e-10,
-            atol=1.0e-10,
-        )
+    assert_auxiliary_states_close(graphed, eager)
     assert graphed._use_triton_deep_rhs is True
     assert graphed._use_triton_partitioned_er_rhs is True
 
@@ -705,6 +722,9 @@ def test_porous_absorber_rejects_single_mesh_for_both_thicknesses(monkeypatch):
         fit_path=Path("unused.mat"),
         force_fit=False,
         force_mesh=False,
+        absorbing_layer="pml",
+        pml_amp_sigma=1000.0,
+        pml_profile="quadratic",
         sponge_sigma_max=0.0,
     )
     monkeypatch.setattr(module, "parse_args", lambda: args)

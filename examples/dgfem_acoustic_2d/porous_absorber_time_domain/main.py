@@ -35,7 +35,8 @@ DEFAULT_ER_RHS_BACKEND = "auto"
 RHO0 = 1.213
 C0 = 343.0
 L0 = 1.5
-SPONGE_THICKNESS = L0 / 5.0
+PML_THICKNESS = L0 / 5.0
+SPONGE_THICKNESS = PML_THICKNESS
 PHYSICAL_XMIN = -1.5 * L0
 PHYSICAL_XMAX = 1.5 * L0
 PHYSICAL_YMAX = L0
@@ -45,7 +46,11 @@ PULSE_B = 0.045
 DEFAULT_ORDER = 4
 DEFAULT_NT = 4
 DEFAULT_CFL = 0.25
-DOMAIN_LABELS = {"Air": 1, "Porous": 2, "Sponge": 3}
+DEFAULT_ABSORBING_LAYER = "pml"
+DEFAULT_PML_AMP_SIGMA = 1000.0
+DEFAULT_PML_PROFILE = "quadratic"
+DEFAULT_SPONGE_SIGMA_MAX = 2500.0
+DOMAIN_LABELS = {"Air": 1, "Porous": 2, "PML": 3}
 BC_LABELS = {"Outer": 11, "Rigid": 12}
 BC_PARA = [{"label": 11, "RI": 0.0}, {"label": 12, "RI": 1.0}]
 EXPECTED_TRIANGLE_LABELS = set(DOMAIN_LABELS.values())
@@ -162,7 +167,10 @@ def build_simulation(
     Nx: int = DEFAULT_ORDER,
     Nt: int = DEFAULT_NT,
     cfl: float = DEFAULT_CFL,
-    sponge_sigma_max: float = 2500.0,
+    absorbing_layer: str = DEFAULT_ABSORBING_LAYER,
+    pml_amp_sigma: float = DEFAULT_PML_AMP_SIGMA,
+    pml_profile: str = DEFAULT_PML_PROFILE,
+    sponge_sigma_max: float = DEFAULT_SPONGE_SIGMA_MAX,
     use_packed_rhs: bool = DEFAULT_USE_2D_PACKED_RHS,
     use_triton_kernels: bool = DEFAULT_USE_2D_TRITON_KERNELS,
     use_triton_deep_rhs: bool = DEFAULT_USE_2D_DEEP_FUSED_RHS,
@@ -171,6 +179,19 @@ def build_simulation(
 ):
     mesh = edg_acoustics.Mesh2D(str(mesh_path), BC_LABELS, DOMAIN_LABELS)
     material_fit = edg_acoustics.ExtendedReactionMaterialFit.from_mat(fit_path)
+    absorbing_layer = str(absorbing_layer).strip().lower()
+    pml_region = None
+    pml_damping = None
+    if absorbing_layer == "pml":
+        pml_region = edg_acoustics.PMLRegion(
+            (PHYSICAL_XMAX, PHYSICAL_YMAX),
+            mode="ground",
+            region_name="PML",
+        )
+        pml_damping = edg_acoustics.PMLDamping(
+            amp_sigma=pml_amp_sigma,
+            profile=pml_profile,
+        )
     sim = edg_acoustics.ExtendedReactionSimulation2D(
         RHO0,
         C0,
@@ -182,6 +203,9 @@ def build_simulation(
         physical_bbox=(PHYSICAL_XMIN, PHYSICAL_XMAX, -float(thickness), PHYSICAL_YMAX),
         sponge_thickness=SPONGE_THICKNESS,
         sponge_sigma_max=sponge_sigma_max,
+        absorbing_layer=absorbing_layer,
+        pml_region=pml_region,
+        pml_damping=pml_damping,
     )
     sim.configure_fast_paths(
         use_packed_rhs=use_packed_rhs,
@@ -201,6 +225,10 @@ def build_simulation(
             "fit_filename": str(fit_path),
             "source_xyz": SOURCE_XYZ,
             "receiver_xyz": RECEIVER_XYZ,
+            "absorbing_layer": absorbing_layer,
+            "pml_amp_sigma": float(pml_amp_sigma),
+            "pml_profile": str(pml_profile),
+            "sponge_sigma_max": float(sponge_sigma_max),
         }
     )
     return sim
@@ -223,7 +251,10 @@ def run_case(
     force_fit: bool = False,
     mesh_path: Path | None = None,
     force_mesh: bool = False,
-    sponge_sigma_max: float = 2500.0,
+    absorbing_layer: str = DEFAULT_ABSORBING_LAYER,
+    pml_amp_sigma: float = DEFAULT_PML_AMP_SIGMA,
+    pml_profile: str = DEFAULT_PML_PROFILE,
+    sponge_sigma_max: float = DEFAULT_SPONGE_SIGMA_MAX,
     use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
     cuda_graph_chunk_steps: int = DEFAULT_CUDA_GRAPH_CHUNK_STEPS,
     use_packed_rhs: bool = DEFAULT_USE_2D_PACKED_RHS,
@@ -241,6 +272,9 @@ def run_case(
         Nx=Nx,
         Nt=Nt,
         cfl=cfl,
+        absorbing_layer=absorbing_layer,
+        pml_amp_sigma=pml_amp_sigma,
+        pml_profile=pml_profile,
         sponge_sigma_max=sponge_sigma_max,
         use_packed_rhs=use_packed_rhs,
         use_triton_kernels=use_triton_kernels,
@@ -271,6 +305,10 @@ def run_case(
                 use_triton_partitioned_er_rhs
             ),
             "er_rhs_backend_requested": str(er_rhs_backend),
+            "absorbing_layer_requested": str(absorbing_layer),
+            "pml_amp_sigma_requested": float(pml_amp_sigma),
+            "pml_profile_requested": str(pml_profile),
+            "sponge_sigma_max_requested": float(sponge_sigma_max),
         }
     )
     sim.time_integration(
@@ -404,10 +442,28 @@ def parse_args():
         help="Regenerate the mesh even if it already exists.",
     )
     parser.add_argument(
+        "--absorbing-layer",
+        choices=("pml", "sponge"),
+        default=DEFAULT_ABSORBING_LAYER,
+        help="Exterior absorbing layer formulation.",
+    )
+    parser.add_argument(
+        "--pml-amp-sigma",
+        type=float,
+        default=DEFAULT_PML_AMP_SIGMA,
+        help="Reference PML damping amplitude.",
+    )
+    parser.add_argument(
+        "--pml-profile",
+        choices=("constant", "linear", "quadratic", "cubic", "sine-linear"),
+        default=DEFAULT_PML_PROFILE,
+        help="PML damping profile.",
+    )
+    parser.add_argument(
         "--sponge-sigma-max",
         type=float,
-        default=2500.0,
-        help="Maximum sponge damping coefficient.",
+        default=DEFAULT_SPONGE_SIGMA_MAX,
+        help="Maximum sponge damping coefficient when --absorbing-layer sponge is used.",
     )
     parser.add_argument(
         "--progress",
@@ -488,6 +544,9 @@ def main():
             force_fit=args.force_fit,
             mesh_path=args.mesh_path,
             force_mesh=args.force_mesh,
+            absorbing_layer=args.absorbing_layer,
+            pml_amp_sigma=args.pml_amp_sigma,
+            pml_profile=args.pml_profile,
             sponge_sigma_max=args.sponge_sigma_max,
             use_cuda_graph=args.use_cuda_graph,
             cuda_graph_chunk_steps=args.cuda_graph_chunk_steps,

@@ -15,6 +15,7 @@ from .acoustics_simulation_2d_er import (
     ExtendedReactionSimulation2D,
     VectorFittedSISO,
 )
+from .pml import PMLAugmentation, PMLDamping, PMLRegion
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
