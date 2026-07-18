@@ -838,7 +838,7 @@ rtk python main.py \
 
 ## 11. CUDA graph 和 2D ER 深度优化性能
 
-这一节记录当前 2D ER case 在 V100 上的时间迭代性能、最终保留的优化，以及 CUDA graph 节点变化。所有数值都对应当前代码，不包含已经删除的实验路径。
+这一节记录 2D ER case 在 V100 上的时间迭代性能、最终保留的优化，以及 CUDA graph 节点变化。`11.1` 到 `11.7` 对应此前 `7107` 单元 `5 cm` 网格上的 compact-ER 优化记录；`11.8` 追加当前 `126363` 单元大网格上引入 `ER RHS backend = gemm` 之后的实测结果。
 
 ### 11.1 对比模式
 
@@ -1025,7 +1025,11 @@ D2D 节点数没有变化，但复制字节数明显下降：
 
 ### 11.7 启用和回退
 
-当前案例默认启用 packed RHS、Triton kernel、deep-fused RHS、partitioned ER 和 CUDA graph。`--use-2d-partitioned-er-rhs` 只有在前三层快速路径均实际启用、且 porous 单元连续时才会生效。
+当前案例默认启用 packed RHS、Triton kernel、deep-fused RHS、partitioned ER 和 CUDA graph。`--use-2d-partitioned-er-rhs` 只有在前三层快速路径均实际启用、且 porous 单元连续时才会生效。当前版本还增加了 `--er-rhs-backend {auto,legacy,gemm}`：
+
+- `auto`：默认值。仅在 `CUDA + Triton + fp64 + partitioned ER + V100 + 单元数不小于阈值` 时自动切到 `gemm`。
+- `legacy`：强制使用原有 `fused_er_rhs_2d_kernel + fused_er_aux_update_diag_kernel` 路径。
+- `gemm`：强制使用“大网格 ER RHS”路径：`[Dr;Ds]` 合并 GEMM + `lift` GEMM + `nonporous/porous` 两个 Triton post-kernel。
 
 推荐命令：
 
@@ -1045,7 +1049,8 @@ rtk env PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics \
   --n-time-steps 1000 \
   --use-2d-packed-rhs \
   --use-2d-triton-kernels \
-  --no-use-2d-partitioned-er-rhs
+  --use-2d-partitioned-er-rhs \
+  --er-rhs-backend legacy
 ```
 
 Nsight Systems 复现命令：
@@ -1066,6 +1071,82 @@ rtk env PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics \
   --use-2d-packed-rhs \
   --use-2d-triton-kernels \
   --use-2d-partitioned-er-rhs
+```
+
+### 11.8 当前大网格补充更新
+
+`2026-07-18` 在当前工作区的 `5 cm` 网格上，`gmsh` 细化后默认 `porous_absorber_time_domain_5cm.msh` 已变为：
+
+- 总单元数：`126363`
+- Air：`90338`
+- Porous：`2868`
+- Sponge：`33157`
+- GPU：`Tesla V100-SXM2-16GB`
+- DG 阶数：`Nx = 4`，因此 `Np = 15`
+- TSI 阶数：`Nt = 4`
+- 计时口径：先 warmup `2` 步，随后正式跑 `30` 步，`progress=False`，`synchronize_timing=True`
+
+这张大网格上，原先单个 `fused_er_rhs_2d_kernel` 已经不再是“越深融合越快”的形态。瓶颈转成：
+
+- 一个 kernel 内重复遍历 `15 x 15` 本地节点，`P/Vx/Vy` 和 ADE work 状态被多次从 HBM 读回
+- `Dr/Ds` 与 `lift` 的局部矩阵很小，但右矩阵 `3 * N_elements` 很长，更适合直接交给 cuBLAS GEMM
+- porous 区的 ADE 更新仍然需要自定义 kernel，但 nonporous 和 porous 可以分成两个简单的 post-kernel
+
+因此当前代码新增 `ER RHS backend = gemm`：
+
+1. `torch.mm([Dr;Ds], q[:, :3N])` 一次生成 `dr/ds` 两个方向的 `P/Vx/Vy`
+2. `torch.mm(lift, flux[:, :3N])` 一次生成 surface 项
+3. Triton `nonporous` post-kernel 负责 Air/Sponge 的 metric、volume、surface、sponge 和 Taylor 累加
+4. Triton `porous` post-kernel 负责 porous 的 metric、memory collapse、ADE work/update 和 Taylor 累加
+
+### 11.9 当前大网格性能结果
+
+下面的三组数据都来自当前 `126363` 单元 `5 cm` 网格：
+
+| 模式 | backend | CUDA graph | `30` 步耗时 | 每步时间 | 相对 `legacy_eager` |
+| --- | --- | --- | ---: | ---: | ---: |
+| `legacy_eager` | `legacy` | `False` | `0.314020 s` | `10.467339 ms` | `1.00x` |
+| `legacy_graph` | `legacy` | `True` | `0.314233 s` | `10.474443 ms` | `1.00x` |
+| `gemm_graph` | `gemm` | `True` | `0.175657 s` | `5.855227 ms` | `1.79x` |
+
+当前结论：
+
+- 在这张大网格上，`legacy` 路径即使挂到 CUDA graph，收益也已经接近于零。主耗时不再是“很多碎 kernel 的 launch 开销”，而是大 kernel 本身反复读写全局内存。
+- `gemm_graph` 相对 `legacy_graph` 约 `1.79x`，相对 `legacy_eager` 也约 `1.79x`。这和前面基于 Nsight 估算的 `1.7x - 2.0x` 目标区间一致。
+- 默认 `--er-rhs-backend auto` 在当前 V100 和这张 `126363` 单元网格上会自动选到 `gemm`。如果切回较小网格，或者运行环境不满足 `CUDA + Triton + fp64 + V100 + 阈值`，则会自动回退到 `legacy`，避免对原有小网格路径造成回归。
+
+当前大网格复现命令：
+
+```bash
+rtk env PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics \
+  python ./main.py \
+  --thickness 0.05 \
+  --n-time-steps 30 \
+  --no-progress \
+  --save-mesh-at-ms 0 \
+  --er-rhs-backend auto
+```
+
+如果想强制比较两条路径：
+
+```bash
+rtk env PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics \
+  python ./main.py \
+  --thickness 0.05 \
+  --n-time-steps 30 \
+  --no-progress \
+  --save-mesh-at-ms 0 \
+  --er-rhs-backend legacy
+```
+
+```bash
+rtk env PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics \
+  python ./main.py \
+  --thickness 0.05 \
+  --n-time-steps 30 \
+  --no-progress \
+  --save-mesh-at-ms 0 \
+  --er-rhs-backend gemm
 ```
 
 ## 12. 常见注意事项

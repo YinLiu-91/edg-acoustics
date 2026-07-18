@@ -13,6 +13,7 @@ import scipy.io
 import torch
 
 import edg_acoustics
+import edg_acoustics.acoustics_2d_er_large_rhs_triton as er_large_rhs_triton
 from scenario1_utils import acoustic_device
 
 
@@ -72,6 +73,14 @@ def compute_comsol_error_metrics(sim_time, sim_pressure, golden_path: Path):
         "max_abs": float(numpy.max(numpy.abs(error))),
         "rel_l2": float(numpy.linalg.norm(error) / numpy.linalg.norm(golden_pressure)),
     }
+
+
+def cuda_device_is_v100(device: torch.device):
+    return (
+        device.type == "cuda"
+        and torch.cuda.get_device_capability(device) == (7, 0)
+        and "V100" in torch.cuda.get_device_name(device)
+    )
 
 
 def test_mesh2d_loads_domain_labels():
@@ -178,6 +187,7 @@ def test_porous_absorber_packed_rhs_matches_reference_cpu():
             atol=1.0e-10,
         )
     assert packed.last_time_integration_used_packed_rhs is True
+    assert packed._er_rhs_backend_active == "legacy"
 
 
 @pytest.mark.skipif(
@@ -230,6 +240,23 @@ def test_porous_absorber_cuda_graph_matches_eager():
     assert graphed.last_time_integration_used_cuda_graph is True
     assert graphed.last_time_integration_cuda_graph_mode == "full"
     assert graphed.last_time_integration_cuda_graph_chunk_steps == 2
+
+
+def test_porous_absorber_er_rhs_backend_auto_falls_back_to_legacy_on_cpu():
+    module = load_example_module(EXAMPLE_MAIN)
+    with acoustic_device("cpu"):
+        sim = module.build_simulation(
+            thickness=0.05,
+            fit_path=module.DEFAULT_FIT,
+            mesh_path=module.default_mesh_path(0.05),
+            Nx=1,
+            Nt=2,
+            er_rhs_backend="auto",
+    )
+
+    assert sim._er_rhs_backend_requested == "auto"
+    assert sim._er_rhs_backend_active == "legacy"
+    assert sim._er_rhs_backend_fallback_reason != ""
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="2D porous Triton parity requires CUDA")
@@ -423,6 +450,123 @@ def test_porous_absorber_partitioned_er_matches_deep_fused_cuda():
 
 
 @pytest.mark.skipif(
+    not torch.cuda.is_available() or not er_large_rhs_triton.TRITON_AVAILABLE,
+    reason="2D porous GEMM backend parity requires CUDA and Triton",
+)
+def test_porous_absorber_er_rhs_gemm_matches_legacy_cuda():
+    module = load_example_module(EXAMPLE_MAIN)
+    mesh_path = module.default_mesh_path(0.05)
+    fit_path = module.DEFAULT_FIT
+
+    with acoustic_device("cuda"):
+        legacy = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=True,
+            use_triton_partitioned_er_rhs=True,
+            er_rhs_backend="legacy",
+        )
+        gemm = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=True,
+            use_triton_partitioned_er_rhs=True,
+            er_rhs_backend="gemm",
+        )
+        legacy.time_integration(n_time_steps=3, progress=False, use_cuda_graph=False)
+        gemm.time_integration(n_time_steps=3, progress=False, use_cuda_graph=False)
+        torch.cuda.synchronize()
+
+    assert legacy._er_rhs_backend_active == "legacy"
+    assert gemm._er_rhs_backend_active == "gemm"
+    for field_name in ("P", "Vx", "Vy", "Vz", "Q", "prec"):
+        torch.testing.assert_close(
+            getattr(gemm, field_name),
+            getattr(legacy, field_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
+        torch.testing.assert_close(
+            getattr(gemm, state_name),
+            getattr(legacy, state_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not er_large_rhs_triton.TRITON_AVAILABLE,
+    reason="2D porous GEMM CUDA graph parity requires CUDA and Triton",
+)
+def test_porous_absorber_er_rhs_gemm_cuda_graph_matches_eager():
+    module = load_example_module(EXAMPLE_MAIN)
+    mesh_path = module.default_mesh_path(0.05)
+    fit_path = module.DEFAULT_FIT
+
+    with acoustic_device("cuda"):
+        eager = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=True,
+            use_triton_partitioned_er_rhs=True,
+            er_rhs_backend="gemm",
+        )
+        graphed = module.build_simulation(
+            thickness=0.05,
+            fit_path=fit_path,
+            mesh_path=mesh_path,
+            Nx=1,
+            Nt=2,
+            use_packed_rhs=True,
+            use_triton_kernels=True,
+            use_triton_deep_rhs=True,
+            use_triton_partitioned_er_rhs=True,
+            er_rhs_backend="gemm",
+        )
+        eager.time_integration(n_time_steps=5, progress=False, use_cuda_graph=False)
+        graphed.time_integration(
+            n_time_steps=5,
+            progress=False,
+            use_cuda_graph=True,
+            cuda_graph_chunk_steps=2,
+        )
+        torch.cuda.synchronize()
+
+    assert eager._er_rhs_backend_active == "gemm"
+    assert graphed._er_rhs_backend_active == "gemm"
+    for field_name in ("P", "Vx", "Vy", "Vz", "Q", "prec"):
+        torch.testing.assert_close(
+            getattr(graphed, field_name),
+            getattr(eager, field_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+    for state_name in ("z_beta", "z_rho_x", "z_rho_y"):
+        torch.testing.assert_close(
+            getattr(graphed, state_name),
+            getattr(eager, state_name),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+
+
+@pytest.mark.skipif(
     not torch.cuda.is_available(), reason="2D porous deep fused CUDA graph parity requires CUDA"
 )
 def test_porous_absorber_deep_fused_cuda_graph_matches_eager():
@@ -515,6 +659,13 @@ def test_porous_absorber_default_optimized_run_matches_comsol(thickness):
     assert sim._use_triton_boundary_ri is True
     assert sim._use_triton_deep_rhs is True
     assert sim._use_triton_partitioned_er_rhs is True
+    if (
+        cuda_device_is_v100(sim.device)
+        and sim.N_elements >= sim._er_rhs_gemm_min_elements
+    ):
+        assert sim._er_rhs_backend_active == "gemm"
+    else:
+        assert sim._er_rhs_backend_active == "legacy"
 
     metrics = compute_comsol_error_metrics(
         sim_time,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 import numpy
@@ -10,9 +11,15 @@ import scipy.io
 import torch
 
 import edg_acoustics.device_ini as device_ini
+from . import acoustics_2d_er_large_rhs_triton
 from . import acoustics_2d_triton
 from .acoustics_simulation_2d import AcousticsSimulation2D
 from .preprocessing import MaterialUpwindFlux2D
+
+
+_ER_RHS_BACKENDS = frozenset({"auto", "legacy", "gemm"})
+_DEFAULT_ER_RHS_BACKEND = "auto"
+_DEFAULT_ER_RHS_GEMM_MIN_ELEMENTS = 32768
 
 
 @dataclass
@@ -90,6 +97,10 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         self.physical_bbox = tuple(float(value) for value in physical_bbox)
         self.sponge_thickness = float(sponge_thickness)
         self.sponge_sigma_max = float(sponge_sigma_max)
+        self._er_rhs_backend_requested = _DEFAULT_ER_RHS_BACKEND
+        self._er_rhs_backend_active = "legacy"
+        self._er_rhs_backend_fallback_reason = "material model not initialized"
+        self._er_rhs_gemm_min_elements = _DEFAULT_ER_RHS_GEMM_MIN_ELEMENTS
         super().__init__(
             rho0,
             c0,
@@ -99,6 +110,16 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             node_tolerance=node_tolerance,
         )
         self._build_material_model()
+        self.configure_fast_paths(
+            use_packed_rhs=getattr(self, "_use_packed_rhs", None),
+            use_triton_deep_rhs=getattr(self, "_triton_deep_rhs_requested", None),
+            use_triton_partitioned_er_rhs=getattr(
+                self, "_triton_partitioned_er_rhs_requested", None
+            ),
+            use_triton_interior_flux=getattr(self, "_use_triton_interior_flux", None),
+            use_triton_boundary_ri=getattr(self, "_use_triton_boundary_ri", None),
+            er_rhs_backend=self._er_rhs_backend_requested,
+        )
         self.extra_results_metadata = {
             "domain_label_names": numpy.asarray(
                 [label for label, _ in sorted(self.domain_labels.items())],
@@ -121,6 +142,7 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             "sponge_sigma_max": self.sponge_sigma_max,
             "sponge_thickness": self.sponge_thickness,
         }
+        self._update_er_rhs_backend_metadata()
 
     def _build_material_model(self):
         self.air_label = self.domain_labels["Air"]
@@ -307,14 +329,177 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         ranges = getattr(self, "_material_ranges", None)
         return bool(ranges and ranges.get("porous") is not None)
 
-    def configure_fast_paths(self, **kwargs):
+    @staticmethod
+    def _normalize_er_rhs_backend(backend: str | None):
+        if backend is None:
+            backend = os.environ.get(
+                "EDG_ACOUSTICS_2D_ER_RHS_BACKEND", _DEFAULT_ER_RHS_BACKEND
+            )
+        normalized = str(backend).strip().lower() or _DEFAULT_ER_RHS_BACKEND
+        if normalized not in _ER_RHS_BACKENDS:
+            raise ValueError(
+                f"Unsupported ER RHS backend '{backend}'. "
+                f"Expected one of {sorted(_ER_RHS_BACKENDS)}."
+            )
+        return normalized
+
+    @staticmethod
+    def _cuda_device_is_v100(device: torch.device):
+        return (
+            device.type == "cuda"
+            and torch.cuda.get_device_capability(device) == (7, 0)
+            and "V100" in torch.cuda.get_device_name(device)
+        )
+
+    @staticmethod
+    def _read_er_rhs_gemm_min_elements():
+        raw = os.environ.get(
+            "EDG_ACOUSTICS_2D_ER_RHS_GEMM_MIN_ELEMENTS",
+            str(_DEFAULT_ER_RHS_GEMM_MIN_ELEMENTS),
+        )
+        try:
+            return max(1, int(raw))
+        except ValueError as exc:
+            raise ValueError(
+                "EDG_ACOUSTICS_2D_ER_RHS_GEMM_MIN_ELEMENTS must be an integer."
+            ) from exc
+
+    def _material_model_ready(self):
+        return all(
+            hasattr(self, name)
+            for name in (
+                "_material_ranges",
+                "_porous_element_ids",
+                "_k_inf_contiguous",
+                "_inv_rho_inf_contiguous",
+                "_beta_A_diag",
+                "_rho_A_diag",
+                "_beta_CA_contiguous",
+                "_rho_CA_contiguous",
+                "_beta_B_contiguous",
+                "_rho_B_contiguous",
+            )
+        )
+
+    def _er_rhs_gemm_support_status(self):
+        if not self._material_model_ready():
+            return False, "material model not initialized"
+        if not getattr(self, "_use_packed_rhs", False):
+            return False, "packed RHS is disabled"
+        if not getattr(self, "_use_triton_deep_rhs", False):
+            return False, "deep Triton RHS is disabled"
+        if not getattr(self, "_use_triton_partitioned_er_rhs", False):
+            return False, "partitioned ER RHS is disabled"
+        if self.device.type != "cuda":
+            return False, "CUDA device is required"
+        if device_ini.dtype != torch.float64:
+            return False, "fp64 runtime is required"
+        if not acoustics_2d_er_large_rhs_triton.TRITON_AVAILABLE:
+            return False, "large-mesh Triton helpers are unavailable"
+        porous_range = self._material_ranges.get("porous")
+        if porous_range is None:
+            return False, "porous elements are not contiguous"
+        if self._beta_A_diag is None or self._rho_A_diag is None:
+            return False, "diagonal ADE state matrices are required"
+        if self._beta_A_diag.numel() != self.beta_CA.numel():
+            return False, "beta ADE state sizes do not match"
+        if self._rho_A_diag.numel() != self.rho_CA.numel():
+            return False, "rho ADE state sizes do not match"
+        return True, ""
+
+    def _select_er_rhs_backend(self, requested: str):
+        supported, reason = self._er_rhs_gemm_support_status()
+        if requested == "legacy":
+            return "legacy", ""
+        if requested == "gemm":
+            if not supported:
+                raise RuntimeError(
+                    f"ER RHS backend 'gemm' is unavailable: {reason}."
+                )
+            return "gemm", ""
+        if not supported:
+            return "legacy", reason
+        if not self._cuda_device_is_v100(self.device):
+            return "legacy", "auto backend is only enabled on V100"
+        if self.N_elements < self._er_rhs_gemm_min_elements:
+            return (
+                "legacy",
+                "mesh is below the auto GEMM element threshold "
+                f"({self.N_elements} < {self._er_rhs_gemm_min_elements})",
+            )
+        return "gemm", ""
+
+    def _ensure_full_auxiliary_work_buffers(self):
+        if hasattr(self, "_taylor_aux_work") and hasattr(self, "_taylor_aux_rhs"):
+            return
+        self._taylor_aux_work = {
+            name: torch.empty_like(getattr(self, name)) for name in self._aux_state_names
+        }
+        self._taylor_aux_rhs = {
+            name: torch.empty_like(getattr(self, name)) for name in self._aux_state_names
+        }
+
+    def _ensure_er_rhs_gemm_buffers(self):
+        active_cols = 3 * self.N_elements
+        needs_alloc = (
+            not hasattr(self, "_er_rhs_merged_derivatives")
+            or self._er_rhs_merged_derivatives.shape != (2 * self.Np, active_cols)
+            or self._er_rhs_merged_derivatives.device != self.device
+            or self._er_rhs_merged_derivatives.dtype != device_ini.dtype
+        )
+        if not needs_alloc:
+            return
+        self._er_rhs_active_column_count = active_cols
+        self._er_rhs_d_merged = torch.cat(
+            (self._dr_contiguous, self._ds_contiguous), dim=0
+        ).contiguous()
+        self._er_rhs_merged_derivatives = torch.empty(
+            (2 * self.Np, active_cols),
+            device=self.device,
+            dtype=device_ini.dtype,
+        )
+        self._er_rhs_surface = torch.empty(
+            (self.Np, active_cols),
+            device=self.device,
+            dtype=device_ini.dtype,
+        )
+
+    def _update_er_rhs_backend_metadata(self):
+        if not hasattr(self, "extra_results_metadata"):
+            return
+        self.extra_results_metadata.update(
+            {
+                "er_rhs_backend_requested": self._er_rhs_backend_requested,
+                "er_rhs_backend_active": self._er_rhs_backend_active,
+                "er_rhs_backend_fallback_reason": self._er_rhs_backend_fallback_reason,
+                "er_rhs_gemm_min_elements": int(self._er_rhs_gemm_min_elements),
+            }
+        )
+
+    def configure_fast_paths(self, *, er_rhs_backend: str | None = None, **kwargs):
         super().configure_fast_paths(**kwargs)
+        self._er_rhs_gemm_min_elements = self._read_er_rhs_gemm_min_elements()
+        self._er_rhs_backend_requested = self._normalize_er_rhs_backend(er_rhs_backend)
         if (
             getattr(self, "_use_triton_partitioned_er_rhs", False)
             and hasattr(self, "z_beta")
             and not hasattr(self, "_compact_z_beta")
         ):
             self._allocate_compact_auxiliary_state()
+        elif (
+            hasattr(self, "z_beta")
+            and not getattr(self, "_use_triton_partitioned_er_rhs", False)
+        ):
+            self._ensure_full_auxiliary_work_buffers()
+        self._er_rhs_backend_active = "legacy"
+        self._er_rhs_backend_fallback_reason = "material model not initialized"
+        if self._material_model_ready():
+            active, reason = self._select_er_rhs_backend(self._er_rhs_backend_requested)
+            self._er_rhs_backend_active = active
+            self._er_rhs_backend_fallback_reason = reason
+            if active == "gemm":
+                self._ensure_er_rhs_gemm_buffers()
+        self._update_er_rhs_backend_metadata()
 
     def init_IC(self, IC):
         super().init_IC(IC)
@@ -334,14 +519,10 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             dtype=device_ini.dtype,
         )
         self.z_rho_y = torch.zeros_like(self.z_rho_x)
-        self._taylor_aux_work = {
-            name: torch.empty_like(getattr(self, name)) for name in self._aux_state_names
-        }
-        self._taylor_aux_rhs = {
-            name: torch.empty_like(getattr(self, name)) for name in self._aux_state_names
-        }
         if getattr(self, "_use_triton_partitioned_er_rhs", False):
             self._allocate_compact_auxiliary_state()
+        else:
+            self._ensure_full_auxiliary_work_buffers()
 
     def _allocate_compact_auxiliary_state(self):
         n_porous = int(self._porous_element_ids.numel())
@@ -688,6 +869,79 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         rhs_Vx.addcmul_(self.sponge_sigma, Vx, value=-1.0)
         rhs_Vy.addcmul_(self.sponge_sigma, Vy, value=-1.0)
 
+    def _compute_er_rhs_gemm_buffers(self, q_by_node: torch.Tensor):
+        self._ensure_er_rhs_gemm_buffers()
+        active_q = q_by_node.narrow(1, 0, self._er_rhs_active_column_count)
+        active_flux = self._flux_by_face.narrow(1, 0, self._er_rhs_active_column_count)
+        torch.mm(
+            self._er_rhs_d_merged,
+            active_q,
+            out=self._er_rhs_merged_derivatives,
+        )
+        torch.mm(
+            self._lift_contiguous,
+            active_flux,
+            out=self._er_rhs_surface,
+        )
+
+    def _compute_gemm_partitioned_er_rhs(
+        self,
+        q_by_node: torch.Tensor,
+        rhs_by_node: torch.Tensor,
+        q_accumulate: torch.Tensor | None,
+        coefficient: float,
+    ):
+        porous_start, n_porous = self._material_ranges["porous"]
+        self._compute_er_rhs_gemm_buffers(q_by_node)
+        acoustics_2d_er_large_rhs_triton.launch_er_rhs_nonporous_post_2d(
+            q_by_node=q_by_node,
+            d_q_by_derivative=self._er_rhs_merged_derivatives,
+            surface_by_node=self._er_rhs_surface,
+            metric_x=self._surface_metric_x_contiguous,
+            metric_y=self._surface_metric_y_contiguous,
+            metric_dx=self._surface_metric_dx_contiguous,
+            metric_dy=self._surface_metric_dy_contiguous,
+            k_inf=self._k_inf_contiguous,
+            inv_rho_inf=self._inv_rho_inf_contiguous,
+            sponge_sigma=self._sponge_sigma_contiguous,
+            porous_start=porous_start,
+            n_porous=n_porous,
+            rhs_by_node=rhs_by_node,
+            q_accumulate=q_accumulate,
+            coefficient=coefficient,
+        )
+        acoustics_2d_er_large_rhs_triton.launch_er_rhs_porous_post_2d(
+            q_by_node=q_by_node,
+            d_q_by_derivative=self._er_rhs_merged_derivatives,
+            surface_by_node=self._er_rhs_surface,
+            metric_x=self._surface_metric_x_contiguous,
+            metric_y=self._surface_metric_y_contiguous,
+            metric_dx=self._surface_metric_dx_contiguous,
+            metric_dy=self._surface_metric_dy_contiguous,
+            sponge_sigma=self._sponge_sigma_contiguous,
+            beta_ca=self._beta_CA_contiguous,
+            rho_ca=self._rho_CA_contiguous,
+            beta_diag=self._beta_A_diag,
+            beta_b=self._beta_B_contiguous,
+            rho_diag=self._rho_A_diag,
+            rho_b=self._rho_B_contiguous,
+            z_beta=self._compact_z_beta,
+            z_rho_x=self._compact_z_rho_x,
+            z_rho_y=self._compact_z_rho_y,
+            z_beta_work=self._compact_z_beta_work,
+            z_rho_x_work=self._compact_z_rho_x_work,
+            z_rho_y_work=self._compact_z_rho_y_work,
+            rhs_by_node=rhs_by_node,
+            q_accumulate=q_accumulate,
+            coefficient=coefficient,
+            beta_cb=self.beta_CB,
+            rho_cb=self.rho_CB,
+            beta_d=self.beta_D,
+            rho_d=self.rho_D,
+            porous_start=porous_start,
+            n_porous=n_porous,
+        )
+
     def RHS_operator_packed(
         self,
         q_by_node: torch.tensor,
@@ -702,18 +956,27 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             compute_derivatives=not use_deep_rhs,
         )
         if use_deep_rhs:
-            self._compute_fused_packed_rhs_triton(
-                q_by_node,
-                RHS_Q,
-                q_accumulate,
-                accumulate_coefficient,
-            )
-            self._compute_fused_taylor_auxiliary_update_triton(
-                q_by_node,
-                accumulate_coefficient,
-            )
+            if self._er_rhs_backend_active == "gemm":
+                self._compute_gemm_partitioned_er_rhs(
+                    q_by_node,
+                    RHS_Q,
+                    q_accumulate,
+                    accumulate_coefficient,
+                )
+            else:
+                self._compute_fused_packed_rhs_triton(
+                    q_by_node,
+                    RHS_Q,
+                    q_accumulate,
+                    accumulate_coefficient,
+                )
+                self._compute_fused_taylor_auxiliary_update_triton(
+                    q_by_node,
+                    accumulate_coefficient,
+                )
             return RHS_Q, BCvar
 
+        self._ensure_full_auxiliary_work_buffers()
         self._compute_lift_surface()
         self._compute_volume_rhs_packed(q_by_node, RHS_Q_view)
         RHS_Q.add_(self._surface_by_node)
