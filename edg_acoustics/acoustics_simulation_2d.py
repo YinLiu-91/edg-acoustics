@@ -89,6 +89,7 @@ class AcousticsSimulation2D:
         use_packed_rhs: bool | None = None,
         use_triton_kernels: bool | None = None,
         use_triton_deep_rhs: bool | None = None,
+        use_triton_partitioned_er_rhs: bool | None = None,
         use_triton_interior_flux: bool | None = None,
         use_triton_boundary_ri: bool | None = None,
     ):
@@ -99,12 +100,17 @@ class AcousticsSimulation2D:
         default_deep_rhs = _normalize_env_bool_mode(
             "EDG_ACOUSTICS_2D_DEEP_FUSED_RHS", "0"
         )
+        default_partitioned_er_rhs = _normalize_env_bool_mode(
+            "EDG_ACOUSTICS_2D_PARTITIONED_ER_RHS", "0"
+        )
         if use_packed_rhs is None:
             use_packed_rhs = default_packed_rhs
         if use_triton_kernels is None:
             use_triton_kernels = default_triton
         if use_triton_deep_rhs is None:
             use_triton_deep_rhs = default_deep_rhs
+        if use_triton_partitioned_er_rhs is None:
+            use_triton_partitioned_er_rhs = default_partitioned_er_rhs
         if use_triton_interior_flux is None:
             use_triton_interior_flux = bool(use_triton_kernels)
         if use_triton_boundary_ri is None:
@@ -113,17 +119,28 @@ class AcousticsSimulation2D:
         triton_supported = _TRITON_AVAILABLE and self.device.type == "cuda"
         self._use_packed_rhs = bool(use_packed_rhs)
         self._triton_deep_rhs_requested = bool(use_triton_deep_rhs)
+        self._triton_partitioned_er_rhs_requested = bool(
+            use_triton_partitioned_er_rhs
+        )
         self._use_triton_interior_flux = (
             self._use_packed_rhs and triton_supported and bool(use_triton_interior_flux)
         )
         self._use_triton_boundary_ri = (
             self._use_packed_rhs and triton_supported and bool(use_triton_boundary_ri)
         )
+        self._use_triton_receiver_sampling = (
+            self._use_packed_rhs and triton_supported and bool(use_triton_kernels)
+        )
         self._use_triton_deep_rhs = (
             self._use_packed_rhs
             and triton_supported
             and bool(use_triton_deep_rhs)
             and self._supports_triton_deep_rhs()
+        )
+        self._use_triton_partitioned_er_rhs = (
+            self._use_triton_deep_rhs
+            and bool(use_triton_partitioned_er_rhs)
+            and self._supports_triton_partitioned_er_rhs()
         )
         self._use_fused_state_accumulation = self._use_packed_rhs
         if getattr(self, "time_integrator", None) is not None:
@@ -138,6 +155,9 @@ class AcousticsSimulation2D:
 
     def _supports_triton_deep_rhs(self) -> bool:
         return self.Np > 0 and self.Np <= 32 and 3 * self.Nfp <= 32
+
+    def _supports_triton_partitioned_er_rhs(self) -> bool:
+        return False
 
     def _has_triton_deep_rhs(self) -> bool:
         return getattr(self, "_use_triton_deep_rhs", False)
@@ -455,6 +475,7 @@ class AcousticsSimulation2D:
         """Initialize receiver interpolation metadata for 2D runs."""
         self.rec = rec
         self.sampleWeight, self.nodeindex = self.sample2D(methodLocate)
+        self.sampleWeight = self.sampleWeight.contiguous()
         normalized_nodeindex = numpy.mod(self.nodeindex, self.N_elements)
         self._nodeindex_tensor = torch.as_tensor(
             normalized_nodeindex, device=self.device, dtype=torch.long
@@ -468,11 +489,20 @@ class AcousticsSimulation2D:
         self._clear_cuda_step_graphs()
 
     def _sample_receivers(self, out: torch.tensor):
+        if getattr(self, "_use_triton_receiver_sampling", False):
+            acoustics_2d_triton.launch_sample_receivers_2d(
+                pressure=self.P,
+                element_ids=self._nodeindex_tensor,
+                weights=self.sampleWeight,
+                output=out,
+            )
+            return
         torch.index_select(self.P, 1, self._nodeindex_tensor, out=self._sample_values)
         torch.sum(self.sampleWeight * self._sample_values.T, dim=1, out=out)
 
     def _cache_boundary_parameters(self):
         self._BC_cache = []
+        self._combined_simple_ri_boundary = None
         for index, paras in enumerate(self.BC.BCpara):
             bcvar = self.BC.BCvar[index]
             cache = {
@@ -518,6 +548,73 @@ class AcousticsSimulation2D:
                 cache["kexi1_temp"] = torch.empty_like(bcvar["kexi1"])
             cache["simple_RI"] = "RP_A" not in cache and "CP_B" not in cache
             self._BC_cache.append(cache)
+
+    def _cache_combined_simple_ri_boundary(self):
+        self._combined_simple_ri_boundary = None
+        if not self._BC_cache or not all(
+            cache.get("simple_RI", False) for cache in self._BC_cache
+        ):
+            return
+
+        counts = [int(state["vn"].numel()) for state in self.BC.BCvar]
+        total_boundary = sum(counts)
+        if total_boundary == 0:
+            return
+
+        def combine_variable_major(items):
+            return torch.cat(
+                [item.reshape(4, count) for item, count in zip(items, counts)],
+                dim=1,
+            ).contiguous().reshape(-1)
+
+        combined = {
+            "vmap_q": combine_variable_major(
+                [node["vmap_q"] for node in self.BCnode]
+            ),
+            "flux_map_q": combine_variable_major(
+                [node["flux_map_q"] for node in self.BCnode]
+            ),
+            "nx": torch.cat([node["nx"] for node in self.BCnode]).contiguous(),
+            "ny": torch.cat([node["ny"] for node in self.BCnode]).contiguous(),
+            "fscale": torch.cat(
+                [node["fscale"] for node in self.BCnode]
+            ).contiguous(),
+            "rho": torch.cat(
+                [cache["rho_boundary"] for cache in self._BC_cache]
+            ).contiguous(),
+            "c": torch.cat(
+                [cache["c_boundary"] for cache in self._BC_cache]
+            ).contiguous(),
+            "z": torch.cat(
+                [cache["z_boundary"] for cache in self._BC_cache]
+            ).contiguous(),
+            "k": torch.cat(
+                [cache["k_boundary"] for cache in self._BC_cache]
+            ).contiguous(),
+            "ri": torch.cat(
+                [
+                    torch.full_like(state["vn"], cache["RI_value"])
+                    for state, cache in zip(self.BC.BCvar, self._BC_cache)
+                ]
+            ).contiguous(),
+            "vn": torch.empty(
+                total_boundary, device=self.device, dtype=device_ini.dtype
+            ),
+            "ou": torch.empty(
+                total_boundary, device=self.device, dtype=device_ini.dtype
+            ),
+            "in": torch.empty(
+                total_boundary, device=self.device, dtype=device_ini.dtype
+            ),
+        }
+        start = 0
+        for state, count in zip(self.BC.BCvar, counts):
+            stop = start + count
+            state["vn"] = combined["vn"][start:stop]
+            state["ou"] = combined["ou"][start:stop]
+            state["in"] = combined["in"][start:stop]
+            start = stop
+        self._combined_simple_ri_boundary = combined
 
     def _gradient(self, field: torch.Tensor):
         ddr = self.Dr @ field
@@ -835,14 +932,37 @@ class AcousticsSimulation2D:
         self._compute_interior_flux_packed(q_by_node)
         flux_flat = self._flux_by_face.reshape(-1)
         q_flat = q_by_node.reshape(-1)
-        for index, bc_cache in enumerate(self._BC_cache):
-            self._compute_boundary_flux_packed(
-                bc_cache,
-                self.BCnode[index],
-                BCvar[index],
-                q_flat,
-                flux_flat,
+        combined_boundary = getattr(self, "_combined_simple_ri_boundary", None)
+        if (
+            getattr(self, "_use_triton_partitioned_er_rhs", False)
+            and combined_boundary is not None
+        ):
+            acoustics_2d_triton.launch_combined_boundary_ri_flux_2d(
+                q_flat=q_flat,
+                vmap_q=combined_boundary["vmap_q"],
+                flux_map_q=combined_boundary["flux_map_q"],
+                nx=combined_boundary["nx"],
+                ny=combined_boundary["ny"],
+                rho=combined_boundary["rho"],
+                c=combined_boundary["c"],
+                z=combined_boundary["z"],
+                k=combined_boundary["k"],
+                fscale=combined_boundary["fscale"],
+                ri=combined_boundary["ri"],
+                flux_flat=flux_flat,
+                vn=combined_boundary["vn"],
+                ou=combined_boundary["ou"],
+                incoming=combined_boundary["in"],
             )
+        else:
+            for index, bc_cache in enumerate(self._BC_cache):
+                self._compute_boundary_flux_packed(
+                    bc_cache,
+                    self.BCnode[index],
+                    BCvar[index],
+                    q_flat,
+                    flux_flat,
+                )
         if not self._use_scaled_flux_kernels():
             self._flux_by_face_view.mul_(self.Fscale.unsqueeze(1))
         return RHS_Q, RHS_Q_view, BCvar
@@ -1149,9 +1269,18 @@ class AcousticsSimulation2D:
             return torch.allclose(actual, expected, rtol=rtol, atol=atol)
         return torch.equal(actual, expected)
 
+    def _time_state_auxiliary_names(self):
+        return tuple(getattr(self, "_aux_state_names", ()))
+
+    def _prepare_fast_time_integration_state(self):
+        pass
+
+    def _finalize_fast_time_integration_state(self):
+        pass
+
     def _snapshot_time_state(self):
         auxiliary_state = {}
-        for name in getattr(self, "_aux_state_names", ()):
+        for name in self._time_state_auxiliary_names():
             if hasattr(self, name):
                 auxiliary_state[name] = getattr(self, name).clone()
         return (
@@ -1331,6 +1460,7 @@ class AcousticsSimulation2D:
                 dtype=device_ini.dtype,
             )
         simulated_total_time = self.Ntimesteps * self.time_integrator.dt
+        self._prepare_fast_time_integration_state()
 
         cuda_step_graph = None
         cuda_sample_chunk = None
@@ -1413,6 +1543,7 @@ class AcousticsSimulation2D:
         self.last_time_integration_cuda_graph_chunk_steps = (
             cuda_graph_chunk_steps if cuda_step_graph is not None else 0
         )
+        self._finalize_fast_time_integration_state()
         if progress:
             print(f"time: {self.last_time_integration_elapsed_s} s")
         return self.P, self.Vx, self.Vy, self.Vz

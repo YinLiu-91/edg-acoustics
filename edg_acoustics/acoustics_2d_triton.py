@@ -144,6 +144,70 @@ if TRITON_AVAILABLE:
 
 
     @triton.jit
+    def combined_boundary_ri_flux_2d_kernel(
+        q_ptr,
+        vmap_q_ptr,
+        flux_map_q_ptr,
+        nx_ptr,
+        ny_ptr,
+        rho_ptr,
+        c_ptr,
+        z_ptr,
+        k_ptr,
+        fscale_ptr,
+        ri_ptr,
+        flux_ptr,
+        vn_ptr,
+        ou_ptr,
+        in_ptr,
+        n_boundary: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_boundary
+        idx_p = tl.load(vmap_q_ptr + offsets, mask=mask, other=0)
+        idx_vx = tl.load(
+            vmap_q_ptr + n_boundary + offsets, mask=mask, other=0
+        )
+        idx_vy = tl.load(
+            vmap_q_ptr + 2 * n_boundary + offsets, mask=mask, other=0
+        )
+        p = tl.load(q_ptr + idx_p, mask=mask, other=0.0)
+        vx = tl.load(q_ptr + idx_vx, mask=mask, other=0.0)
+        vy = tl.load(q_ptr + idx_vy, mask=mask, other=0.0)
+        nx = tl.load(nx_ptr + offsets, mask=mask, other=0.0)
+        ny = tl.load(ny_ptr + offsets, mask=mask, other=0.0)
+        rho = tl.load(rho_ptr + offsets, mask=mask, other=1.0)
+        c = tl.load(c_ptr + offsets, mask=mask, other=0.0)
+        z = tl.load(z_ptr + offsets, mask=mask, other=1.0)
+        k = tl.load(k_ptr + offsets, mask=mask, other=0.0)
+        ri = tl.load(ri_ptr + offsets, mask=mask, other=0.0)
+
+        vn = nx * vx + ny * vy
+        ou = vn + p / z
+        incoming = ri * ou
+        velocity_flux = p / rho - 0.5 * c * (ou + incoming)
+        pressure_flux = (vn - 0.5 * ou + 0.5 * incoming) * k
+        fscale = tl.load(fscale_ptr + offsets, mask=mask, other=0.0)
+        velocity_flux *= fscale
+        pressure_flux *= fscale
+
+        tl.store(vn_ptr + offsets, vn, mask=mask)
+        tl.store(ou_ptr + offsets, ou, mask=mask)
+        tl.store(in_ptr + offsets, incoming, mask=mask)
+        out_p = tl.load(flux_map_q_ptr + offsets, mask=mask, other=0)
+        out_vx = tl.load(
+            flux_map_q_ptr + n_boundary + offsets, mask=mask, other=0
+        )
+        out_vy = tl.load(
+            flux_map_q_ptr + 2 * n_boundary + offsets, mask=mask, other=0
+        )
+        tl.store(flux_ptr + out_p, pressure_flux, mask=mask)
+        tl.store(flux_ptr + out_vx, nx * velocity_flux, mask=mask)
+        tl.store(flux_ptr + out_vy, ny * velocity_flux, mask=mask)
+
+
+    @triton.jit
     def fused_acoustic_rhs_2d_kernel(
         q_ptr,
         flux_ptr,
@@ -180,22 +244,24 @@ if TRITON_AVAILABLE:
         surface_p = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
         surface_vx = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
         surface_vy = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
-        surface_vz = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
 
         for local_node in range(NP):
             dr = tl.load(dr_ptr + node * NP + local_node)
             ds = tl.load(ds_ptr + node * NP + local_node)
             q_base = local_node * n_var_elements + element_offsets
-            d_p_dr += dr * tl.load(q_ptr + q_base, mask=mask, other=0.0)
-            d_p_ds += ds * tl.load(q_ptr + q_base, mask=mask, other=0.0)
-            d_vx_dr += dr * tl.load(q_ptr + q_base + n_elements, mask=mask, other=0.0)
-            d_vx_ds += ds * tl.load(q_ptr + q_base + n_elements, mask=mask, other=0.0)
-            d_vy_dr += dr * tl.load(
+            pressure = tl.load(q_ptr + q_base, mask=mask, other=0.0)
+            velocity_x = tl.load(
+                q_ptr + q_base + n_elements, mask=mask, other=0.0
+            )
+            velocity_y = tl.load(
                 q_ptr + q_base + 2 * n_elements, mask=mask, other=0.0
             )
-            d_vy_ds += ds * tl.load(
-                q_ptr + q_base + 2 * n_elements, mask=mask, other=0.0
-            )
+            d_p_dr += dr * pressure
+            d_p_ds += ds * pressure
+            d_vx_dr += dr * velocity_x
+            d_vx_ds += ds * velocity_x
+            d_vy_dr += dr * velocity_y
+            d_vy_ds += ds * velocity_y
 
         for face_node in range(NFACE):
             lift = tl.load(lift_ptr + node * NFACE + face_node)
@@ -206,9 +272,6 @@ if TRITON_AVAILABLE:
             )
             surface_vy += lift * tl.load(
                 flux_ptr + flux_base + 2 * n_elements, mask=mask, other=0.0
-            )
-            surface_vz += lift * tl.load(
-                flux_ptr + flux_base + 3 * n_elements, mask=mask, other=0.0
             )
 
         metric_index = node * n_elements + element_offsets
@@ -226,12 +289,11 @@ if TRITON_AVAILABLE:
         rhs_p = neg_k * div_v + surface_p
         rhs_vx = neg_inv_rho * d_p_dx + surface_vx
         rhs_vy = neg_inv_rho * d_p_dy + surface_vy
-        rhs_vz = surface_vz
-
         tl.store(rhs_ptr + node_base, rhs_p, mask=mask)
         tl.store(rhs_ptr + node_base + n_elements, rhs_vx, mask=mask)
         tl.store(rhs_ptr + node_base + 2 * n_elements, rhs_vy, mask=mask)
-        tl.store(rhs_ptr + node_base + 3 * n_elements, rhs_vz, mask=mask)
+        if not ACCUMULATE:
+            tl.store(rhs_ptr + node_base + 3 * n_elements, 0.0, mask=mask)
 
         if ACCUMULATE:
             tl.store(
@@ -254,14 +316,6 @@ if TRITON_AVAILABLE:
                     q_accumulate_ptr + node_base + 2 * n_elements, mask=mask, other=0.0
                 )
                 + coefficient * rhs_vy,
-                mask=mask,
-            )
-            tl.store(
-                q_accumulate_ptr + node_base + 3 * n_elements,
-                tl.load(
-                    q_accumulate_ptr + node_base + 3 * n_elements, mask=mask, other=0.0
-                )
-                + coefficient * rhs_vz,
                 mask=mask,
             )
 
@@ -289,16 +343,19 @@ if TRITON_AVAILABLE:
         rhs_ptr,
         q_accumulate_ptr,
         coefficient,
-        beta_cb,
-        rho_cb,
-        beta_d,
-        rho_d,
+        neg_inv_beta_d,
+        neg_beta_cb_over_d,
+        neg_inv_rho_d,
+        neg_rho_cb_over_d,
         n_elements: tl.constexpr,
         n_var_elements: tl.constexpr,
+        porous_start: tl.constexpr,
+        n_porous: tl.constexpr,
         NP: tl.constexpr,
         NFACE: tl.constexpr,
         NSTATES: tl.constexpr,
         ACCUMULATE: tl.constexpr,
+        COMPACT_ADE: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
         element_offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -315,22 +372,24 @@ if TRITON_AVAILABLE:
         surface_p = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
         surface_vx = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
         surface_vy = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
-        surface_vz = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
 
         for local_node in range(NP):
             dr = tl.load(dr_ptr + node * NP + local_node)
             ds = tl.load(ds_ptr + node * NP + local_node)
             q_base = local_node * n_var_elements + element_offsets
-            d_p_dr += dr * tl.load(q_ptr + q_base, mask=mask, other=0.0)
-            d_p_ds += ds * tl.load(q_ptr + q_base, mask=mask, other=0.0)
-            d_vx_dr += dr * tl.load(q_ptr + q_base + n_elements, mask=mask, other=0.0)
-            d_vx_ds += ds * tl.load(q_ptr + q_base + n_elements, mask=mask, other=0.0)
-            d_vy_dr += dr * tl.load(
+            pressure_local = tl.load(q_ptr + q_base, mask=mask, other=0.0)
+            velocity_x_local = tl.load(
+                q_ptr + q_base + n_elements, mask=mask, other=0.0
+            )
+            velocity_y_local = tl.load(
                 q_ptr + q_base + 2 * n_elements, mask=mask, other=0.0
             )
-            d_vy_ds += ds * tl.load(
-                q_ptr + q_base + 2 * n_elements, mask=mask, other=0.0
-            )
+            d_p_dr += dr * pressure_local
+            d_p_ds += ds * pressure_local
+            d_vx_dr += dr * velocity_x_local
+            d_vx_ds += ds * velocity_x_local
+            d_vy_dr += dr * velocity_y_local
+            d_vy_ds += ds * velocity_y_local
 
         for face_node in range(NFACE):
             lift = tl.load(lift_ptr + node * NFACE + face_node)
@@ -341,9 +400,6 @@ if TRITON_AVAILABLE:
             )
             surface_vy += lift * tl.load(
                 flux_ptr + flux_base + 2 * n_elements, mask=mask, other=0.0
-            )
-            surface_vz += lift * tl.load(
-                flux_ptr + flux_base + 3 * n_elements, mask=mask, other=0.0
             )
 
         metric_index = node * n_elements + element_offsets
@@ -363,6 +419,8 @@ if TRITON_AVAILABLE:
         velocity_y = tl.load(
             q_ptr + node_base + 2 * n_elements, mask=mask, other=0.0
         )
+        porous = tl.load(porous_mask_ptr + element_offsets, mask=mask, other=0) != 0
+        porous_mask = mask & porous
 
         k_inf = tl.load(k_inf_ptr + element_offsets, mask=mask, other=0.0)
         inv_rho_inf = tl.load(
@@ -371,38 +429,55 @@ if TRITON_AVAILABLE:
         sponge_sigma = tl.load(
             sponge_sigma_ptr + element_offsets, mask=mask, other=0.0
         )
-        porous = tl.load(porous_mask_ptr + element_offsets, mask=mask, other=0) != 0
-
         beta_memory = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
         rho_memory_x = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
         rho_memory_y = tl.zeros((BLOCK_SIZE,), dtype=tl.float64)
         for state_index in range(NSTATES):
-            state_offset = state_index * NP * n_elements + node * n_elements + element_offsets
+            if COMPACT_ADE:
+                state_offset = (
+                    state_index * NP * n_porous
+                    + node * n_porous
+                    + element_offsets
+                    - porous_start
+                )
+            else:
+                state_offset = (
+                    state_index * NP * n_elements
+                    + node * n_elements
+                    + element_offsets
+                )
             beta_ca = tl.load(beta_ca_ptr + state_index)
             rho_ca = tl.load(rho_ca_ptr + state_index)
             beta_memory += beta_ca * tl.load(
-                z_beta_work_ptr + state_offset, mask=mask, other=0.0
+                z_beta_work_ptr + state_offset, mask=porous_mask, other=0.0
             )
             rho_memory_x += rho_ca * tl.load(
-                z_rho_x_work_ptr + state_offset, mask=mask, other=0.0
+                z_rho_x_work_ptr + state_offset, mask=porous_mask, other=0.0
             )
             rho_memory_y += rho_ca * tl.load(
-                z_rho_y_work_ptr + state_offset, mask=mask, other=0.0
+                z_rho_y_work_ptr + state_offset, mask=porous_mask, other=0.0
             )
 
         rhs_p_air = -k_inf * div_v
         rhs_vx_air = -inv_rho_inf * d_p_dx
         rhs_vy_air = -inv_rho_inf * d_p_dy
 
-        rhs_p_porous = -(div_v + beta_memory + beta_cb * pressure) / beta_d
-        rhs_vx_porous = -(d_p_dx + rho_memory_x + rho_cb * velocity_x) / rho_d
-        rhs_vy_porous = -(d_p_dy + rho_memory_y + rho_cb * velocity_y) / rho_d
+        rhs_p_porous = (
+            neg_inv_beta_d * (div_v + beta_memory)
+            + neg_beta_cb_over_d * pressure
+        )
+        rhs_vx_porous = (
+            neg_inv_rho_d * (d_p_dx + rho_memory_x)
+            + neg_rho_cb_over_d * velocity_x
+        )
+        rhs_vy_porous = (
+            neg_inv_rho_d * (d_p_dy + rho_memory_y)
+            + neg_rho_cb_over_d * velocity_y
+        )
 
         rhs_p = tl.where(porous, rhs_p_porous, rhs_p_air) - sponge_sigma * pressure
         rhs_vx = tl.where(porous, rhs_vx_porous, rhs_vx_air) - sponge_sigma * velocity_x
         rhs_vy = tl.where(porous, rhs_vy_porous, rhs_vy_air) - sponge_sigma * velocity_y
-        rhs_vz = surface_vz
-
         rhs_p += surface_p
         rhs_vx += surface_vx
         rhs_vy += surface_vy
@@ -410,7 +485,8 @@ if TRITON_AVAILABLE:
         tl.store(rhs_ptr + node_base, rhs_p, mask=mask)
         tl.store(rhs_ptr + node_base + n_elements, rhs_vx, mask=mask)
         tl.store(rhs_ptr + node_base + 2 * n_elements, rhs_vy, mask=mask)
-        tl.store(rhs_ptr + node_base + 3 * n_elements, rhs_vz, mask=mask)
+        if not ACCUMULATE:
+            tl.store(rhs_ptr + node_base + 3 * n_elements, 0.0, mask=mask)
 
         if ACCUMULATE:
             tl.store(
@@ -435,14 +511,36 @@ if TRITON_AVAILABLE:
                 + coefficient * rhs_vy,
                 mask=mask,
             )
-            tl.store(
-                q_accumulate_ptr + node_base + 3 * n_elements,
-                tl.load(
-                    q_accumulate_ptr + node_base + 3 * n_elements, mask=mask, other=0.0
-                )
-                + coefficient * rhs_vz,
-                mask=mask,
-            )
+
+
+    @triton.jit
+    def sample_receivers_2d_kernel(
+        pressure_ptr,
+        element_ids_ptr,
+        weights_ptr,
+        output_ptr,
+        pressure_node_stride: tl.constexpr,
+        pressure_element_stride: tl.constexpr,
+        NP: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        receiver = tl.program_id(0)
+        nodes = tl.arange(0, BLOCK_SIZE)
+        mask = nodes < NP
+        element = tl.load(element_ids_ptr + receiver)
+        pressure = tl.load(
+            pressure_ptr
+            + nodes * pressure_node_stride
+            + element * pressure_element_stride,
+            mask=mask,
+            other=0.0,
+        )
+        weights = tl.load(
+            weights_ptr + receiver * NP + nodes,
+            mask=mask,
+            other=0.0,
+        )
+        tl.store(output_ptr + receiver, tl.sum(pressure * weights, axis=0))
 
 
     @triton.jit
@@ -465,6 +563,7 @@ if TRITON_AVAILABLE:
         n_porous: tl.constexpr,
         NP: tl.constexpr,
         NSTATES: tl.constexpr,
+        COMPACT_ADE: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
         porous_offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -487,7 +586,18 @@ if TRITON_AVAILABLE:
         rho_diag = tl.load(rho_diag_ptr + state_index)
         rho_b = tl.load(rho_b_ptr + state_index)
 
-        state_offset = state_index * NP * n_elements + node * n_elements + element_offsets
+        if COMPACT_ADE:
+            state_offset = (
+                state_index * NP * n_porous
+                + node * n_porous
+                + porous_offsets
+            )
+        else:
+            state_offset = (
+                state_index * NP * n_elements
+                + node * n_elements
+                + element_offsets
+            )
 
         z_beta_work = tl.load(z_beta_work_ptr + state_offset, mask=mask, other=0.0)
         z_rho_x_work = tl.load(z_rho_x_work_ptr + state_offset, mask=mask, other=0.0)
@@ -526,6 +636,15 @@ def _require_triton():
         raise RuntimeError("Triton is not available in this environment.")
 
 
+def _is_v100(tensor: torch.Tensor) -> bool:
+    if tensor.device.type != "cuda":
+        return False
+    return (
+        torch.cuda.get_device_capability(tensor.device) == (7, 0)
+        and "V100" in torch.cuda.get_device_name(tensor.device)
+    )
+
+
 def launch_interior_material_flux_2d(
     *,
     q_by_node: torch.Tensor,
@@ -541,9 +660,11 @@ def launch_interior_material_flux_2d(
     flux_by_face: torch.Tensor,
     n_elements: int,
     scale_flux: bool,
-    block_size: int = 256,
+    block_size: int | None = None,
 ):
     _require_triton()
+    if block_size is None:
+        block_size = 128 if _is_v100(q_by_node) else 256
     total_faces = int(face_node_ids.numel() * n_elements)
     interior_material_flux_2d_kernel[(triton.cdiv(total_faces, block_size),)](
         q_by_node.reshape(-1),
@@ -609,6 +730,50 @@ def launch_boundary_ri_flux_2d(
     )
 
 
+def launch_combined_boundary_ri_flux_2d(
+    *,
+    q_flat: torch.Tensor,
+    vmap_q: torch.Tensor,
+    flux_map_q: torch.Tensor,
+    nx: torch.Tensor,
+    ny: torch.Tensor,
+    rho: torch.Tensor,
+    c: torch.Tensor,
+    z: torch.Tensor,
+    k: torch.Tensor,
+    fscale: torch.Tensor,
+    ri: torch.Tensor,
+    flux_flat: torch.Tensor,
+    vn: torch.Tensor,
+    ou: torch.Tensor,
+    incoming: torch.Tensor,
+    block_size: int = 128,
+):
+    _require_triton()
+    n_boundary = int(vn.numel())
+    combined_boundary_ri_flux_2d_kernel[
+        (triton.cdiv(n_boundary, block_size),)
+    ](
+        q_flat,
+        vmap_q,
+        flux_map_q,
+        nx,
+        ny,
+        rho,
+        c,
+        z,
+        k,
+        fscale,
+        ri,
+        flux_flat,
+        vn,
+        ou,
+        incoming,
+        n_boundary,
+        BLOCK_SIZE=block_size,
+    )
+
+
 def launch_fused_acoustic_rhs_2d(
     *,
     q_by_node: torch.Tensor,
@@ -625,11 +790,15 @@ def launch_fused_acoustic_rhs_2d(
     coefficient: float,
     c0: float,
     rho0: float,
-    block_size: int = 128,
-    num_warps: int = 4,
+    block_size: int | None = None,
+    num_warps: int | None = None,
 ):
     _require_triton()
     n_elements = int(q_by_node.shape[1] // 4)
+    if block_size is None:
+        block_size = 64 if _is_v100(q_by_node) and q_by_node.shape[0] == 15 else 128
+    if num_warps is None:
+        num_warps = 2 if block_size == 64 else 4
     grid = (triton.cdiv(n_elements, block_size), int(q_by_node.shape[0]))
     fused_acoustic_rhs_2d_kernel[grid](
         q_by_node,
@@ -683,11 +852,23 @@ def launch_fused_er_rhs_2d(
     rho_cb: float,
     beta_d: float,
     rho_d: float,
-    block_size: int = 128,
-    num_warps: int = 4,
+    porous_start: int = 0,
+    n_porous: int = 0,
+    compact_ade: bool = False,
+    block_size: int | None = None,
+    num_warps: int | None = None,
 ):
     _require_triton()
     n_elements = int(q_by_node.shape[1] // 4)
+    v100_er_shape = (
+        _is_v100(q_by_node)
+        and q_by_node.shape[0] == 15
+        and beta_ca.numel() == 8
+    )
+    if block_size is None:
+        block_size = 64 if v100_er_shape else 128
+    if num_warps is None:
+        num_warps = 2 if v100_er_shape else 4
     grid = (triton.cdiv(n_elements, block_size), int(q_by_node.shape[0]))
     fused_er_rhs_2d_kernel[grid](
         q_by_node,
@@ -711,16 +892,19 @@ def launch_fused_er_rhs_2d(
         rhs_by_node,
         rhs_by_node if q_accumulate is None else q_accumulate,
         coefficient,
-        beta_cb,
-        rho_cb,
-        beta_d,
-        rho_d,
+        -(1.0 / beta_d),
+        -(beta_cb / beta_d),
+        -(1.0 / rho_d),
+        -(rho_cb / rho_d),
         n_elements,
         4 * n_elements,
+        porous_start,
+        n_porous,
         NP=int(q_by_node.shape[0]),
         NFACE=int(flux_by_face.shape[0]),
         NSTATES=int(beta_ca.numel()),
         ACCUMULATE=q_accumulate is not None,
+        COMPACT_ADE=compact_ade,
         BLOCK_SIZE=block_size,
         num_warps=num_warps,
     )
@@ -741,11 +925,21 @@ def launch_fused_er_aux_update_diag_2d(
     rho_diag: torch.Tensor,
     rho_b: torch.Tensor,
     coefficient: float,
-    block_size: int = 128,
-    num_warps: int = 4,
+    compact_state: bool = False,
+    block_size: int | None = None,
+    num_warps: int | None = None,
 ):
     _require_triton()
     n_elements = int(q_by_node.shape[1] // 4)
+    v100_er_shape = (
+        _is_v100(q_by_node)
+        and q_by_node.shape[0] == 15
+        and beta_diag.numel() == 8
+    )
+    if block_size is None:
+        block_size = 64 if v100_er_shape else 128
+    if num_warps is None:
+        num_warps = 4
     grid = (
         triton.cdiv(int(porous_element_ids.numel()), block_size),
         int(q_by_node.shape[0]),
@@ -770,6 +964,29 @@ def launch_fused_er_aux_update_diag_2d(
         int(porous_element_ids.numel()),
         NP=int(q_by_node.shape[0]),
         NSTATES=int(beta_diag.numel()),
+        COMPACT_ADE=compact_state,
         BLOCK_SIZE=block_size,
         num_warps=num_warps,
+    )
+
+
+def launch_sample_receivers_2d(
+    *,
+    pressure: torch.Tensor,
+    element_ids: torch.Tensor,
+    weights: torch.Tensor,
+    output: torch.Tensor,
+):
+    _require_triton()
+    block_size = triton.next_power_of_2(int(pressure.shape[0]))
+    sample_receivers_2d_kernel[(int(element_ids.numel()),)](
+        pressure,
+        element_ids,
+        weights,
+        output,
+        pressure_node_stride=int(pressure.stride(0)),
+        pressure_element_stride=int(pressure.stride(1)),
+        NP=int(pressure.shape[0]),
+        BLOCK_SIZE=block_size,
+        num_warps=1,
     )

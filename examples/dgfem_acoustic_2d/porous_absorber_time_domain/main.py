@@ -26,9 +26,10 @@ DEFAULT_TOTAL_TIME = 0.01
 DEFAULT_SAVE_MESH_AT_MS = 5.5
 DEFAULT_USE_CUDA_GRAPH = True
 DEFAULT_CUDA_GRAPH_CHUNK_STEPS = 1
-DEFAULT_USE_2D_PACKED_RHS = False
-DEFAULT_USE_2D_TRITON_KERNELS = False
+DEFAULT_USE_2D_PACKED_RHS = True
+DEFAULT_USE_2D_TRITON_KERNELS = True
 DEFAULT_USE_2D_DEEP_FUSED_RHS = True
+DEFAULT_USE_2D_PARTITIONED_ER_RHS = True
 
 RHO0 = 1.213
 C0 = 343.0
@@ -164,6 +165,7 @@ def build_simulation(
     use_packed_rhs: bool = DEFAULT_USE_2D_PACKED_RHS,
     use_triton_kernels: bool = DEFAULT_USE_2D_TRITON_KERNELS,
     use_triton_deep_rhs: bool = DEFAULT_USE_2D_DEEP_FUSED_RHS,
+    use_triton_partitioned_er_rhs: bool = DEFAULT_USE_2D_PARTITIONED_ER_RHS,
 ):
     mesh = edg_acoustics.Mesh2D(str(mesh_path), BC_LABELS, DOMAIN_LABELS)
     material_fit = edg_acoustics.ExtendedReactionMaterialFit.from_mat(fit_path)
@@ -183,6 +185,7 @@ def build_simulation(
         use_packed_rhs=use_packed_rhs,
         use_triton_kernels=use_triton_kernels,
         use_triton_deep_rhs=use_triton_deep_rhs,
+        use_triton_partitioned_er_rhs=use_triton_partitioned_er_rhs,
     )
     sim.init_BC(edg_acoustics.AbsorbBC(sim.BCnode, BC_PARA))
     sim.init_IC(edg_acoustics.RadialPressurePulse2D_IC(SOURCE_XYZ, PULSE_B))
@@ -223,6 +226,7 @@ def run_case(
     use_packed_rhs: bool = DEFAULT_USE_2D_PACKED_RHS,
     use_triton_kernels: bool = DEFAULT_USE_2D_TRITON_KERNELS,
     use_triton_deep_rhs: bool = DEFAULT_USE_2D_DEEP_FUSED_RHS,
+    use_triton_partitioned_er_rhs: bool = DEFAULT_USE_2D_PARTITIONED_ER_RHS,
 ):
     fit_path = ensure_material_fit(fit_path=fit_path, force=force_fit)
     mesh_path = ensure_mesh(thickness, mesh_path=mesh_path, force=force_mesh)
@@ -237,6 +241,7 @@ def run_case(
         use_packed_rhs=use_packed_rhs,
         use_triton_kernels=use_triton_kernels,
         use_triton_deep_rhs=use_triton_deep_rhs,
+        use_triton_partitioned_er_rhs=use_triton_partitioned_er_rhs,
     )
 
     output_dir = Path(output_root) / thickness_tag(thickness)
@@ -257,6 +262,9 @@ def run_case(
             "use_packed_rhs_requested": bool(use_packed_rhs),
             "use_triton_kernels_requested": bool(use_triton_kernels),
             "use_triton_deep_rhs_requested": bool(use_triton_deep_rhs),
+            "use_triton_partitioned_er_rhs_requested": bool(
+                use_triton_partitioned_er_rhs
+            ),
         }
     )
     sim.time_integration(
@@ -293,6 +301,9 @@ def run_case(
             ),
             "use_triton_deep_rhs": bool(
                 getattr(sim, "_use_triton_deep_rhs", False)
+            ),
+            "use_triton_partitioned_er_rhs": bool(
+                getattr(sim, "_use_triton_partitioned_er_rhs", False)
             ),
         }
     )
@@ -422,6 +433,12 @@ def parse_args():
         default=DEFAULT_USE_2D_DEEP_FUSED_RHS,
         help="Enable the deeper 2D Triton timestep fusion path when packed RHS is enabled.",
     )
+    parser.add_argument(
+        "--use-2d-partitioned-er-rhs",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_USE_2D_PARTITIONED_ER_RHS,
+        help="Use compact porous ADE state and one merged simple-RI boundary kernel.",
+    )
     return parser.parse_args()
 
 
@@ -459,6 +476,7 @@ def main():
             use_packed_rhs=args.use_2d_packed_rhs,
             use_triton_kernels=args.use_2d_triton_kernels,
             use_triton_deep_rhs=args.use_2d_deep_fused_rhs,
+            use_triton_partitioned_er_rhs=args.use_2d_partitioned_er_rhs,
         )
         print(f"Wrote ER porous absorber outputs to {case_info['output_dir']}")
 

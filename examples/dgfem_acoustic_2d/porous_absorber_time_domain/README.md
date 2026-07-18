@@ -101,6 +101,7 @@ rtk python main.py --thickness 0.15
 - `--thickness 0.05` / `0.15` 用米作为单位
 - `--force-fit` 会重新生成 `er_material_fit.mat`
 - `--force-mesh` 会重新生成 `.msh`
+- 默认启用 packed RHS、2D Triton kernel、deep-fused ER RHS、compact ER 和 CUDA graph，无需额外优化参数
 
 ## 4. 重新生成网格
 
@@ -835,194 +836,237 @@ rtk python main.py \
 
 然后再看 `8-10 ms` 尾部的绝对误差和相对误差是否更贴近 COMSOL。
 
-## 11. CUDA graph 和 2D fast path 性能对比
+## 11. CUDA graph 和 2D ER 深度优化性能
 
-这一节记录当前 2D ER case 在 `5 cm` 厚度下的四种时间迭代模式性能：
+这一节记录当前 2D ER case 在 V100 上的时间迭代性能、最终保留的优化，以及 CUDA graph 节点变化。所有数值都对应当前代码，不包含已经删除的实验路径。
 
-- `packed_no_graph`：packed RHS，不使用 CUDA graph
-- `packed_graph`：packed RHS + CUDA graph
-- `graph_triton_flux_only`：packed RHS + CUDA graph + Triton flux/boundary
-- `graph_deep_fused`：packed RHS + CUDA graph + Triton flux/boundary + deep fused timestep path
+### 11.1 对比模式
 
-### 11.1 测试方法
+- `packed_no_graph`：packed RHS，不使用 CUDA graph。
+- `packed_graph`：packed RHS + CUDA graph，不使用 Triton timestep kernel。
+- `graph_deep_fused_legacy`：CUDA graph + Triton flux/boundary + 原有 deep-fused ER RHS。
+- `graph_compact_er`：在 legacy deep-fused 基础上，再启用紧凑 porous ADE 状态、合并 simple-RI 边界和接收器采样 kernel。
+
+`graph_compact_er` 是当前推荐路径。案例参数 `--use-2d-partitioned-er-rhs` 控制这一层优化；名称保留了开发阶段的接口，但当前实现不是把全域 RHS 拆成多个材料 kernel，而是让全域 fused RHS 读取按 porous 区域紧凑存储的 ADE 状态。
+
+### 11.2 测试方法
 
 测试环境和参数：
 
-- GPU: `Tesla V100-SXM2-16GB`
-- case: `porous_absorber_time_domain`
-- 厚度: `0.05 m`
-- DG 阶数: `Nx = 4`
-- TSI 阶数: `Nt = 4`
-- CFL: `0.25`
-- 时间步数: `n_time_steps = 200`
-- CUDA graph chunk: `cuda_graph_chunk_steps = 1`
-- `progress = False`
-- `synchronize_timing = True`
+- GPU：`Tesla V100-SXM2-16GB`
+- 厚度：`0.05 m`
+- 网格单元数：`7107`
+- porous 单元数：`316`
+- DG 阶数：`Nx = 4`，因此 `Np = 15`
+- TSI 阶数：`Nt = 4`
+- CFL：`0.25`
+- 时间步数：`1000`
+- CUDA graph chunk：`1`
+- 每种模式运行三次，表中采用中位数
+- `progress=False`
+- `synchronize_timing=True`
 
-测试口径：
-
-- `loop_s` 直接使用 `sim.last_time_integration_elapsed_s`
-- 在 `synchronize_timing=True` 下读取，统计真实 GPU 执行时间
-
-可用下面的脚本复现实验：
+复现脚本：
 
 ```bash
 rtk env PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics python - <<'PY'
 import importlib.util
 from pathlib import Path
+import statistics
+import torch
 
 repo = Path("/media/liu/research/linux/edg-muxi/edg-acoustics")
-main_path = repo / "examples" / "dgfem_acoustic_2d" / "porous_absorber_time_domain" / "main.py"
+main_path = (
+    repo
+    / "examples"
+    / "dgfem_acoustic_2d"
+    / "porous_absorber_time_domain"
+    / "main.py"
+)
 spec = importlib.util.spec_from_file_location("porous_main_perf", main_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 configs = [
-    ("packed_no_graph", False, False, False),
-    ("packed_graph", True, False, False),
-    ("graph_triton_flux_only", True, True, False),
-    ("graph_deep_fused", True, True, True),
+    ("packed_no_graph", False, False, False, False),
+    ("packed_graph", True, False, False, False),
+    ("graph_deep_fused_legacy", True, True, True, False),
+    ("graph_compact_er", True, True, True, True),
 ]
 
-results = []
-for name, use_graph, use_triton, use_deep in configs:
-    sim = mod.build_simulation(
-        thickness=0.05,
-        fit_path=mod.DEFAULT_FIT,
-        mesh_path=mod.default_mesh_path(0.05),
-        Nx=4,
-        Nt=4,
-        use_packed_rhs=True,
-        use_triton_kernels=use_triton,
-        use_triton_deep_rhs=use_deep,
-    )
-    sim.time_integration(
-        n_time_steps=200,
-        progress=False,
-        use_cuda_graph=use_graph,
-        cuda_graph_chunk_steps=1,
-        synchronize_timing=True,
-    )
-    elapsed = sim.last_time_integration_elapsed_s
-    results.append((name, elapsed, elapsed / 200.0))
-
-baseline = results[0][1]
-for name, elapsed, per_step in results:
-    print(
-        name,
-        f"elapsed_s={elapsed:.6f}",
-        f"per_step_ms={per_step * 1.0e3:.3f}",
-        f"speedup_vs_packed_no_graph={baseline / elapsed:.3f}",
-    )
+for name, use_graph, use_triton, use_deep, use_compact in configs:
+    samples = []
+    for _ in range(3):
+        sim = mod.build_simulation(
+            thickness=0.05,
+            fit_path=mod.DEFAULT_FIT,
+            mesh_path=mod.default_mesh_path(0.05),
+            Nx=4,
+            Nt=4,
+            use_packed_rhs=True,
+            use_triton_kernels=use_triton,
+            use_triton_deep_rhs=use_deep,
+            use_triton_partitioned_er_rhs=use_compact,
+        )
+        sim.time_integration(
+            n_time_steps=1000,
+            progress=False,
+            use_cuda_graph=use_graph,
+            cuda_graph_chunk_steps=1,
+            synchronize_timing=True,
+        )
+        samples.append(sim.last_time_integration_elapsed_s)
+        del sim
+        torch.cuda.empty_cache()
+    elapsed = statistics.median(samples)
+    print(name, f"elapsed_s={elapsed:.6f}", f"per_step_ms={elapsed:.6f}")
 PY
 ```
 
-### 11.2 测试结果
+因为这里固定运行 `1000` 步，所以数值上 `elapsed_s` 与 `per_step_ms` 相同。
 
-`2026-07-17` 在 `Tesla V100-SXM2-16GB` 上测得：
+### 11.3 当前性能结果
 
-| 模式 | `loop_s` | 每步时间 | 相对 `packed_no_graph` 加速 |
+`2026-07-17` 的三次中位数：
+
+| 模式 | `1000` 步耗时 | 每步时间 | 相对 `packed_no_graph` 加速 |
 | --- | ---: | ---: | ---: |
-| `packed_no_graph` | `1.286398 s` | `6.432 ms/step` | `1.00x` |
-| `packed_graph` | `0.839795 s` | `4.199 ms/step` | `1.53x` |
-| `graph_triton_flux_only` | `0.664052 s` | `3.320 ms/step` | `1.94x` |
-| `graph_deep_fused` | `0.111664 s` | `0.558 ms/step` | `11.52x` |
+| `packed_no_graph` | `6.105324 s` | `6.105324 ms` | `1.00x` |
+| `packed_graph` | `4.198190 s` | `4.198190 ms` | `1.45x` |
+| `graph_deep_fused_legacy` | `0.379678 s` | `0.379678 ms` | `16.08x` |
+| `graph_compact_er` | `0.308403 s` | `0.308403 ms` | `19.80x` |
 
-`graph_deep_fused` 相对：
+最终 `graph_compact_er` 相对：
 
-- `packed_graph` 额外加速约 `7.52x`
-- `graph_triton_flux_only` 额外加速约 `5.95x`
+- `packed_graph`：约 `13.61x`
+- 当前 `graph_deep_fused_legacy`：约 `1.23x`
+- 上一版 README 记录的 `0.558 ms/step` deep-fused 结果：约 `1.81x`
 
-### 11.3 优化方法
+### 11.4 最终保留的优化
 
-这次 2D ER case 的加速分成三层：
+1. 全域 fused RHS 的加载和算术优化
 
-1. `packed RHS`
+- `Dr/Ds` 两个方向共用同一次 `P/Vx/Vy` 加载，不再为每个方向重复读全局内存。
+- 2D 模型中 `Vz` 的数值通量恒为零，deep-fused 累加路径不再读取、lift 或回写无效的 `Vz` surface 项。
+- `1/beta_D`、`beta_CB/beta_D`、`1/rho_D`、`rho_CB/rho_D` 在 launcher 中预计算，避免 kernel 内逐点除法。
+- V100 的 `Np=15`、8 个 ADE 状态使用实测较优的 `BLOCK_SIZE=64, num_warps=2`；内界面 kernel 使用 `BLOCK_SIZE=128`。
 
-- 把 `P/Vx/Vy/Vz` 统一打包成 `Q_flat` / `q_by_node`，避免 timestep 内反复做 field 级拆装。
-- 让 Taylor time integration 直接在 packed 状态上执行，为后续 CUDA graph 和 Triton kernel 融合提供稳定内存布局。
+2. 紧凑 porous ADE 状态
 
-2. `CUDA graph`
-
-- 把一个完整 timestep replay 成固定 graph，去掉大部分 host 侧 launch 开销。
-- 在只启用 `packed RHS` 的情况下，`packed_no_graph -> packed_graph` 已经能把每步时间从 `6.432 ms` 降到 `4.199 ms`。
-
-3. `deep fused Triton path`
-
-- 保留现有正确路径作为 fallback。
-- 将一个 Taylor stage 内的 `Dr/Ds`、`lift @ flux`、air/porous/sponge volume RHS、`Q += coeff * RHS` 融合到 `fused_er_rhs_2d_kernel`。
-- 将 porous ADE 的 auxiliary-state 更新单独融合到 `fused_er_aux_update_diag_kernel`。
-- `z_beta/z_rho_x/z_rho_y` 的更新只在 porous elements 上执行，而不是全域执行。
-- 当前 `A_beta`、`A_rho` 在这个 case 上是对角矩阵，因此 auxiliary-state 更新走对角 fast path，避免继续使用全域 `einsum/tensordot`。
-- `RI` 边界参数改成预先缓存的常量 tensor，去掉每个 Taylor stage 里的临时 `fill_` kernel。
-
-从算子角度看，deep fused 路径主要替换了旧 packed 路径中的这些热点：
-
-- 两个导数 GEMM：`Dr @ Q`、`Ds @ Q`
-- 一个 `lift @ flux` GEMM
-- porous memory collapse 对应的 `tensordot`
-- porous ADE RHS 对应的 `einsum`
-- 大量 `mul/add/addcmul/where/div/copy` elementwise kernel
-
-因此 `graph_triton_flux_only -> graph_deep_fused` 的提升，不只是再减少 host launch，而是把 timestep 内真正散碎的 device kernels 一起收敛掉了。
-
-启用方式：
-
-```bash
-python ./main.py \
-  --thickness 0.05 \
-  --n-time-steps 200 \
-  --use-2d-packed-rhs \
-  --use-2d-triton-kernels \
-  --use-2d-deep-fused-rhs
-```
-
-当前 deep fused 路径在一个 Taylor stage 内融合了：
-
-- DG `Dr/Ds` 导数
-- `lift @ flux`
-- air/porous/sponge volume RHS
-- `Q += coeff * RHS`
-- porous ADE auxiliary-state diagonal update
-
-### 11.4 CUDA graph 节点数
-
-对 `10` 个时间步使用：
+原路径为每个 ADE 变量保存全域张量：
 
 ```text
-nsys profile -o 005-thickness-cuda-graph-deep-fused \
-  --trace=cuda,nvtx,cublas,cublas-verbose,cusolver,cusparse,oshmem,osrt,cudnn \
+[8 states, 15 nodes, 7107 elements] = 6,822,720 bytes
+```
+
+当前 graph 内工作状态只保存 porous 单元：
+
+```text
+[8 states, 15 nodes, 316 porous elements] = 303,360 bytes
+```
+
+`z_beta/z_rho_x/z_rho_y` 在进入时间循环前收集到紧凑张量，循环结束后再写回公开的全域状态。每个时间步仍保持 Taylor 方法要求的三次 ADE state copy，但单份 copy 缩小约 `22.49x`。
+
+3. 合并 simple-RI 边界
+
+当前 case 的两个边界共有：
+
+- Outer：`840` 个 face nodes
+- Rigid：`395` 个 face nodes
+
+静态 `vmap_q/flux_map_q/nx/ny/rho/c/z/k/Fscale/RI` 在初始化时拼接。每个 Taylor stage 原来的两个 `boundary_ri_flux_2d_kernel` 合并为一个 `combined_boundary_ri_flux_2d_kernel`，并通过切片维持原 `BCvar["vn"/"ou"/"in"]` 接口。
+
+4. 接收器采样
+
+原来的 `index_select + multiply + sum` 三个 device kernel 合并为一个 `sample_receivers_2d_kernel`。对当前单接收器 case，graph 内接收器节点从 3 个降为 1 个。
+
+### 11.5 未采用的实验路径
+
+开发中实际测试过以下两种更激进的方案，但没有保留在运行路径中：
+
+- 把全域 RHS 拆成 non-porous 与 porous 两个 kernel。
+  当前优化后的单个 `fused_er_rhs_2d_kernel` 约 `45.5 us/stage`；拆分后约为 `49.9 + 25.4 us/stage`，节点减少但总执行时间增加。
+- 对内界面成对处理，一次读取两侧状态并写两个方向。
+  在 V100 上，成对 heterogeneous-material flux 约 `27.6 us/stage`，慢于当前方向化 kernel 的约 `19.3 us/stage`。
+
+这说明 CUDA graph 中“节点更少”不是充分条件；寄存器压力、并行块数量和每个 kernel 的有效工作量必须一起测量。
+
+### 11.6 CUDA graph 节点和复制量
+
+最终 graph 每步包含：
+
+| graph 节点 | 节点数 |
+| --- | ---: |
+| `interior_material_flux_2d_kernel` | `4` |
+| `combined_boundary_ri_flux_2d_kernel` | `4` |
+| `fused_er_rhs_2d_kernel` | `4` |
+| `fused_er_aux_update_diag_kernel` | `4` |
+| `sample_receivers_2d_kernel` | `1` |
+| **kernel 合计** | **`17`** |
+| D2D memcpy | `4` |
+
+节点变化：
+
+- 旧 packed + Triton flux/boundary：`275` 个 kernel 节点
+- 上一版 deep-fused 报告：`23` 个 kernel 节点
+- 当前 legacy deep-fused（已含本轮 receiver kernel）：`21` 个 kernel 节点
+- 当前 compact ER：`17` 个 kernel 节点
+
+因此当前相对上一版 `23` 节点减少 `26.1%`，相对最初 `275` 节点压缩约 `16.18x`。
+
+D2D 节点数没有变化，但复制字节数明显下降：
+
+| 模式 | `Q` copy | 三份 ADE copy | 每步 D2D 总量 |
+| --- | ---: | ---: | ---: |
+| legacy deep-fused | `3,411,360 B` | `3 x 6,822,720 B` | `23,879,520 B` |
+| compact ER | `3,411,360 B` | `3 x 303,360 B` | `4,321,440 B` |
+
+每步 D2D 字节数减少约 `81.9%`。唯一的全域 `Q` copy 用于保持 Taylor 第一阶段“原始 Q 作为 RHS 输入、最终 Q 作为累加输出”的语义，不能在不同 Triton program 并发读写时直接原地消除。
+
+### 11.7 启用和回退
+
+当前案例默认启用 packed RHS、Triton kernel、deep-fused RHS、partitioned ER 和 CUDA graph。`--use-2d-partitioned-er-rhs` 只有在前三层快速路径均实际启用、且 porous 单元连续时才会生效。
+
+推荐命令：
+
+```bash
+rtk env PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics \
+  python ./main.py \
+  --thickness 0.05 \
+  --n-time-steps 1000
+```
+
+显式回到 legacy deep-fused 路径：
+
+```bash
+rtk env PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics \
+  python ./main.py \
+  --thickness 0.05 \
+  --n-time-steps 1000 \
+  --use-2d-packed-rhs \
+  --use-2d-triton-kernels \
+  --no-use-2d-partitioned-er-rhs
+```
+
+Nsight Systems 复现命令：
+
+```bash
+rtk env PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics \
+  nsys profile -o 005-thickness-cuda-graph-compact-er \
+  --trace=cuda,nvtx,cublas,osrt \
   --cuda-graph-trace=node \
-  --force-overwrite true \
+  --force-overwrite=true \
   --cuda-memory-usage=true \
   --stats=true \
   python ./main.py \
-    --thickness 0.05 \
-    --n-time-steps 10 \
-    --no-progress \
-    --use-2d-packed-rhs \
-    --use-2d-triton-kernels \
-    --use-2d-deep-fused-rhs
+  --thickness 0.05 \
+  --n-time-steps 10 \
+  --no-progress \
+  --save-mesh-at-ms 0 \
+  --use-2d-packed-rhs \
+  --use-2d-triton-kernels \
+  --use-2d-partitioned-er-rhs
 ```
-
-得到的 graph 内 kernel 节点统计为：
-
-| graph 内 kernel | 实例数 | 每个 graph 节点数 |
-| --- | ---: | ---: |
-| `boundary_ri_flux_2d_kernel` | `88` | `8` |
-| `interior_material_flux_2d_kernel` | `44` | `4` |
-| `fused_er_rhs_2d_kernel` | `44` | `4` |
-| `fused_er_aux_update_diag_kernel` | `44` | `4` |
-| `vectorized_elementwise_kernel` | `11` | `1` |
-| `reduce_kernel` | `11` | `1` |
-| `indexSelectSmallIndex` | `11` | `1` |
-
-总计：
-
-- 每个 graph `23` 个 kernel 节点
-- 对比旧的 `cuda_graph + packed RHS + Triton flux/boundary` 路径，节点数从 `275` 降到 `23`
-- 节点压缩比约 `11.96x`
-- 节点减少的主要来源是：导数/volume/lift/Q-accumulate/ADE update 不再拆成大量 GEMM 和 elementwise kernels，而是收敛成 `fused_er_rhs_2d_kernel` 和 `fused_er_aux_update_diag_kernel`
 
 ## 12. 常见注意事项
 

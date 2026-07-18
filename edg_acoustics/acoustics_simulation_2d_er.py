@@ -137,6 +137,11 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         self._porous_element_ids = torch.nonzero(
             self._porous_mask, as_tuple=False
         ).reshape(-1)
+        self._material_ranges = {
+            "air": self._contiguous_mask_range(self._air_mask),
+            "porous": self._contiguous_mask_range(self._porous_mask),
+            "sponge": self._contiguous_mask_range(self._sponge_mask),
+        }
 
         beta_air = 1.0 / (self.rho0 * self.c0**2)
         rho_air = self.rho0
@@ -175,6 +180,17 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         self._cache_flux_coefficients()
         self._build_sponge_sigma()
         self._init_material_state_space()
+
+    @staticmethod
+    def _contiguous_mask_range(mask: torch.Tensor):
+        element_ids = torch.nonzero(mask, as_tuple=False).reshape(-1)
+        if element_ids.numel() == 0:
+            return None
+        start = int(element_ids[0].item())
+        count = int(element_ids.numel())
+        if int(element_ids[-1].item()) != start + count - 1:
+            return None
+        return (start, count)
 
     def _facewise_property(
         self,
@@ -285,6 +301,21 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             return False
         return self._beta_A_diag.numel() == self._rho_A_diag.numel()
 
+    def _supports_triton_partitioned_er_rhs(self) -> bool:
+        if not self._supports_triton_deep_rhs():
+            return False
+        ranges = getattr(self, "_material_ranges", None)
+        return bool(ranges and ranges.get("porous") is not None)
+
+    def configure_fast_paths(self, **kwargs):
+        super().configure_fast_paths(**kwargs)
+        if (
+            getattr(self, "_use_triton_partitioned_er_rhs", False)
+            and hasattr(self, "z_beta")
+            and not hasattr(self, "_compact_z_beta")
+        ):
+            self._allocate_compact_auxiliary_state()
+
     def init_IC(self, IC):
         super().init_IC(IC)
         self._allocate_auxiliary_state()
@@ -309,8 +340,68 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         self._taylor_aux_rhs = {
             name: torch.empty_like(getattr(self, name)) for name in self._aux_state_names
         }
+        if getattr(self, "_use_triton_partitioned_er_rhs", False):
+            self._allocate_compact_auxiliary_state()
+
+    def _allocate_compact_auxiliary_state(self):
+        n_porous = int(self._porous_element_ids.numel())
+        compact_shape = (int(self.z_beta.shape[0]), self.Np, n_porous)
+        self._compact_z_beta = torch.zeros(
+            compact_shape, device=self.device, dtype=device_ini.dtype
+        )
+        self._compact_z_rho_x = torch.zeros_like(self._compact_z_beta)
+        self._compact_z_rho_y = torch.zeros_like(self._compact_z_beta)
+        self._compact_z_beta_work = torch.empty_like(self._compact_z_beta)
+        self._compact_z_rho_x_work = torch.empty_like(self._compact_z_beta)
+        self._compact_z_rho_y_work = torch.empty_like(self._compact_z_beta)
+
+    def _time_state_auxiliary_names(self):
+        if getattr(self, "_use_triton_partitioned_er_rhs", False):
+            return (
+                "_compact_z_beta",
+                "_compact_z_rho_x",
+                "_compact_z_rho_y",
+            )
+        return super()._time_state_auxiliary_names()
+
+    def _prepare_fast_time_integration_state(self):
+        if not getattr(self, "_use_triton_partitioned_er_rhs", False):
+            return
+        for full_name, compact_name in (
+            ("z_beta", "_compact_z_beta"),
+            ("z_rho_x", "_compact_z_rho_x"),
+            ("z_rho_y", "_compact_z_rho_y"),
+        ):
+            torch.index_select(
+                getattr(self, full_name),
+                2,
+                self._porous_element_ids,
+                out=getattr(self, compact_name),
+            )
+
+    def _finalize_fast_time_integration_state(self):
+        if not getattr(self, "_use_triton_partitioned_er_rhs", False):
+            return
+        for full_name, compact_name in (
+            ("z_beta", "_compact_z_beta"),
+            ("z_rho_x", "_compact_z_rho_x"),
+            ("z_rho_y", "_compact_z_rho_y"),
+        ):
+            getattr(self, full_name).index_copy_(
+                2,
+                self._porous_element_ids,
+                getattr(self, compact_name),
+            )
 
     def _prepare_taylor_auxiliary_state(self):
+        if getattr(self, "_use_triton_partitioned_er_rhs", False):
+            for state_name, work_name in (
+                ("_compact_z_beta", "_compact_z_beta_work"),
+                ("_compact_z_rho_x", "_compact_z_rho_x_work"),
+                ("_compact_z_rho_y", "_compact_z_rho_y_work"),
+            ):
+                getattr(self, work_name).copy_(getattr(self, state_name))
+            return
         for name in self._aux_state_names:
             self._taylor_aux_work[name].copy_(getattr(self, name))
 
@@ -347,6 +438,18 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         q_accumulate: torch.Tensor | None,
         coefficient: float,
     ):
+        compact_ade = getattr(self, "_use_triton_partitioned_er_rhs", False)
+        if compact_ade:
+            porous_start, n_porous = self._material_ranges["porous"]
+            z_beta_work = self._compact_z_beta_work
+            z_rho_x_work = self._compact_z_rho_x_work
+            z_rho_y_work = self._compact_z_rho_y_work
+        else:
+            porous_start = 0
+            n_porous = 0
+            z_beta_work = self._taylor_aux_work["z_beta"]
+            z_rho_x_work = self._taylor_aux_work["z_rho_x"]
+            z_rho_y_work = self._taylor_aux_work["z_rho_y"]
         acoustics_2d_triton.launch_fused_er_rhs_2d(
             q_by_node=q_by_node,
             flux_by_face=self._flux_by_face,
@@ -363,9 +466,9 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             sponge_sigma=self._sponge_sigma_contiguous,
             beta_ca=self._beta_CA_contiguous,
             rho_ca=self._rho_CA_contiguous,
-            z_beta_work=self._taylor_aux_work["z_beta"],
-            z_rho_x_work=self._taylor_aux_work["z_rho_x"],
-            z_rho_y_work=self._taylor_aux_work["z_rho_y"],
+            z_beta_work=z_beta_work,
+            z_rho_x_work=z_rho_x_work,
+            z_rho_y_work=z_rho_y_work,
             rhs_by_node=rhs_by_node,
             q_accumulate=q_accumulate,
             coefficient=coefficient,
@@ -373,6 +476,9 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             rho_cb=self.rho_CB,
             beta_d=self.beta_D,
             rho_d=self.rho_D,
+            porous_start=porous_start,
+            n_porous=n_porous,
+            compact_ade=compact_ade,
         )
 
     def _compute_fused_taylor_auxiliary_update_triton(
@@ -380,20 +486,34 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
         q_by_node: torch.Tensor,
         coefficient: float,
     ):
+        compact_ade = getattr(self, "_use_triton_partitioned_er_rhs", False)
         acoustics_2d_triton.launch_fused_er_aux_update_diag_2d(
             q_by_node=q_by_node,
             porous_element_ids=self._porous_element_ids,
-            z_beta=self.z_beta,
-            z_rho_x=self.z_rho_x,
-            z_rho_y=self.z_rho_y,
-            z_beta_work=self._taylor_aux_work["z_beta"],
-            z_rho_x_work=self._taylor_aux_work["z_rho_x"],
-            z_rho_y_work=self._taylor_aux_work["z_rho_y"],
+            z_beta=self._compact_z_beta if compact_ade else self.z_beta,
+            z_rho_x=self._compact_z_rho_x if compact_ade else self.z_rho_x,
+            z_rho_y=self._compact_z_rho_y if compact_ade else self.z_rho_y,
+            z_beta_work=(
+                self._compact_z_beta_work
+                if compact_ade
+                else self._taylor_aux_work["z_beta"]
+            ),
+            z_rho_x_work=(
+                self._compact_z_rho_x_work
+                if compact_ade
+                else self._taylor_aux_work["z_rho_x"]
+            ),
+            z_rho_y_work=(
+                self._compact_z_rho_y_work
+                if compact_ade
+                else self._taylor_aux_work["z_rho_y"]
+            ),
             beta_diag=self._beta_A_diag,
             beta_b=self._beta_B_contiguous,
             rho_diag=self._rho_A_diag,
             rho_b=self._rho_B_contiguous,
             coefficient=coefficient,
+            compact_state=compact_ade,
         )
 
     def _cache_boundary_parameters(self):
@@ -408,6 +528,7 @@ class ExtendedReactionSimulation2D(AcousticsSimulation2D):
             cache["c_boundary"] = self.c_inf_vector[element_ids]
             cache["k_boundary"] = self.k_inf_vector[element_ids]
             cache["z_boundary"] = self.z_inf_vector[element_ids]
+        self._cache_combined_simple_ri_boundary()
 
     def _compute_boundary_flux(
         self,
