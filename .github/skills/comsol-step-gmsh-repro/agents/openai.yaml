@@ -1,0 +1,4 @@
+interface:
+  display_name: "COMSOL STEP to Gmsh Repro"
+  short_description: "Recover COMSOL boundary groups and mesh cases"
+  default_prompt: "Use $comsol-step-gmsh-repro to reproduce a COMSOL case from .mph/.step files and validate the generated .geo/.msh."
