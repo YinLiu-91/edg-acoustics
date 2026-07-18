@@ -48,3 +48,8 @@ edg_acoustics/example_google.py
 
 # test mesh files
 data/tests/mesh/*
+
+*.nsys-rep
+*.sqlite
+*.png
+*.pos
