@@ -1,151 +1,104 @@
-# COMSOL `.mph + .step` to Gmsh `.geo/.msh` checklist
+# End-to-end COMSOL acoustics reproduction checklist
 
-## MPH inspection
+Use this checklist before claiming that a COMSOL case has been reproduced. A recovered mesh is only one intermediate artifact.
 
-Use `.mph` as a ZIP archive:
+## 1. Inputs and provenance
+
+- [ ] Locate the `.mph`, `.step`, imported tables, existing `.geo/.msh`, solver scripts, COMSOL receiver export, and any model documentation.
+- [ ] Record the COMSOL creation/last-computation version and the installed COMSOL version.
+- [ ] Record geometry units, acoustic domain count, expected physical dimensions, physics interface, study, and solution time range.
+- [ ] Preserve original inputs; write generated reports and meshes to new paths.
+
+Useful commands:
 
 ```bash
 file case.mph
-unzip -l case.mph | sed -n '1,80p'
-unzip -p case.mph dmodel.xml > /tmp/case_dmodel.xml
-unzip -p case.mph smodel.json > /tmp/case_smodel.json
-unzip -p case.mph modelinfo.xml > /tmp/case_modelinfo.xml
+unzip -l case.mph | sed -n '1,120p'
+/path/to/comsol version
 ```
 
-Common useful members:
+## 2. MPH semantics
 
-- `dmodel.xml`: selections, physics features, geometry feature history.
-- `smodel.json`: evaluated scalar parameters such as `c0`, `rho0`, impedance values, time ranges.
-- `modelinfo.xml`: title, physics interface, COMSOL version, geometry dimension.
-- `resources/*`: imported impedance/admittance tables or function data.
+- [ ] Extract or parse `dmodel.xml`, `smodel.json`, `modelinfo.xml`, and relevant `resources/*` members.
+- [ ] List named `SelectionFeature` boundary groups with tag, name, dimension, entity IDs, and entity count.
+- [ ] List active `PhysicsFeature` nodes, including `Impedance`, `NormalVelocity`, `SoundHard`, sources, and explicit selections.
+- [ ] Resolve `/selection/<tag>` references and filter negative sentinel IDs.
+- [ ] Record evaluated `rho0`, `c0`, impedance/admittance parameters, source function parameters, receiver coordinates, solver order, time range, and output range.
+- [ ] Resolve conflicts in favor of active physics and document every override.
+- [ ] Extract imported material/function tables from `resources/*` or document their external source.
 
-## Boundary group extraction
+## 3. Physical-label mapping
 
-Parse `SelectionFeature`:
+- [ ] Assign stable integer labels for every EDG boundary type and one volume label.
+- [ ] Confirm active non-hard groups are mutually disjoint after precedence resolution.
+- [ ] Define default hard wall as all exterior acoustic boundaries minus active special groups.
+- [ ] Keep inactive speakers or diagnostic covers separate when that prevents accidental source assignment.
+- [ ] Generate a table containing label, name, COMSOL selection/feature, entities/count, equation, and EDG treatment.
 
-- use `tag` as the stable COMSOL reference (`sel2`, `sel12`, `dif1`, ...);
-- use `name` as human-facing group name;
-- read `outputSelection/explicit[@dim="2"]/@entities` for boundary surface IDs;
-- ignore negative sentinel IDs such as `-454,-1`.
+## 4. Mesh-path decision
 
-Parse `PhysicsFeature`:
+For STEP/OCC/Gmsh:
 
-- `op="Impedance"`: material/impedance boundary;
-- `op="NormalVelocity"`: active velocity source;
-- `op="SoundHard"`: hard wall/default wall;
-- resolve `selection/named` text like `/selection/sel3`;
-- read `selection/explicit/@entities` when a physics feature has its own explicit group;
-- collect `param` values such as `ImpedanceModel`, `Zn`, `Y_inf`, `R`, `xi`, `Q`, `zeta`, `ApproximantFunctionReference`, `nvel`.
+- [ ] Import with the intended `Geometry.OCCScaling` and `Geometry.OCCImportLabels` settings.
+- [ ] Check volume count, bbox, surface count/range, and coverage of all referenced COMSOL entity IDs.
+- [ ] Stop if IDs do not map; do not assign by position or numeric coincidence.
+- [ ] Generate `Physical Surface` and `Physical Volume` groups only after mapping validation.
 
-Important rule: active physics features override display/helper selections. If a helper hard-wall selection includes a surface also selected by an active impedance feature, assign the surface to the active impedance group.
+For COMSOL mesh export:
 
-## STEP/Gmsh mapping validation
+- [ ] Identify the component and mesh tag that use the intended geometry or virtual operations.
+- [ ] Run that mesh in COMSOL and export linear NASTRAN shell and solid elements with geometry information.
+- [ ] Confirm triangle/tetra property/entity references survive the export.
+- [ ] Convert with an explicit entity-to-label mapping and fail on unknown or duplicate references.
 
-Import the STEP with the intended scale:
+## 5. Mesh acceptance
 
-```python
-import gmsh
-gmsh.initialize([])
-gmsh.option.setNumber("Geometry.OCCScaling", 0.001)
-gmsh.option.setNumber("Geometry.OCCImportLabels", 1)
-gmsh.model.add("check")
-gmsh.model.occ.importShapes("case.step")
-gmsh.model.occ.synchronize()
-surfaces = sorted(tag for dim, tag in gmsh.model.getEntities(2))
-volumes = sorted(tag for dim, tag in gmsh.model.getEntities(3))
-gmsh.finalize()
-```
+- [ ] Run `gmsh -check case.msh -`.
+- [ ] Verify expected triangle physical labels are present and non-empty.
+- [ ] Verify tetrahedra have the expected acoustic volume label.
+- [ ] Verify boundary triangle counts equal the sum of physical-group counts.
+- [ ] Verify no missing, duplicate, or unknown entity assignment.
+- [ ] Record points, triangles, tetrahedra, bbox, minimum/median triangle area, tetra volume, edge length, and insphere diameter.
+- [ ] Inspect generation warnings such as invalid surface elements, PLC errors, or ill-shaped tetrahedra.
+- [ ] Compute the actual EDG `dt` using the intended mesh/order/CFL and estimate the full-run step count.
+- [ ] Reject or explicitly flag a mesh whose small features make the requested transient run impractical.
 
-Check:
+## 6. Boundary equations and material fitting
 
-- number of volumes is expected;
-- bbox has physically plausible size;
-- all COMSOL surface IDs referenced by boundary groups are present in Gmsh surfaces;
-- extra Gmsh surfaces are deliberately assigned, usually to default hard wall.
+- [ ] Confirm whether source data represent impedance `Z`, admittance `Y`, absorption, or reflection `R`.
+- [ ] Convert to EDG's reflection convention using the same `rho0*c0` as the case.
+- [ ] Choose and document fit frequency band, sample weighting, pole count, iterations, and error limits.
+- [ ] Require stable real/complex poles and verify `max |R| <= 1` over the simulation band plus a documented margin.
+- [ ] Save `RI`, real-pole coefficients, complex-pole coefficients, source/fit samples, RMS/max error, and passivity metric in each `.mat`.
+- [ ] Plot magnitude/phase or real/imaginary diagnostics and inspect large local errors even when RMS passes.
 
-If IDs do not align, do not silently map by number. Prefer COMSOL export with named selections, or create a manual geometric classifier and validate with colored previews.
+## 7. EDG entrypoint
 
-## GEO generation pattern
+- [ ] Map every mesh physical label to exactly one EDG boundary parameter.
+- [ ] Use zero initial state for a boundary-driven COMSOL source unless the COMSOL model actually specifies a nonzero initial field.
+- [ ] Reproduce normal-velocity/source waveform, amplitude, frequency, delay, sigma/width, phase, and derivative handling required by the time integrator.
+- [ ] Match `rho0`, `c0`, receiver coordinates, spatial order, time order, CFL, end time, and COMSOL output times.
+- [ ] Guard against excessive estimated steps before allocating or running the full case.
+- [ ] Write output metadata including mesh name, labels/BC parameters, receiver coordinates, `dt`, output times, orders, CFL, and source information.
 
-Use the target repo’s required command prefix if any.
+## 8. Verification and comparison
 
-```geo
-SetFactory("OpenCASCADE");
+- [ ] Unit-test MPH parsing, selection precedence, boundary coverage, parameter extraction, source waveform, and `.mat` passivity.
+- [ ] Run a short smoke test to verify imports, mesh loading, boundary initialization, finite values, and result serialization.
+- [ ] State explicitly that a smoke test before wave arrival does not validate the acoustic result.
+- [ ] Run the requested physical duration and compare against COMSOL at identical receiver locations and sample times.
+- [ ] Report absolute RMS, maximum absolute error, relative L2 error, and useful time-window errors (for example pre-arrival, direct field, and reflected/reverberant tail).
+- [ ] Explain dominant discrepancies: geometry/mesh, boundary fit, source normalization, solver dispersion, sampling, or missing COMSOL physics.
 
-If (!Exists(scale))
-  scale = 0.001;
-EndIf
+## Completion record
 
-If (!Exists(lc))
-  lc = 0.20;
-EndIf
+The case README or report must contain:
 
-Geometry.OCCScaling = scale;
-Geometry.OCCImportLabels = 1;
-
-Merge "case.step";
-
-volumes[] = Volume{:};
-boundary_surfaces[] = Boundary{ Volume{volumes[]}; };
-
-impedance_surfaces[] = { ... };
-source_surfaces[] = { ... };
-
-non_default_surfaces[] = {};
-non_default_surfaces[] += impedance_surfaces[];
-non_default_surfaces[] += source_surfaces[];
-
-default_hard_wall_surfaces[] = boundary_surfaces[];
-default_hard_wall_surfaces[] -= non_default_surfaces[];
-
-Physical Surface("DefaultHardWall", 11) = {default_hard_wall_surfaces[]};
-Physical Surface("MaterialOrSource", 12) = {impedance_surfaces[]};
-Physical Volume("AcousticAir", 1) = {volumes[]};
-
-Mesh.MshFileVersion = 2.2;
-Mesh.Algorithm = 6;
-Mesh.Algorithm3D = 1;
-Mesh.Optimize = 1;
-Mesh.CharacteristicLengthFromPoints = 0;
-Mesh.CharacteristicLengthFromCurvature = 0;
-Mesh.CharacteristicLengthExtendFromBoundary = 0;
-Mesh.CharacteristicLengthMin = lc;
-Mesh.CharacteristicLengthMax = lc;
-```
-
-## Mesh validation commands
-
-Generate:
-
-```bash
-gmsh -3 case.geo -setnumber lc 0.20 -format msh2 -o case_lc0p20.msh
-gmsh -check case_lc0p20.msh -
-```
-
-Inspect with `meshio`:
-
-```python
-import meshio, numpy as np
-mesh = meshio.read("case_lc0p20.msh")
-print(mesh.points.min(axis=0), mesh.points.max(axis=0))
-print({b.type: len(b.data) for b in mesh.cells})
-print(mesh.cell_data_dict["gmsh:physical"])
-print(mesh.cell_data_dict["gmsh:geometrical"])
-```
-
-Minimum acceptance:
-
-- expected physical surface labels exist and are non-empty;
-- tetra volume physical tag exists and is correct;
-- boundary triangle physical counts sum to total boundary triangles;
-- no missing or duplicated assignment when comparing recovered group surfaces to Gmsh surfaces;
-- bbox dimensions match the physical problem;
-- min area/volume/edge-length are plausible for the intended timestep/order.
-
-Warnings to document explicitly:
-
-- invalid surface elements;
-- ill-shaped tetrahedra after optimization;
-- extremely small triangle areas/tet volumes;
-- unexpected extra surfaces after STEP import;
-- mismatch between STEP unit declaration and required OCC scaling.
+- input provenance and versions;
+- boundary/physical-label table;
+- mesh generation and validation commands;
+- mesh diagnostics and time-step budget;
+- material conversion formulas, fit settings, and errors;
+- EDG run command and result schema;
+- COMSOL comparison method and metrics;
+- known gaps between recovered physical groups and fully reproduced equations.

@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Convert COMSOL NASTRAN mesh export to Gmsh 2.2 physical tags.
+
+The mapping JSON is explicit and case-owned. Unknown boundary entities fail.
+
+Example mapping:
+{
+  "volume_label": 1,
+  "physical_groups": [
+    {"name": "DefaultHardWall", "label": 11, "entities": [1, 2, 3]},
+    {"name": "Source", "label": 21, "entities": [10, 11]}
+  ]
+}
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any
+
+import meshio
+import numpy
+
+
+def _cell_data(mesh: meshio.Mesh, key: str, cell_type: str) -> numpy.ndarray | None:
+    values = mesh.cell_data_dict.get(key, {}).get(cell_type)
+    if values is None:
+        return None
+    return numpy.asarray(values)
+
+
+def _refs(mesh: meshio.Mesh, cell_type: str) -> numpy.ndarray:
+    for key in ("nastran:ref", "gmsh:geometrical"):
+        values = _cell_data(mesh, key, cell_type)
+        if values is not None:
+            return values.astype(int, copy=False)
+    raise ValueError(f"No geometric/entity reference data found for {cell_type}")
+
+
+def _load_mapping(path: Path) -> dict[str, Any]:
+    mapping = json.loads(path.read_text(encoding="utf-8"))
+    labels: set[int] = set()
+    entities: dict[int, str] = {}
+    for group in mapping.get("physical_groups", []):
+        name = str(group["name"])
+        label = int(group["label"])
+        if label in labels:
+            raise ValueError(f"Duplicate physical label {label}")
+        labels.add(label)
+        group_entities = [int(entity) for entity in group.get("entities", [])]
+        if not group_entities:
+            raise ValueError(f"Group {name} has no entities")
+        for entity in group_entities:
+            if entity <= 0:
+                raise ValueError(f"Group {name} contains non-positive entity {entity}")
+            if entity in entities:
+                raise ValueError(
+                    f"Boundary entity {entity} appears in both {entities[entity]} and {name}"
+                )
+            entities[entity] = name
+    if not entities:
+        raise ValueError("Mapping has no boundary entities")
+    mapping["_entity_to_label"] = {
+        entity: int(group["label"])
+        for group in mapping["physical_groups"]
+        for entity in [int(item) for item in group["entities"]]
+    }
+    return mapping
+
+
+def convert(nastran_path: Path, mapping_path: Path, output_path: Path) -> dict[str, Any]:
+    mesh = meshio.read(nastran_path)
+    mapping = _load_mapping(mapping_path)
+    entity_to_label: dict[int, int] = mapping["_entity_to_label"]
+    volume_label = int(mapping.get("volume_label", 1))
+
+    cells = []
+    physical_data = []
+    geometrical_data = []
+    ref_offsets: dict[str, int] = {}
+    unknown_refs: set[int] = set()
+
+    for block in mesh.cells:
+        if block.type not in {"triangle", "tetra"}:
+            continue
+        block_refs_all = _refs(mesh, block.type)
+        offset = ref_offsets.get(block.type, 0)
+        block_refs = block_refs_all[offset : offset + len(block.data)].astype(int, copy=False)
+        ref_offsets[block.type] = offset + len(block.data)
+        cells.append((block.type, block.data))
+        geometrical_data.append(block_refs)
+
+        if block.type == "tetra":
+            physical_data.append(numpy.full(len(block.data), volume_label, dtype=int))
+        else:
+            labels = numpy.empty(len(block.data), dtype=int)
+            for index, entity in enumerate(block_refs):
+                label = entity_to_label.get(int(entity))
+                if label is None:
+                    unknown_refs.add(int(entity))
+                    label = -1
+                labels[index] = label
+            physical_data.append(labels)
+
+    if unknown_refs:
+        refs = sorted(unknown_refs)
+        raise ValueError(
+            "Boundary entities in NASTRAN export are not covered by mapping JSON: "
+            f"{refs[:40]}"
+        )
+
+    field_data = {
+        str(group["name"]): numpy.array([int(group["label"]), 2], dtype=int)
+        for group in mapping["physical_groups"]
+    }
+    field_data["AcousticVolume"] = numpy.array([volume_label, 3], dtype=int)
+
+    gmsh_mesh = meshio.Mesh(
+        points=mesh.points,
+        cells=cells,
+        cell_data={
+            "gmsh:physical": physical_data,
+            "gmsh:geometrical": geometrical_data,
+        },
+        field_data=field_data,
+    )
+    meshio.write(output_path, gmsh_mesh, file_format="gmsh22", binary=False)
+    return {
+        "nastran": str(nastran_path),
+        "mapping": str(mapping_path),
+        "output": str(output_path),
+        "points": int(len(mesh.points)),
+        "cells": {block.type: int(len(block.data)) for block in gmsh_mesh.cells},
+        "physical_labels": {
+            str(group["name"]): int(group["label"])
+            for group in mapping["physical_groups"]
+        },
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--nastran", type=Path, required=True)
+    parser.add_argument("--mapping", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--json-out", type=Path, default=None)
+    args = parser.parse_args()
+    report = convert(args.nastran, args.mapping, args.output)
+    text = json.dumps(report, indent=2, sort_keys=True)
+    if args.json_out:
+        args.json_out.write_text(text + "\n", encoding="utf-8")
+    else:
+        print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

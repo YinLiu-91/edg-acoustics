@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Recover raw, reviewable acoustics semantics from a COMSOL MPH archive.
+
+The output is intentionally not an EDG mapping. Review the recovered active
+physics features and entity lists before assigning physical labels.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import zipfile
+from pathlib import Path
+from typing import Any
+from xml.etree import ElementTree
+
+
+def _zip_member(zf: zipfile.ZipFile, basename: str) -> str | None:
+    matches = [name for name in zf.namelist() if Path(name).name == basename]
+    if not matches:
+      return None
+    return sorted(matches, key=len)[0]
+
+
+def _load_xml(zf: zipfile.ZipFile, basename: str) -> ElementTree.Element | None:
+    member = _zip_member(zf, basename)
+    if member is None:
+        return None
+    return ElementTree.fromstring(zf.read(member))
+
+
+def _load_json(zf: zipfile.ZipFile, basename: str) -> Any | None:
+    member = _zip_member(zf, basename)
+    if member is None:
+        return None
+    return json.loads(zf.read(member).decode("utf-8", errors="replace"))
+
+
+def _attr(element: ElementTree.Element | None, *names: str) -> str | None:
+    if element is None:
+        return None
+    for name in names:
+        value = element.attrib.get(name)
+        if value is not None:
+            return value
+    return None
+
+
+def _ints(text: str | None, *, keep_positive: bool = True) -> list[int]:
+    if not text:
+        return []
+    values = [int(item) for item in re.findall(r"-?\d+", text)]
+    if keep_positive:
+        values = [value for value in values if value > 0]
+    return values
+
+
+def _text_value(node: ElementTree.Element) -> str | None:
+    parts = []
+    if node.text and node.text.strip():
+        parts.append(node.text.strip())
+    for key in ("value", "expr", "name", "tag", "label", "descr", "selection"):
+        value = node.attrib.get(key)
+        if value:
+            parts.append(value)
+    return " | ".join(dict.fromkeys(parts)) or None
+
+
+def _selection_entities(selection: ElementTree.Element) -> list[int]:
+    explicit_values: list[int] = []
+    for node in selection.iter():
+        dim = _attr(node, "dim", "Dimension")
+        if dim is not None and dim != "2":
+            continue
+        text = _attr(node, "entities", "entity", "input", "selection") or node.text
+        explicit_values.extend(_ints(text, keep_positive=True))
+    return sorted(set(explicit_values))
+
+
+def _recover_selections(root: ElementTree.Element | None) -> dict[str, Any]:
+    if root is None:
+        return {}
+    selections: dict[str, Any] = {}
+    for node in root.iter():
+        tag = _attr(node, "tag", "name")
+        class_name = node.tag.lower()
+        if tag is None:
+            continue
+        if "selection" not in class_name and "selection" not in str(node.attrib).lower():
+            continue
+        entities = _selection_entities(node)
+        if not entities:
+            continue
+        selections[tag] = {
+            "label": _attr(node, "label", "descr", "name"),
+            "entities_dim2": entities,
+            "raw_attributes": dict(node.attrib),
+        }
+    return selections
+
+
+def _recover_physics(root: ElementTree.Element | None) -> list[dict[str, Any]]:
+    if root is None:
+        return []
+    physics: list[dict[str, Any]] = []
+    interesting = (
+        "impedance",
+        "normal velocity",
+        "sound hard",
+        "radiation",
+        "pressure",
+        "source",
+        "admittance",
+        "absor",
+    )
+    for node in root.iter():
+        label = " ".join(str(value) for value in node.attrib.values()).lower()
+        if not any(word in label for word in interesting):
+            continue
+        tag = _attr(node, "tag", "name") or node.tag
+        record: dict[str, Any] = {
+            "tag": tag,
+            "xml_tag": node.tag,
+            "label": _attr(node, "label", "descr", "name"),
+            "attributes": dict(node.attrib),
+            "entities_dim2": _selection_entities(node),
+            "values": {},
+        }
+        for child in node.iter():
+            value = _text_value(child)
+            if value:
+                key = _attr(child, "tag", "name", "label") or child.tag
+                record["values"].setdefault(key, value)
+        physics.append(record)
+    return physics
+
+
+def _walk_json(value: Any, path: str = "") -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        if any(key.lower() in {"expr", "value", "unit", "descr", "name"} for key in value):
+            found.append({"path": path, "value": value})
+        for key, child in value.items():
+            found.extend(_walk_json(child, f"{path}/{key}" if path else str(key)))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found.extend(_walk_json(child, f"{path}[{index}]"))
+    return found
+
+
+def recover_mph(mph_path: Path) -> dict[str, Any]:
+    with zipfile.ZipFile(mph_path) as zf:
+        dmodel = _load_xml(zf, "dmodel.xml")
+        modelinfo = _load_xml(zf, "modelinfo.xml")
+        smodel = _load_json(zf, "smodel.json")
+        resources = [
+            name for name in zf.namelist()
+            if "/resources/" in name or Path(name).parts[:1] == ("resources",)
+        ]
+        return {
+            "mph": str(mph_path),
+            "members": zf.namelist(),
+            "modelinfo_attributes": dict(modelinfo.attrib) if modelinfo is not None else {},
+            "selections": _recover_selections(dmodel),
+            "physics_candidates": _recover_physics(dmodel),
+            "evaluated_parameter_candidates": _walk_json(smodel) if smodel is not None else [],
+            "resource_members": resources,
+        }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mph", type=Path)
+    parser.add_argument("--json-out", type=Path, default=None)
+    args = parser.parse_args()
+    report = recover_mph(args.mph)
+    text = json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False)
+    if args.json_out:
+        args.json_out.write_text(text + "\n", encoding="utf-8")
+    else:
+        print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

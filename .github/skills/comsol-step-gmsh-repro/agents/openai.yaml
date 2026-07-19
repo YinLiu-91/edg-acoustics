@@ -1,4 +1,4 @@
 interface:
-  display_name: "COMSOL STEP to Gmsh Repro"
-  short_description: "Recover COMSOL boundary groups and mesh cases"
-  default_prompt: "Use $comsol-step-gmsh-repro to reproduce a COMSOL case from .mph/.step files and validate the generated .geo/.msh."
+  display_name: "COMSOL Acoustics Case Repro"
+  short_description: "Recover COMSOL physics, mesh, materials, and EDG cases"
+  default_prompt: "Use $comsol-step-gmsh-repro to recover this COMSOL acoustics case from its .mph/.step files, build verified mesh and material inputs, create the EDG run, and compare the results."

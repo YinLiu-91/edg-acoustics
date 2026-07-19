@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Template EDG transient entrypoint for a recovered COMSOL acoustics case."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+from pathlib import Path
+from typing import Any
+
+import numpy
+import scipy.io
+import torch
+
+from edg_acoustics.boundary_conditions import AbsorbBC, HardWallBC
+from edg_acoustics.mesh import Mesh
+from edg_acoustics.solver import TSI_TI, UpwindFlux
+
+
+RHO0 = 1.2
+C0 = 343.0
+NX = 4
+CFL = 0.5
+DEFAULT_MESH = Path("case_mesh.msh")
+DEFAULT_OUTPUT = Path("result.mat")
+
+# Replace these labels with the reviewed MPH->EDG mapping for the case.
+BC_LABELS = {
+    "DefaultHardWall": 11,
+    "Source": 21,
+}
+
+# Constant impedance example:
+#   R = (Z - RHO0 * C0) / (Z + RHO0 * C0)
+# Fitted material example:
+#   {"kind": "fitted", "mat": "seat.mat"}
+BOUNDARIES: dict[int, dict[str, Any]] = {
+    BC_LABELS["DefaultHardWall"]: {"kind": "hard_wall"},
+    BC_LABELS["Source"]: {"kind": "normal_velocity"},
+}
+
+RECEIVER = numpy.array([[0.0, 0.0, 0.0]], dtype=float)
+
+
+def source_normal_velocity(t: float) -> float:
+    """Replace with the active COMSOL Normal Velocity expression."""
+    f0 = 1000.0
+    delay = 0.002
+    sigma = 0.0005
+    return math.sin(2.0 * math.pi * f0 * t) * math.exp(-((t - delay) / sigma) ** 2)
+
+
+def _load_fitted_boundary(mat_path: Path) -> AbsorbBC:
+    data = scipy.io.loadmat(mat_path)
+    required = ["RI", "AS", "lambdaS", "BS", "CS", "alphaS", "betaS"]
+    missing = [name for name in required if name not in data]
+    if missing:
+        raise ValueError(f"{mat_path} missing EDG fit keys: {missing}")
+    return AbsorbBC(
+        RI=float(numpy.ravel(data["RI"])[0]),
+        RP=[
+            (float(a), float(lam))
+            for a, lam in zip(numpy.ravel(data["AS"]), numpy.ravel(data["lambdaS"]))
+        ],
+        CP=[
+            (float(b), float(c), float(alpha), float(beta))
+            for b, c, alpha, beta in zip(
+                numpy.ravel(data["BS"]),
+                numpy.ravel(data["CS"]),
+                numpy.ravel(data["alphaS"]),
+                numpy.ravel(data["betaS"]),
+            )
+        ],
+    )
+
+
+def build_boundary_conditions(case_dir: Path) -> dict[int, Any]:
+    result: dict[int, Any] = {}
+    z0 = RHO0 * C0
+    for label, config in BOUNDARIES.items():
+        kind = config["kind"]
+        if kind == "hard_wall":
+            result[label] = HardWallBC()
+        elif kind == "reflection":
+            result[label] = AbsorbBC(RI=float(config["RI"]), RP=[], CP=[])
+        elif kind == "impedance":
+            impedance = complex(config["Z"])
+            reflection = (impedance - z0) / (impedance + z0)
+            result[label] = AbsorbBC(RI=float(reflection.real), RP=[], CP=[])
+        elif kind == "fitted":
+            result[label] = _load_fitted_boundary(case_dir / config["mat"])
+        elif kind == "normal_velocity":
+            result[label] = {"kind": "normal_velocity", "function": source_normal_velocity}
+        else:
+            raise ValueError(f"Unsupported boundary kind for label {label}: {kind}")
+    return result
+
+
+def estimate_dt(mesh: Mesh) -> float:
+    # Prefer a case-specific inspected value if the project mesh API changes.
+    return CFL * mesh.min_insphere_diameter / ((2 * NX + 1) * C0)
+
+
+def run_case(args: argparse.Namespace) -> dict[str, Any]:
+    case_dir = Path(__file__).resolve().parent
+    mesh = Mesh(str(args.mesh), nx=NX)
+    boundary_conditions = build_boundary_conditions(case_dir)
+    flux = UpwindFlux(rho0=RHO0, c0=C0, boundary_conditions=boundary_conditions)
+    solver = TSI_TI(mesh, flux, c0=C0, rho0=RHO0)
+
+    dt = estimate_dt(mesh)
+    steps = int(math.ceil(args.total_time / dt))
+    if args.max_steps is not None and steps > args.max_steps:
+        raise RuntimeError(
+            f"Estimated {steps} steps exceeds --max-steps {args.max_steps}; "
+            "inspect mesh quality or reduce total time."
+        )
+
+    output_times = numpy.linspace(0.0, args.total_time, args.output_count)
+    receiver_pressure = []
+    current_output = 0
+    t = 0.0
+
+    # Zero initial condition is the usual COMSOL boundary-driven source setup.
+    solver.set_initial_condition_zero()
+    for step in range(steps + 1):
+        while current_output < len(output_times) and t >= output_times[current_output] - 0.5 * dt:
+            receiver_pressure.append(solver.sample_pressure(RECEIVER))
+            current_output += 1
+        if step == steps:
+            break
+        solver.step(dt, t=t)
+        t += dt
+        if args.progress and step % args.progress == 0:
+            print(f"step={step} t={t:.9g}")
+
+    return {
+        "pressure": numpy.asarray(receiver_pressure),
+        "time": output_times[: len(receiver_pressure)],
+        "dt": dt,
+        "steps": steps,
+        "mesh": str(args.mesh),
+        "rho0": RHO0,
+        "c0": C0,
+        "nx": NX,
+        "receiver": RECEIVER,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mesh", type=Path, default=DEFAULT_MESH)
+    parser.add_argument("--total-time", type=float, default=0.01)
+    parser.add_argument("--output-count", type=int, default=101)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--max-steps", type=int, default=1000000)
+    parser.add_argument("--progress", type=int, default=0)
+    args = parser.parse_args()
+
+    result = run_case(args)
+    scipy.io.savemat(args.output, result)
+    metadata = {key: value for key, value in result.items() if key not in {"pressure"}}
+    args.output.with_suffix(".json").write_text(
+        json.dumps(metadata, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

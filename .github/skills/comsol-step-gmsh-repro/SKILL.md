@@ -1,52 +1,49 @@
 ---
 name: comsol-step-gmsh-repro
-description: Recover COMSOL case geometry and boundary semantics from provided .mph and .step files, then generate and validate Gmsh .geo/.msh files for reproducing COMSOL cases. Use when Codex needs to inspect or fix STEP-to-GEO-to-MSH workflows, extract COMSOL named selections/material/source boundary groups from .mph XML/JSON, assign Gmsh Physical Surface labels, validate mesh physical groups/quality, or document how a COMSOL case maps into EDG/acoustics inputs.
+description: Recover and reproduce COMSOL acoustics cases from provided .mph/.step files through verified boundary semantics, COMSOL or Gmsh mesh export, frequency-dependent material fitting, EDG solver setup, and receiver-result comparison. Use when Codex needs to inspect COMSOL XML/JSON/resources, rebuild named selections or active physics groups, generate or repair .geo/.msh files, export a virtual-geometry mesh through COMSOL, convert admittance/impedance data to EDG RI/RP/CP .mat files, create a case main.py, validate mesh/time-step quality, or document an end-to-end COMSOL-to-EDG reproduction.
 ---
 
-# COMSOL STEP to Gmsh reproduction
+# Reproduce COMSOL acoustics cases
 
 ## Core workflow
 
-1. Ground the case from files, not assumptions:
-   - Identify `.mph`, `.step`, existing `.geo`, existing `.msh`, docs, and solver entrypoints.
-   - Treat `.mph` as a ZIP archive first; do not rely on a local COMSOL version opening it.
-   - Check COMSOL creation/last-computation version and local COMSOL version if available.
+1. Inventory the supplied `.mph`, `.step`, tables, existing meshes, scripts, and COMSOL reference outputs. Record the model version and local COMSOL version.
+2. Treat `.mph` as a ZIP archive. Recover selections, active physics features, evaluated parameters, interpolation resources, sources, receivers, study time range, and output times before constructing solver inputs.
+3. Resolve boundary semantics from active physics features. Let active impedance, normal-velocity, source, or special features override display/helper selections. Never interpret negative COMSOL sentinels as entities.
+4. Create an explicit entity-to-physical-label mapping. Require groups to be disjoint, cover every acoustic boundary, and preserve a separate acoustic volume label.
+5. Choose the mesh path from evidence:
+   - Use STEP/OCC to Gmsh only when COMSOL entity IDs map to imported surfaces and mesh quality gives a practical explicit time step.
+   - Use the COMSOL virtual/defeatured mesh export path when STEP topology contains tiny features, entity IDs do not survive import, or the original model already has a validated cleanup mesh.
+6. Validate `.msh` topology, physical labels, bbox, cell quality, minimum tetrahedron insphere diameter, estimated EDG time step, and total step count. Unknown or duplicate entity references must fail.
+7. Convert COMSOL boundary equations to the quantity expected by EDG. For admittance/impedance tables, fit the reflection coefficient, verify stable poles and passivity, and write the exact `RI/RP/CP` `.mat` schema used by `AbsorbBC`.
+8. Build the EDG entrypoint from recovered physics: choose the correct initial condition, boundary-driven source, receiver coordinates, output times, polynomial/time order, CFL, end time, and result metadata.
+9. Run structural tests and a short smoke test, then run the full physical case. Compare EDG and COMSOL at identical receiver locations and times; report full-interval and windowed errors.
 
-2. Recover COMSOL boundary semantics before editing `.geo`:
-   - Extract `dmodel.xml`, `smodel.json`, and `modelinfo.xml` from `.mph`.
-   - Parse `SelectionFeature` nodes for named boundary groups.
-   - Parse `PhysicsFeature` nodes for active impedance/source/hard-wall features.
-   - Resolve `selection/named` references like `/selection/sel12` to the corresponding selection.
-   - Parse `selection/explicit` entities for physics features that do not use named selections.
-   - Ignore negative COMSOL sentinels in entity lists, e.g. `-454,-1`.
+## Non-negotiable rules
 
-3. Prefer active physics features over display selections:
-   - If a COMSOL display selection conflicts with a physics feature, map the boundary according to the active physics feature.
-   - Define default hard wall as imported STEP boundary surfaces minus active impedance/source/special groups.
-   - Keep inactive speakers, diagnostic covers, or unused selections separate if they help prevent accidental source/hard-wall mixing.
+- Do not infer physics from geometry names alone when active COMSOL features are available.
+- Do not map STEP/Gmsh surfaces by numeric coincidence without checking import scale, labels, counts, and coverage.
+- Do not silently assign unknown NASTRAN or Gmsh entity references to hard wall.
+- Do not call a mesh suitable only because `gmsh -check` can read it; include the explicit time-step budget.
+- Do not copy COMSOL rational-approximation coefficients into EDG before confirming the represented transfer quantity and sign convention.
+- Do not treat a pre-arrival smoke run or an all-zero receiver trace as physical validation.
+- Preserve unrelated user files and generated reference artifacts unless the task explicitly authorizes replacing them.
 
-4. Validate STEP surface tag compatibility before trusting COMSOL entity IDs:
-   - Import STEP with Gmsh/OCC using the same scale and import-label options as the target `.geo`.
-   - Check surface tag count/range and whether all COMSOL boundary entity IDs exist in Gmsh.
-   - If COMSOL IDs do not map to Gmsh surface tags, do not guess; require COMSOL export with named selections or perform manual/geometric classification with explicit validation.
+## Reference routing
 
-5. Generate `.geo` physical groups only after mapping is validated:
-   - Preserve unit/scale logic and document why it is needed.
-   - Assign stable physical labels for solver use.
-   - Use set-difference for large default hard-wall groups instead of hand-listing hundreds of surfaces.
-   - Write `Physical Volume` for the acoustic domain.
+- Read [mph-physics-recovery.md](references/mph-physics-recovery.md) when extracting selections, physics, parameters, sources, receivers, or resources from `.mph`.
+- Read [mesh-export-validation.md](references/mesh-export-validation.md) when choosing STEP/Gmsh versus COMSOL mesh export, assigning physical groups, or diagnosing mesh quality.
+- Read [material-solver-validation.md](references/material-solver-validation.md) when fitting materials, generating an EDG entrypoint, or comparing transient results.
+- Read [workflow-checklist.md](references/workflow-checklist.md) for every full case reproduction and before claiming completion.
 
-6. Validate `.msh` beyond “file exists”:
-   - Run `gmsh -check`.
-   - Use `meshio` to inspect cells, `gmsh:physical`, `gmsh:geometrical`, bbox, and quality metrics.
-   - Verify every boundary triangle has exactly one physical tag and all expected physical labels are non-empty.
-   - Treat Gmsh generation warnings about invalid surface elements or ill-shaped tetrahedra as real mesh-quality risks even if `gmsh -check` can read the file.
+## Reusable templates
 
-7. Document the mapping and remaining solver gap:
-   - Explain source files, recovered groups, labels, counts, commands, and mesh warnings.
-   - Distinguish “physical labels recovered” from “COMSOL boundary equations fully implemented”.
-   - For impedance/admittance rational approximations, confirm the target solver expects the same quantity before reusing coefficients.
+Copy and adapt files from `assets/templates/` instead of rewriting common scaffolding:
 
-## Reference
+- `ExportComsolMesh.java.template`: run a selected COMSOL mesh and export NASTRAN with geometry references.
+- `recover_mph_case.py.template`: produce a raw, reviewable MPH semantics report.
+- `convert_nastran_to_gmsh.py.template`: apply an explicit JSON boundary mapping and write Gmsh 2.2 physical tags.
+- `fit_admittance.m.template`: fit normalized reflection data to EDG `RI/RP/CP` coefficients.
+- `edg_main.py.template`: configure a zero-initial-state, boundary-driven EDG transient case.
 
-Read [workflow-checklist.md](references/workflow-checklist.md) when executing a full reproduction, writing docs, or debugging a failed COMSOL STEP/Gmsh mesh.
+Keep case-specific values in the copied files or case README. Do not store large `.mph`, `.step`, `.nas`, `.msh`, result, or diagnostic image files in the skill.

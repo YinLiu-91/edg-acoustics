@@ -1,0 +1,55 @@
+import com.comsol.model.MeshExport;
+import com.comsol.model.MeshSequence;
+import com.comsol.model.Model;
+import com.comsol.model.util.ModelUtil;
+
+/*
+ * Copy this file to a case-specific Java class, for example
+ * ExportCaseMesh.java, then compile it with:
+ *
+ *   /path/to/comsol compile ExportCaseMesh.java
+ *
+ * Run with:
+ *
+ *   /path/to/comsol batch -inputfile ExportCaseMesh.class \
+ *     case.mph case_mesh.nas comp1 mesh2
+ */
+public class __JAVA_CLASS__ {
+  public static void main(String[] args) throws Exception {
+    if (args.length < 2 || args.length > 4) {
+      throw new IllegalArgumentException(
+          "Usage: __JAVA_CLASS__ input.mph output.nas [component_tag] [mesh_tag]");
+    }
+
+    String mphPath = args[0];
+    String outputPath = args[1];
+    String componentTag = args.length >= 3 ? args[2] : "comp1";
+    String meshTag = args.length >= 4 ? args[3] : "mesh1";
+
+    ModelUtil.initStandalone(true);
+    Model model = ModelUtil.load("case_model", mphPath);
+    MeshSequence mesh = model.component(componentTag).mesh(meshTag);
+    mesh.run();
+
+    MeshExport export = mesh.export();
+    trySet(export, "filename", outputPath);
+    trySet(export, "type", "nastran");
+    trySet(export, "solidelem", "on");
+    trySet(export, "shellelem", "on");
+    trySet(export, "geominfo", "on");
+    trySet(export, "geominfo_nastran", "on");
+    trySet(export, "fieldformat", "free");
+    trySet(export, "nastranquadratic", "off");
+    mesh.export(outputPath);
+
+    ModelUtil.disconnect();
+  }
+
+  private static void trySet(MeshExport export, String property, String value) {
+    try {
+      export.set(property, value);
+    } catch (Exception error) {
+      System.out.println("Skipping unsupported mesh export property: " + property);
+    }
+  }
+}
