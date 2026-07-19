@@ -140,6 +140,84 @@ rtk gmsh -check car_cabin_acoustics_transient_63_cleared_curv_hxt_lc0p12_min0p06
 
 如果后续必须真正移除 STEP 中的微小 CAD 特征，应优先在 COMSOL 6.3+ 或原始 CAD 工具中 defeature，然后重新导出带 named selections 的 geometry/mesh，并重新跑本目录的 boundary group 覆盖检查。直接在 Gmsh/OCC 中自动删小边/小面会带来 surface tag 改变、Physical Surface 分组失配、甚至无效边界网格的风险。
 
+## 推荐求解网格：COMSOL virtual geometry mesh2
+
+STEP->Gmsh 路径能恢复 physical groups，但该 STEP 仍含极小/瘦长局部几何。即使 HXT 不再报告 ill-shaped tets，EDG 使用的内切球尺度仍只有 `8.2307e-07 m`；在 `Nx=4, CFL=0.5, c0=343 m/s` 下，完整 `0.06 s` 约需 `4.50e8` 步，不适合作为默认瞬态复现网格。
+
+因此当前推荐从 `.mph` 中直接运行 COMSOL 已清理的 virtual geometry `mesh2`，导出带几何 entity id 的 NASTRAN，再转换成 EDG/Gmsh mesh。命令如下：
+
+```bash
+rtk /usr/local/comsol64/multiphysics/bin/comsol compile ExportCarCabinMesh2.java
+
+rtk /usr/local/comsol64/multiphysics/bin/comsol batch \
+  -inputfile ExportCarCabinMesh2.class \
+  car_cabin_acoustics_transient_63_cleared.mph \
+  car_cabin_comsol_virtual_hmax0p114_hmin0p02.nas \
+  -batchlog car_cabin_comsol_mesh2.log \
+  -batchlogout \
+  -nosave
+
+rtk python convert_comsol_nastran_to_gmsh.py \
+  --nastran car_cabin_comsol_virtual_hmax0p114_hmin0p02.nas \
+  --output car_cabin_comsol_virtual_hmax0p114_hmin0p02.msh \
+  --json-out car_cabin_comsol_virtual_report.json
+
+rtk gmsh -check car_cabin_comsol_virtual_hmax0p114_hmin0p02.msh -
+```
+
+当前导出的 `car_cabin_comsol_virtual_hmax0p114_hmin0p02.msh` 诊断结果：
+
+| 项目 | 结果 |
+|---|---:|
+| mesh source | COMSOL 6.4 打开 6.3 MPH，运行 `mesh2` |
+| mesh points | 74448 |
+| triangles | 70126 |
+| tetrahedra | 336228 |
+| bbox size | `[3.44338, 1.607507, 1.219] m` |
+| triangle physical tags | `11,12,13,14,15,16,17,21,22` |
+| tetra physical tags | `1` |
+| min triangle area | `7.595e-06` |
+| min tetra volume | `1.842e-08` |
+| min tetra edge length | `2.729e-03 m` |
+| min insphere diameter | `1.788e-03 m` |
+| estimated EDG `dt` (`Nx=4,CFL=0.5`) | `2.896e-07 s` |
+| estimated steps for `0.06 s` | `207196` |
+
+这张 mesh 保留 MPH 中 active boundary entity 到 EDG physical label 的映射，同时避免 STEP 微小碎片把显式时间步长压到不可用范围。`main.py` 默认优先使用这张 mesh；如果文件不存在才回退到 STEP/HXT mesh，并用 `--max-steps` 做步数保护。
+
+## 材料拟合与求解命令
+
+三类频率相关边界来自 COMSOL admittance 表：
+
+- `CarpetFloor` -> `carpet_admittance_63.txt` -> `carpet.mat`
+- `RoofTrim` -> `roof_admittance_63.txt` -> `roof.mat`
+- `LeatherSeats` -> `seat_admittance_63.txt` -> `seat.mat`
+
+使用 vector fitting 生成 EDG `AbsorbBC` 的 `RI/RP/CP` 系数：
+
+```bash
+rtk octave -qf fit_car_cabin_admittance.m
+```
+
+当前拟合误差和 passivity 检查：
+
+| material | pole count | RMS `|R_fit-R_target|` | max `|R|` |
+|---|---:|---:|---:|
+| seat | 12 | `6.9437e-02` | `1.000000` |
+| carpet | 8 | `5.8947e-05` | `0.999184` |
+| roof | 8 | `1.1537e-04` | `0.999151` |
+
+运行 EDG case：
+
+```bash
+rtk env EDG_ACOUSTICS_DEVICE=cpu python main.py \
+  --mesh car_cabin_comsol_virtual_hmax0p114_hmin0p02.msh \
+  --total-time 0.06 \
+  --output result.mat
+```
+
+CUDA 显存足够时可以使用默认 `EDG_ACOUSTICS_DEVICE=auto` 和 `--use-cuda-graph`。含 `normal_velocity` 源的边界会自动走通用 torch 边界通量路径，避免误用无源 RI/ADE 专用 kernel；CUDA graph 仍可捕获该路径，但 chunk size 固定为 `1`，使每步 replay 前能更新当前物理时间。
+
 ## 与 EDG 求解边界条件的关系
 
 这些 physical labels 只是把 COMSOL 边界语义带入 mesh。完整复现 COMSOL 结果还需要把 COMSOL pressure-acoustics 边界条件转换成 EDG 当前求解方程使用的边界参数：
@@ -149,58 +227,25 @@ rtk gmsh -check car_cabin_acoustics_transient_63_cleared_curv_hxt_lc0p12_min0p06
   - windows: `R ~= 0.9974968672`
   - dashboard: `R ~= 0.9949874371`
   - doors: `R ~= 0.9949874371`
-- label `15/16/17`：COMSOL 存的是 rational approximation impedance/admittance 参数，不能直接当作 EDG `AbsorbBC` 的 reflection-coefficient poles 使用；需要先把 COMSOL 的 admittance/impedance approximation 转换为 EDG 使用的 `RI/RP/CP` 反射系数形式。
-- label `21`：COMSOL 的 active source 是 `Tweeter L` 上的 `Normal Velocity 1`，表达式为 `vn(t)`；其它 speaker surfaces 当前没有 active normal velocity feature，作为 hard-wall/diagnostic group `22` 保留。
+- label `15/16/17`：通过 `fit_car_cabin_admittance.m` 把 COMSOL admittance table 转为 EDG `AbsorbBC` 使用的反射系数 rational approximation。
+- label `21`：COMSOL 的 active source 是 `Tweeter L` 上的 `Normal Velocity 1`，表达式为 `vn(t)`。EDG 当前使用同一类 Gaussian-modulated sine prescribed normal velocity，参数为 `f0=1000 Hz, delay=0.002 s, sigma=0.0005 s, amplitude=1`；其它 speaker surfaces 当前没有 active normal velocity feature，作为 hard-wall/diagnostic group `22` 保留。
 
-本地 COMSOL 是 5.6，而 `.mph` 的 last computation version 是 COMSOL 6.3.0.272；因此不要把“本机 COMSOL 能直接打开并重新导出该模型”作为默认流程。如果需要最稳妥的 COMSOL 对齐，应使用 COMSOL 6.3+ 导出带 named selections 的 mesh/geometry，再和这里的 XML 提取结果交叉验证。
+本地 COMSOL 是 `/usr/local/comsol64/multiphysics/bin/comsol`，版本 `6.4.0.293`；`.mph` 的 last computation version 是 COMSOL 6.3。当前可以打开并运行 `mesh2`，但仍不要把 STEP surface tag 猜测当作边界语义来源，边界组仍以 `.mph` 中的 XML/JSON physics feature 为准。
 
-## 后续 COMSOL `.mph + .step -> .geo -> .msh` 复现流程
+## 通用复现流程与可复用 skill
 
-后续遇到类似 case 时，前提是同时有 COMSOL `.mph` 和导出的 `.step`。正确流程不是直接把 STEP merge 到 Gmsh 后统一设成一个边界，而是先恢复 COMSOL 的边界语义，再生成带 physical groups 的 mesh。
+本目录保留 car-cabin 的具体 worked example：边界组恢复、STEP/Gmsh 与 COMSOL virtual mesh 对比、材料拟合误差、EDG 运行命令都记录在上文。后续其它 COMSOL 声学 case 不应直接复制本 case 的 label 或脚本参数，而应按仓库文档重新恢复 `.mph` 中的 active physics、selections、参数、资源、source、receiver 和 study time。
 
-推荐顺序：
+通用流程已经整理到 [COMSOL 声学 case 到 EDG 的复现流程](../../docs/comsol_case_reproduction_workflow.md)。该文档覆盖：
 
-1. 先检查输入文件和版本：
-   - `file case.mph`
-   - `unzip -l case.mph`
-   - `unzip -p case.mph modelinfo.xml`
-   - 如果本机 COMSOL 版本低于 `.mph` 版本，不要假设能可靠打开模型。
+- 如何从 `.mph` 的 `dmodel.xml`、`smodel.json`、`resources/*` 恢复边界语义和参数。
+- 何时使用 STEP/OCC/Gmsh，何时改用 COMSOL virtual/defeatured mesh 导出。
+- 如何用显式 JSON mapping 把 COMSOL/NASTRAN entity ref 转成 Gmsh physical labels。
+- 如何把 admittance/impedance 表拟合为 EDG `RI/RP/CP` `.mat`。
+- 如何组织 `main.py`、运行 smoke/full case，并给出和 COMSOL 的误差说明。
 
-2. 从 `.mph` 中提取 COMSOL 分组和边界条件：
-   - `dmodel.xml`：主要看 `SelectionFeature` 和 `PhysicsFeature`。
-   - `smodel.json`：主要看已求值参数，例如 `rho0/c0/Z_*`、厚度、流阻、时间范围。
-   - `resources/*`：可能包含 COMSOL 导入的 admittance/impedance 表格。
-   - `SelectionFeature/outputSelection/explicit[@dim="2"]/@entities` 是边界 surface id 列表；负数如 `-454,-1` 是 COMSOL sentinel，不是 surface。
-   - `PhysicsFeature` 才是 active physics；如果 helper/display selection 和 active physics feature 冲突，以 active physics feature 为准。
+本机还安装了对应 Codex skill：`/home/liu/.codex/skills/comsol-step-gmsh-repro`。后续可以直接要求：
 
-3. 验证 COMSOL boundary id 是否能映射到 Gmsh surface tag：
-   - 用 Gmsh/OCC 按 `.geo` 计划中的 `Geometry.OCCScaling` 和 `Geometry.OCCImportLabels` 导入 STEP。
-   - 检查 surface tag 数量、范围、bbox、volume 数。
-   - 确认 `.mph` 中所有被引用的 surface id 都存在于 Gmsh surface tag。
-   - 如果 id 不一致，不要按编号硬套；需要 COMSOL 重新导出带 named selections 的 mesh/geometry，或者做几何位置分类并用可视化验证。
-
-4. 生成 `.geo`：
-   - 保留明确的 unit/scale 说明。
-   - 用独立数组定义 windows、seats、carpet、roof、source 等边界。
-   - 用 `default_hard_wall[] = boundary_surfaces[]; default_hard_wall[] -= non_default[];` 生成默认硬壁，不手写几百个 surface。
-   - 每个求解边界给稳定的 `Physical Surface("Name", label)`。
-   - `Physical Volume("AcousticAir", 1)` 必须存在。
-
-5. 生成和检查 `.msh`：
-   - `gmsh -3 case.geo -setnumber lc ... -format msh2 -o case.msh`
-   - `gmsh -check case.msh -`
-   - 用 `meshio` 检查：
-     - bbox 是否物理合理；
-     - triangle/tetra 数量；
-     - `gmsh:physical` 是否包含所有预期 surface labels；
-     - 每个 boundary triangle 是否只有一个 physical tag；
-     - tetra volume physical tag 是否正确；
-     - 最小 triangle area、tet volume、edge length 是否异常。
-
-6. 写入 README 或 case 文档：
-   - 记录 `.mph` 中的 COMSOL 版本、physics interface、边界组来源。
-   - 记录 physical label 对照表和每组 surface 数。
-   - 记录 Gmsh 生成警告，尤其 invalid surface elements、ill-shaped tets、极小面/体。
-   - 明确说明“已经恢复 physical groups”不等价于“已经完全复现 COMSOL 边界方程”。例如 COMSOL 的 rational approximation impedance/admittance 需要转换成 EDG 当前 `RI/RP/CP` 形式，不能直接复制系数。
-
-本地还新增了一个 Codex skill：`/home/liu/.codex/skills/comsol-step-gmsh-repro`。后续可以直接要求“使用 `$comsol-step-gmsh-repro` 处理这个 COMSOL `.mph/.step` case”，该 skill 会按上面的顺序恢复分组、生成 `.geo/.msh` 并做 mesh 诊断。
+```text
+使用 $comsol-step-gmsh-repro 复现这个 COMSOL .mph/.step 声学 case，并生成 EDG mesh、material fit、main.py 和对比报告。
+```

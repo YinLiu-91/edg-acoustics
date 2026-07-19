@@ -1,4 +1,6 @@
 *.py[cod]
+*.class
+*.class.status
 *.egg-info
 *.eggs
 .ipynb_checkpoints
@@ -44,6 +46,7 @@ edg_acoustics/example_google.py
 *.mat
 # !examples/*.mat
 !examples/scenario1/*.mat
+!examples/car_cabin_acoustics_transient_63_cleared/*.mat
 !tests/golden_files/test_scenario1/*.mat
 
 # test mesh files
@@ -54,4 +57,5 @@ data/tests/mesh/*
 *.png
 !examples/dgfem_acoustic_2d/porous_absorber_time_domain/boundary_comparison_all_time.png
 !examples/dgfem_acoustic_2d/porous_absorber_time_domain/boundary_error_after_8ms.png
+!examples/car_cabin_acoustics_transient_63_cleared/*.png
 *.pos

@@ -501,6 +501,7 @@ def mesh_diagnostics(mesh_path: Path) -> dict[str, Any]:
     if tets.size:
         volumes = _tet_volumes(points, tets)
         edges = _tet_edge_lengths(points, tets)
+        insphere_diameters = _tet_insphere_diameters(points, tets, volumes)
         diagnostics["tetra_quality"] = {
             "min_volume": float(volumes.min()),
             "median_volume": float(numpy.median(volumes)),
@@ -508,6 +509,8 @@ def mesh_diagnostics(mesh_path: Path) -> dict[str, Any]:
             "min_edge_length": float(edges.min()),
             "median_edge_length": float(numpy.median(edges)),
             "max_edge_length": float(edges.max()),
+            "min_insphere_diameter": float(insphere_diameters.min()),
+            "median_insphere_diameter": float(numpy.median(insphere_diameters)),
         }
 
     triangles = _cells_by_type(mesh, "triangle")
@@ -542,6 +545,21 @@ def _tet_edge_lengths(points: numpy.ndarray, tets: numpy.ndarray) -> numpy.ndarr
     return numpy.concatenate(
         [numpy.linalg.norm(points[tets[:, i]] - points[tets[:, j]], axis=1) for i, j in pairs]
     )
+
+
+def _tet_insphere_diameters(
+    points: numpy.ndarray,
+    tets: numpy.ndarray,
+    volumes: numpy.ndarray,
+) -> numpy.ndarray:
+    face_indices = ((0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3))
+    surface_area = numpy.zeros(len(tets), dtype=float)
+    for i, j, k in face_indices:
+        a = points[tets[:, i]]
+        b = points[tets[:, j]]
+        c = points[tets[:, k]]
+        surface_area += numpy.linalg.norm(numpy.cross(b - a, c - a), axis=1) / 2.0
+    return 6.0 * volumes / surface_area
 
 
 def _triangle_areas(points: numpy.ndarray, triangles: numpy.ndarray) -> numpy.ndarray:

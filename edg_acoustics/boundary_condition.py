@@ -78,6 +78,12 @@ class BoundaryCondition(abc.ABC):
                             for key in ["kexi1", "kexi2", "KEXI1", "KEXI2"]
                         }
                     )
+                elif polekey == "normal_velocity":
+                    BCvar[index]["normal_velocity"] = torch.zeros(
+                        BCnode[index]["map"].shape,
+                        device=device_ini.device,
+                        dtype=device_ini.dtype,
+                    )
         return BCvar
 
     @staticmethod
@@ -165,18 +171,16 @@ class BoundaryCondition(abc.ABC):
             Re (torch.tensor): reflection coefficient at the frequencies of omega.
         """
         Re = torch.ones(omega.shape, device=omega.device, dtype=omega.dtype)
+        if "RI" in paras:
+            Re = Re * paras["RI"]
 
         for polekey in paras:
-            if polekey == "RI":
-                Re = Re * paras["RI"]
-            elif polekey == "RP":
-                Re = Re * paras["RI"]
+            if polekey == "RP":
                 A = paras["RP"][0, :]
                 zeta = paras["RP"][1, :]
                 for j, a in enumerate(A):
                     Re = Re + a / (1j * omega + zeta[j])
             elif polekey == "CP":
-                Re = Re * paras["RI"]
                 B = paras["CP"][0, :]
                 C = paras["CP"][1, :]
                 alpha = paras["CP"][2, :]
@@ -221,6 +225,137 @@ class AbsorbBC(BoundaryCondition):
         BoundaryCondition.check_BCpara(BCnode, BCpara, freq_max)
         self.BCpara = BCpara
         self.BCvar = BoundaryCondition.init_ADEvariables(self.BCpara, BCnode)
+        self.has_prescribed_normal_velocity = any(
+            "normal_velocity" in paras for paras in self.BCpara
+        )
+
+    @staticmethod
+    def _poly_derivative(coefficients: list[float]) -> list[float]:
+        return [
+            order * coefficients[order]
+            for order in range(1, len(coefficients))
+        ] or [0.0]
+
+    @staticmethod
+    def _poly_multiply_by_x(coefficients: list[float]) -> list[float]:
+        return [0.0] + coefficients
+
+    @staticmethod
+    def _poly_add(*polynomials: list[float]) -> list[float]:
+        size = max(len(poly) for poly in polynomials)
+        out = [0.0] * size
+        for poly in polynomials:
+            for index, value in enumerate(poly):
+                out[index] += value
+        while len(out) > 1 and out[-1] == 0.0:
+            out.pop()
+        return out
+
+    @staticmethod
+    def _poly_scale(coefficients: list[float], scale: float) -> list[float]:
+        return [scale * value for value in coefficients]
+
+    @staticmethod
+    def _poly_eval(coefficients: list[float], x: torch.tensor) -> torch.tensor:
+        out = torch.zeros_like(x)
+        for value in reversed(coefficients):
+            out = out * x + value
+        return out
+
+    @staticmethod
+    def gaussian_modulated_sine_normal_velocity(
+        time: float | torch.tensor,
+        derivative_order: int,
+        *,
+        amplitude: float = 1.0,
+        frequency: float = 1000.0,
+        delay: float = 0.0,
+        sigma: float = 1.0,
+        phase: float = 0.0,
+        baseline: float = 0.0,
+    ) -> float | torch.tensor:
+        """Evaluate the n-th time derivative of a Gaussian-modulated sine."""
+
+        omega = 2.0 * numpy.pi * frequency
+        angular_sigma = omega * sigma
+        P = [1.0]
+        Q = [0.0]
+        for _ in range(int(derivative_order)):
+            P, Q = (
+                AbsorbBC._poly_add(
+                    AbsorbBC._poly_derivative(P),
+                    AbsorbBC._poly_scale(AbsorbBC._poly_multiply_by_x(P), -1.0),
+                    AbsorbBC._poly_scale(Q, -angular_sigma),
+                ),
+                AbsorbBC._poly_add(
+                    AbsorbBC._poly_derivative(Q),
+                    AbsorbBC._poly_scale(AbsorbBC._poly_multiply_by_x(Q), -1.0),
+                    AbsorbBC._poly_scale(P, angular_sigma),
+                ),
+            )
+
+        if torch.is_tensor(time):
+            u = (time - delay) / sigma
+            envelope = torch.exp(-0.5 * u * u)
+            theta = omega * time + phase
+            value = amplitude * envelope * (
+                AbsorbBC._poly_eval(P, u) * torch.sin(theta)
+                + AbsorbBC._poly_eval(Q, u) * torch.cos(theta)
+            ) / (sigma ** int(derivative_order))
+            if derivative_order == 0 and baseline:
+                value = value + baseline
+            return value
+
+        u_float = (float(time) - delay) / sigma
+        envelope_float = numpy.exp(-0.5 * u_float * u_float)
+        theta_float = omega * float(time) + phase
+        p_value = sum(value * (u_float**order) for order, value in enumerate(P))
+        q_value = sum(value * (u_float**order) for order, value in enumerate(Q))
+        value_float = amplitude * envelope_float * (
+            p_value * numpy.sin(theta_float)
+            + q_value * numpy.cos(theta_float)
+        ) / (sigma ** int(derivative_order))
+        if derivative_order == 0:
+            value_float += baseline
+        return float(value_float)
+
+    @staticmethod
+    def evaluate_normal_velocity(
+        config: dict,
+        time: float | torch.tensor,
+        derivative_order: int = 0,
+    ) -> float | torch.tensor:
+        kind = config.get("kind", "gaussian_modulated_sine")
+        if kind != "gaussian_modulated_sine":
+            raise ValueError(f"Unsupported normal_velocity kind: {kind}")
+        return AbsorbBC.gaussian_modulated_sine_normal_velocity(
+            time,
+            derivative_order,
+            amplitude=float(config.get("amplitude", 1.0)),
+            frequency=float(config.get("frequency", 1000.0)),
+            delay=float(config.get("delay", 0.0)),
+            sigma=float(config.get("sigma", 1.0)),
+            phase=float(config.get("phase", 0.0)),
+            baseline=float(config.get("baseline", 0.0)),
+        )
+
+    def prepare_prescribed_normal_velocity(
+        self,
+        time: float | torch.tensor,
+        derivative_order: int = 0,
+    ) -> None:
+        """Fill prescribed normal-velocity values for the current Taylor stage."""
+
+        for index, paras in enumerate(self.BCpara):
+            config = paras.get("normal_velocity")
+            if config is None:
+                continue
+            value = self.evaluate_normal_velocity(config, time, derivative_order)
+            target = self.BCvar[index]["normal_velocity"]
+            if torch.is_tensor(value):
+                target.copy_(value.to(device=target.device, dtype=target.dtype).expand_as(target))
+            else:
+                target.fill_(float(value))
 
     # -----------------------------------------------------------------------------------------------------------------
     # ------------------------------------------------------------------------------------------------------------------

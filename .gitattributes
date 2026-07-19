@@ -6,6 +6,11 @@
 # Matlab data files
 *.mat binary
 
+# COMSOL/CAD and image reference assets
+*.mph binary
+*.step binary
+*.png binary
+
 # Compiled Python files
 *.pyc binary
 

@@ -4,7 +4,7 @@ import logging
 from .acoustics_simulation import AcousticsSimulation
 from .mesh import Mesh
 from .boundary_condition import BoundaryCondition, AbsorbBC
-from .initial_condition import InitialCondition, Monopole_IC, RadialPressurePulse2D_IC
+from .initial_condition import InitialCondition, Monopole_IC, RadialPressurePulse2D_IC, Zero_IC
 from .preprocessing import Flux, UpwindFlux, MaterialUpwindFlux2D
 from .time_integration import TimeIntegrator, TSI_TI
 from .postprocessing import Monopole_postprocessor

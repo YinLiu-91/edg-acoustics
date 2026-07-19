@@ -2795,6 +2795,7 @@ class AcousticsSimulation:
                 ),
                 "RI_value": float(paras["RI"]),
                 "simple_RI": "RP" not in paras and "CP" not in paras,
+                "has_normal_velocity": "normal_velocity" in paras,
                 "boundary_q": torch.empty(
                     (4, bcvar["vn"].numel()),
                     device=self.device,
@@ -3505,7 +3506,11 @@ class AcousticsSimulation:
     ):
         n_boundary = bcvar["vn"].numel()
         block_size = 256
-        if self._use_triton_boundary_ri and bc_cache["simple_RI"]:
+        if (
+            self._use_triton_boundary_ri
+            and bc_cache["simple_RI"]
+            and not bc_cache["has_normal_velocity"]
+        ):
             self._ri_tensor.fill_(bc_cache["RI_value"])
             boundary_ri_flux_kernel[(triton.cdiv(n_boundary, block_size),)](
                 q_flat,
@@ -3528,7 +3533,11 @@ class AcousticsSimulation:
             )
             return
 
-        if self._use_triton_boundary_ade and "CP_B" in bc_cache:
+        if (
+            self._use_triton_boundary_ade
+            and "CP_B" in bc_cache
+            and not bc_cache["has_normal_velocity"]
+        ):
             self._ri_tensor.fill_(bc_cache["RI_value"])
             boundary_rp_cp_flux_kernel[(triton.cdiv(n_boundary, block_size),)](
                 q_flat,
@@ -3562,7 +3571,11 @@ class AcousticsSimulation:
             )
             return
 
-        if self._use_triton_boundary_ade and "RP_A" in bc_cache:
+        if (
+            self._use_triton_boundary_ade
+            and "RP_A" in bc_cache
+            and not bc_cache["has_normal_velocity"]
+        ):
             self._ri_tensor.fill_(bc_cache["RI_value"])
             boundary_rp_flux_kernel[(triton.cdiv(n_boundary, block_size),)](
                 q_flat,
@@ -3631,6 +3644,10 @@ class AcousticsSimulation:
                 -bc_cache["CP_alpha"] * kexi2
                 + bc_cache["CP_beta"] * bc_cache["kexi1_temp"]
             )
+
+        if bc_cache["has_normal_velocity"]:
+            bcvar["in"].copy_(bcvar["ou"])
+            bcvar["in"].add_(bcvar["normal_velocity"], alpha=-2.0)
 
         torch.add(bcvar["ou"], bcvar["in"], out=incoming_outgoing)
         torch.mul(boundary_p, 1.0 / self.rho0, out=boundary_temp)
@@ -5004,6 +5021,7 @@ class AcousticsSimulation:
         progress = kwargs.get("progress", True)
         synchronize_timing = kwargs.get("synchronize_timing", False)
         record_receivers = kwargs.get("record_receivers", True)
+        output_times = kwargs.get("output_times", None)
         save_step = int(kwargs.get("save_step", 0) or 0)
         save_mesh_step = int(kwargs.get("save_mesh_step", 0) or 0)
         save_mesh_dir = kwargs.get("save_mesh_dir", None)
@@ -5020,6 +5038,10 @@ class AcousticsSimulation:
             progress or "save_step" in kwargs
         ):
             cuda_graph_chunk_steps = 1
+        if use_cuda_graph and getattr(
+            self.BC, "has_prescribed_normal_velocity", False
+        ):
+            cuda_graph_chunk_steps = 1
         if progress:
             print(f"Total simulation time is {total_time}")
             print(f"Total number of simulation steps is {self.Ntimesteps}")
@@ -5029,6 +5051,26 @@ class AcousticsSimulation:
             device=device_ini.device,
             dtype=device_ini.dtype,
         )
+        self.prec_times = numpy.arange(
+            1, self.Ntimesteps + 1, dtype=float
+        ) * self.time_integrator.dt
+        if output_times is not None:
+            output_times = numpy.asarray(output_times, dtype=float)
+            if output_times.ndim != 1:
+                raise ValueError("output_times must be a one-dimensional array")
+            if output_times.size and (
+                output_times[0] < 0.0
+                or output_times[-1] > total_time + 1.0e-12
+                or numpy.any(numpy.diff(output_times) < 0.0)
+            ):
+                raise ValueError(
+                    "output_times must be sorted and lie inside [0, total_time]"
+                )
+            initial_receiver_sample = torch.empty(
+                (self.rec.shape[1],), device=device_ini.device, dtype=device_ini.dtype
+            )
+            if record_receivers:
+                self._sample_receivers(initial_receiver_sample)
 
         cuda_step_graph = None
         cuda_sample_chunk = None
@@ -5046,6 +5088,11 @@ class AcousticsSimulation:
         StepIndex = 0
         while StepIndex < self.Ntimesteps:
             # for StepIndex in range(1):
+            if hasattr(self.time_integrator, "set_current_time"):
+                time_reference = getattr(self, "Q_flat", self.P)
+                self.time_integrator.set_current_time(
+                    StepIndex * self.time_integrator.dt, time_reference
+                )
 
             if (
                 cuda_step_graph is not None
@@ -5132,6 +5179,27 @@ class AcousticsSimulation:
         self.last_time_integration_record_receivers = record_receivers
         if progress:
             print(f"time: {self.last_time_integration_elapsed_s} s")
+        if output_times is not None and record_receivers:
+            sample_times = numpy.concatenate(([0.0], self.prec_times))
+            sample_values = numpy.concatenate(
+                (
+                    initial_receiver_sample.detach().cpu().numpy()[:, None],
+                    self.prec.detach().cpu().numpy(),
+                ),
+                axis=1,
+            )
+            interpolated = numpy.vstack(
+                [
+                    numpy.interp(output_times, sample_times, values)
+                    for values in sample_values
+                ]
+            )
+            self.prec_all_steps = self.prec
+            self.prec_all_step_times = self.prec_times
+            self.prec = torch.as_tensor(
+                interpolated, device=device_ini.device, dtype=device_ini.dtype
+            )
+            self.prec_times = output_times
         return self.prec
 
     def save_results_on_the_run(self, format: str = "mat"):
@@ -5140,6 +5208,14 @@ class AcousticsSimulation:
         Args:
             format (str): the format of the file to save the results. Can be either 'mat' or 'npy'. The default format is 'mat'.
         """
+        ic_metadata = getattr(self.IC, "metadata", {})
+        source_xyz = getattr(self.IC, "source_xyz", numpy.array([]))
+        halfwidth = getattr(self.IC, "halfwidth", numpy.nan)
+        prec_times = getattr(
+            self,
+            "prec_times",
+            numpy.arange(1, self.Ntimesteps + 1, dtype=float) * self.time_integrator.dt,
+        )
         if format == "mat":
             scipy.io.savemat(
                 "results_on_the_run.mat",
@@ -5155,8 +5231,10 @@ class AcousticsSimulation:
                     "rho0": self.rho0,
                     "c0": self.c0,
                     "mesh_filename": self.mesh.filename,
-                    "source_xyz": self.IC.source_xyz,
-                    "halfwidth": self.IC.halfwidth,
+                    "source_xyz": source_xyz,
+                    "halfwidth": halfwidth,
+                    "IC_metadata": ic_metadata,
+                    "prec_times": prec_times,
                     "Nx": self.Nx,
                     "Nt": self.time_integrator.Nt,
                     "CFL": self.time_integrator.CFL,
@@ -5176,8 +5254,10 @@ class AcousticsSimulation:
                 rho0=self.rho0,
                 c0=self.c0,
                 mesh_filename=self.mesh.filename,
-                source_xyz=self.IC.source_xyz,
-                halfwidth=self.IC.halfwidth,
+                source_xyz=source_xyz,
+                halfwidth=halfwidth,
+                IC_metadata=ic_metadata,
+                prec_times=prec_times,
                 Nx=self.Nx,
                 Nt=self.time_integrator.Nt,
                 CFL=self.time_integrator.CFL,

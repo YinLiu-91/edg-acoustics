@@ -11,7 +11,7 @@ import torch
 import math
 import edg_acoustics.device_ini as device_ini
 
-__all__ = ["InitialCondition", "Monopole_IC", "RadialPressurePulse2D_IC"]
+__all__ = ["InitialCondition", "Monopole_IC", "RadialPressurePulse2D_IC", "Zero_IC"]
 
 
 class InitialCondition(abc.ABC):
@@ -111,6 +111,33 @@ class Monopole_IC(InitialCondition):
 
     def VZinit(self, xyz: torch.tensor):
         """Setup initial condition for velocity in z-direction."""
+        return torch.zeros(
+            [xyz.shape[1], xyz.shape[2]], device=xyz.device, dtype=device_ini.dtype
+        )
+
+
+class Zero_IC(InitialCondition):
+    """Zero pressure and velocity initial condition."""
+
+    def __init__(self):
+        self.metadata = {"kind": "zero"}
+
+    def Pinit(self, xyz: torch.tensor):
+        return torch.zeros(
+            [xyz.shape[1], xyz.shape[2]], device=xyz.device, dtype=device_ini.dtype
+        )
+
+    def VXinit(self, xyz: torch.tensor):
+        return torch.zeros(
+            [xyz.shape[1], xyz.shape[2]], device=xyz.device, dtype=device_ini.dtype
+        )
+
+    def VYinit(self, xyz: torch.tensor):
+        return torch.zeros(
+            [xyz.shape[1], xyz.shape[2]], device=xyz.device, dtype=device_ini.dtype
+        )
+
+    def VZinit(self, xyz: torch.tensor):
         return torch.zeros(
             [xyz.shape[1], xyz.shape[2]], device=xyz.device, dtype=device_ini.dtype
         )

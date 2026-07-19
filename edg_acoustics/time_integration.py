@@ -107,7 +107,39 @@ class TSI_TI(TimeIntegrator):
         )
         self._state_buffers = None
         self._packed_state_buffer = None
+        self._current_time_tensor = None
         print("TSI_TI initialized.")
+
+    def set_current_time(self, time_value: float, reference: torch.tensor | None = None):
+        if reference is None and self._current_time_tensor is None:
+            self._current_time_tensor = torch.tensor(time_value, dtype=torch.float64)
+            return
+        if (
+            reference is not None
+            and (
+                self._current_time_tensor is None
+                or self._current_time_tensor.device != reference.device
+                or self._current_time_tensor.dtype != reference.dtype
+            )
+        ):
+            self._current_time_tensor = torch.empty(
+                (), device=reference.device, dtype=reference.dtype
+            )
+        self._current_time_tensor.fill_(float(time_value))
+
+    def _prepare_boundary_time_stage(
+        self,
+        BC: edg_acoustics.AbsorbBC,
+        derivative_order: int,
+        reference: torch.tensor,
+    ):
+        if not getattr(BC, "has_prescribed_normal_velocity", False):
+            return
+        if self._current_time_tensor is None:
+            self.set_current_time(0.0, reference)
+        BC.prepare_prescribed_normal_velocity(
+            self._current_time_tensor, derivative_order
+        )
 
     def _copy_state_to_buffers(
         self,
@@ -186,7 +218,8 @@ class TSI_TI(TimeIntegrator):
         if self._prepare_auxiliary_state is not None:
             self._prepare_auxiliary_state()
 
-        for coefficient in self.taylor_coefficients:
+        for derivative_order, coefficient in enumerate(self.taylor_coefficients):
+            self._prepare_boundary_time_stage(BC, derivative_order, Q_flat)
             if self.L_operator_packed_accumulate is not None:
                 Q0, BC.BCvar = self.L_operator_packed_accumulate(
                     Q0, BC.BCvar, Q_flat, coefficient
@@ -227,7 +260,8 @@ class TSI_TI(TimeIntegrator):
             self._prepare_auxiliary_state()
 
         ##########################
-        for Tind, coefficient in enumerate(self.taylor_coefficients, start=1):
+        for derivative_order, coefficient in enumerate(self.taylor_coefficients):
+            self._prepare_boundary_time_stage(BC, derivative_order, P)
             # Compute L (L^{Tind-1} q)
             P0, Vx0, Vy0, Vz0, BC.BCvar = self.L_operator(P0, Vx0, Vy0, Vz0, BC.BCvar)
 

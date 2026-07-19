@@ -1,0 +1,159 @@
+% Fit COMSOL car-cabin admittance tables to EDG AbsorbBC coefficients.
+%
+% The input tables store acoustic admittance Y.  EDG AbsorbBC expects a
+% rational approximation of the normal-incidence reflection coefficient
+% R = (1 - rho0*c0*Y) / (1 + rho0*c0*Y).
+
+function fit_car_cabin_admittance()
+close all;
+
+case_dir = fileparts(mfilename('fullpath'));
+repo_fit_dir = fullfile(case_dir, '..', 'material_fit');
+addpath(repo_fit_dir);
+
+rho0 = 1.2;
+c0 = 343.0;
+z0 = rho0 * c0;
+freq_max_passivity = 2000.0;
+n_iter = 20;
+
+materials = {
+  'seat',   'seat_admittance_63.txt',   12, 0.08;
+  'carpet', 'carpet_admittance_63.txt',  8, 5.0e-4;
+  'roof',   'roof_admittance_63.txt',    8, 5.0e-4;
+};
+
+for material_index = 1:size(materials, 1)
+  name = materials{material_index, 1};
+  input_name = materials{material_index, 2};
+  n_poles = materials{material_index, 3};
+  rms_limit = materials{material_index, 4};
+  input_path = fullfile(case_dir, input_name);
+
+  data = dlmread(input_path, '', 5, 0);
+  freq = data(:, 1).';
+  admittance = data(:, 2).' + 1i * data(:, 3).';
+  keep = freq > 0;
+  freq = freq(keep);
+  admittance = admittance(keep);
+
+  omega = 2 * pi * freq;
+  s = 1i * omega;
+  target = (1 - z0 * admittance) ./ (1 + z0 * admittance);
+  ns = length(freq);
+
+  opts.asymp = 2;
+  opts.cmplx_ss = 1;
+  opts.relax = 1;
+  opts.stable = 1;
+  opts.skip_pole = 0;
+  opts.skip_res = 1;
+  opts.spy1 = 0;
+  opts.spy2 = 0;
+  opts.logx = 0;
+  opts.logy = 1;
+  opts.errplot = 0;
+  opts.phaseplot = 0;
+  opts.legend = 0;
+
+  pole_freq = logspace(log10(max(min(freq), 1.0)), log10(max(freq)), n_poles);
+  poles = -2 * pi * pole_freq;
+  weight = ones(1, ns);
+
+  fprintf('Fitting %s with %d poles\n', name, n_poles);
+  for iter = 1:n_iter
+    if iter == n_iter
+      opts.skip_res = 0;
+    end
+    [SER, poles, rmserr, fit] = vectfit3(target, s, poles, weight, opts);
+  end
+
+  A = diag(full(SER.A));
+  C = SER.C(:).';
+  RI = real(SER.D(1));
+
+  AS = [];
+  lambdaS = [];
+  BS = [];
+  CS = [];
+  alphaS = [];
+  betaS = [];
+
+  for pole_index = 1:length(A)
+    pole = A(pole_index);
+    residue = C(pole_index);
+    if abs(imag(pole)) < 1.0e-8
+      lambdaS(end + 1) = -real(pole);
+      AS(end + 1) = real(residue);
+    elseif imag(pole) > 0
+      alphaS(end + 1) = -real(pole);
+      betaS(end + 1) = imag(pole);
+      BS(end + 1) = 2 * real(residue);
+      CS(end + 1) = -2 * imag(residue);
+    end
+  end
+
+  scale = find_passive_scale(RI, AS, lambdaS, BS, CS, alphaS, betaS, freq_max_passivity);
+  AS = AS * scale;
+  BS = BS * scale;
+  CS = CS * scale;
+
+  fit_edg = eval_edg_reflection(omega, RI, AS, lambdaS, BS, CS, alphaS, betaS);
+  rms_error = sqrt(mean(abs(fit_edg - target).^2));
+  max_error = max(abs(fit_edg - target));
+  omega_check = linspace(1, 2 * pi * freq_max_passivity, 5000);
+  max_abs_R = max(abs(eval_edg_reflection(omega_check, RI, AS, lambdaS, BS, CS, alphaS, betaS)));
+
+  fprintf('  rms=%g max_err=%g max_abs_R=%g scale=%g\n', ...
+          rms_error, max_error, max_abs_R, scale);
+  if rms_error > rms_limit
+    error('%s fit RMS %g exceeds limit %g', name, rms_error, rms_limit);
+  end
+  if max_abs_R > 1.0 + 1.0e-8
+    error('%s fit is not passive: max |R| = %g', name, max_abs_R);
+  end
+
+  ApproxValue = fit_edg;
+  trueValue = target;
+  output_path = fullfile(case_dir, [name '.mat']);
+  save('-mat', output_path, 'RI', 'AS', 'lambdaS', 'BS', 'CS', ...
+       'alphaS', 'betaS', 'freq', 'ApproxValue', 'trueValue', ...
+       'rms_error', 'max_error', 'max_abs_R');
+end
+end
+
+function value = eval_edg_reflection(omega, RI, AS, lambdaS, BS, CS, alphaS, betaS)
+  value = RI * ones(size(omega));
+  for k = 1:length(AS)
+    value = value + AS(k) ./ (1i * omega + lambdaS(k));
+  end
+  for k = 1:length(BS)
+    value = value + 0.5 * ( ...
+      (BS(k) + 1i * CS(k)) ./ (alphaS(k) + 1i * betaS(k) + 1i * omega) + ...
+      (BS(k) - 1i * CS(k)) ./ (alphaS(k) - 1i * betaS(k) + 1i * omega));
+  end
+end
+
+function scale = find_passive_scale(RI, AS, lambdaS, BS, CS, alphaS, betaS, freq_max)
+  omega_check = linspace(1, 2 * pi * freq_max, 5000);
+  current = max(abs(eval_edg_reflection(omega_check, RI, AS, lambdaS, BS, CS, alphaS, betaS)));
+  if current <= 1.0
+    scale = 1.0;
+    return;
+  end
+  lo = 0.0;
+  hi = 1.0;
+  for iter = 1:40
+    mid = 0.5 * (lo + hi);
+    trial = max(abs(eval_edg_reflection(omega_check, RI, AS * mid, lambdaS, ...
+                                        BS * mid, CS * mid, alphaS, betaS)));
+    if trial <= 1.0
+      lo = mid;
+    else
+      hi = mid;
+    end
+  end
+  scale = lo;
+end
+
+fit_car_cabin_admittance();
