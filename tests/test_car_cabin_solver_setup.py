@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import edg_acoustics
 import numpy
 import pytest
 import scipy.io
@@ -13,11 +14,6 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CASE_DIR = REPO_ROOT / "examples" / "car_cabin_acoustics_transient_63_cleared"
 MAIN_PATH = CASE_DIR / "main.py"
-sys.path.insert(0, str(REPO_ROOT))
-for module_name in list(sys.modules):
-    if module_name == "edg_acoustics" or module_name.startswith("edg_acoustics."):
-        sys.modules.pop(module_name, None)
-import edg_acoustics
 
 
 def load_case_main():
@@ -83,6 +79,91 @@ def test_absorbbc_prepares_prescribed_normal_velocity_tensor():
         atol=1.0e-12,
         rtol=0.0,
     )
+
+
+@pytest.mark.parametrize("use_scaled_flux_kernels", [False, True])
+def test_normal_velocity_boundary_flux_uses_local_fscale_when_scaled(
+    use_scaled_flux_kernels: bool,
+):
+    sim = edg_acoustics.AcousticsSimulation.__new__(edg_acoustics.AcousticsSimulation)
+    sim.rho0 = 1.2
+    sim.c0 = 343.0
+    sim._use_triton_boundary_ri = False
+    sim._use_triton_boundary_ade = False
+    sim._use_scaled_flux_kernels = use_scaled_flux_kernels
+
+    dtype = torch.float64
+    n_boundary = 2
+    q_flat = torch.tensor([2.0, -1.0, 0.1, -0.2, 0.0, 0.0, 0.0, 0.0], dtype=dtype)
+    flux_flat = torch.zeros_like(q_flat)
+    normal_velocity = torch.tensor([0.35, -0.05], dtype=dtype)
+    fscale = torch.tensor([2.0, 5.0], dtype=dtype)
+    node = {
+        "vmap_q": torch.arange(4 * n_boundary),
+        "flux_map_q": torch.arange(4 * n_boundary),
+        "nx": torch.ones(n_boundary, dtype=dtype),
+        "ny": torch.zeros(n_boundary, dtype=dtype),
+        "nz": torch.zeros(n_boundary, dtype=dtype),
+        "fscale": fscale,
+    }
+    bcvar = {
+        "vn": torch.zeros(n_boundary, dtype=dtype),
+        "ou": torch.zeros(n_boundary, dtype=dtype),
+        "in": torch.zeros(n_boundary, dtype=dtype),
+        "normal_velocity": normal_velocity.clone(),
+    }
+    bc_cache = {
+        "RI": torch.ones(n_boundary, dtype=dtype),
+        "simple_RI": True,
+        "has_normal_velocity": True,
+        "boundary_q": torch.empty((4, n_boundary), dtype=dtype),
+        "boundary_temp": torch.empty(n_boundary, dtype=dtype),
+        "boundary_flux": torch.empty((4, n_boundary), dtype=dtype),
+        "incoming_outgoing": torch.empty(n_boundary, dtype=dtype),
+    }
+
+    sim._compute_boundary_flux(bc_cache, node, bcvar, q_flat, flux_flat)
+
+    vn = q_flat[2:4]
+    expected = torch.zeros((4, n_boundary), dtype=dtype)
+    expected[0] = sim.rho0 * sim.c0**2 * (vn - normal_velocity)
+    expected[1] = sim.c0 * (normal_velocity - vn)
+    if use_scaled_flux_kernels:
+        expected *= fscale.unsqueeze(0)
+
+    assert torch.allclose(flux_flat, expected.reshape(-1), rtol=1.0e-12, atol=1.0e-12)
+    assert torch.allclose(bcvar["normal_velocity"], normal_velocity)
+
+
+def test_save_results_on_the_run_writes_completed_checkpoint(tmp_path: Path):
+    sim = edg_acoustics.AcousticsSimulation.__new__(edg_acoustics.AcousticsSimulation)
+    sim.IC = SimpleNamespace(
+        metadata={"kind": "unit"},
+        source_xyz=numpy.array([1.0, 2.0, 3.0]),
+        halfwidth=0.25,
+    )
+    sim.BC = SimpleNamespace(BCpara=[{"label": 1, "RI": 1.0}])
+    sim.prec = torch.arange(10, dtype=torch.float64).reshape(1, 10)
+    sim.prec_times = numpy.arange(1, 11, dtype=float) * 0.1
+    sim.rec = numpy.array([[0.0], [0.0], [0.0]])
+    sim.time_integrator = SimpleNamespace(dt=0.1, Nt=4, CFL=0.5)
+    sim.Ntimesteps = 10
+    sim.Np = 4
+    sim.N_tets = 2
+    sim.rho0 = 1.2
+    sim.c0 = 343.0
+    sim.mesh = SimpleNamespace(filename="dummy.msh")
+    sim.Nx = 3
+
+    sim.save_results_on_the_run(output_dir=tmp_path, format="mat", step_index=4)
+
+    data = scipy.io.loadmat(tmp_path / "results_on_the_run.mat")
+    assert data["prec"].shape == (1, 4)
+    assert data["prec_times"].reshape(-1).tolist() == pytest.approx([0.1, 0.2, 0.3, 0.4])
+    assert int(data["current_step"].reshape(-1)[0]) == 4
+    assert float(data["current_time"].reshape(-1)[0]) == pytest.approx(0.4)
+    assert int(data["Ntimesteps"].reshape(-1)[0]) == 10
+    assert float(data["total_time"].reshape(-1)[0]) == pytest.approx(1.0)
 
 
 def test_car_cabin_boundary_parameters_match_comsol_case():

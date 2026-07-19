@@ -218,6 +218,31 @@ rtk env EDG_ACOUSTICS_DEVICE=cpu python main.py \
 
 CUDA 显存足够时可以使用默认 `EDG_ACOUSTICS_DEVICE=auto` 和 `--use-cuda-graph`。含 `normal_velocity` 源的边界会自动走通用 torch 边界通量路径，避免误用无源 RI/ADE 专用 kernel；CUDA graph 仍可捕获该路径，但 chunk size 固定为 `1`，使每步 replay 前能更新当前物理时间。
 
+若需要每 10000 步保存一次 receiver 历史：
+
+```bash
+rtk env EDG_ACOUSTICS_DEVICE=auto python main.py \
+  --mesh car_cabin_comsol_virtual_hmax0p114_hmin0p02.msh \
+  --total-time 0.06 \
+  --save-step 10000 \
+  --output result.mat
+```
+
+`--save-step N` 写出的是当前已经完成的 receiver pressure 历史，文件为本目录下的 `results_on_the_run.mat`。该文件中的 `prec` 和 `prec_times` 只包含 `current_step` 之前的数据；`Ntimesteps` 和 `total_time` 仍记录计划运行的总步数和总物理时间，便于判断 checkpoint 属于完整运行的哪一段。
+
+### `normal_velocity` 边界通量缩放修复
+
+本 case 的 COMSOL source 是边界法向速度 `vn(t)`，EDG 中对应零初始场加 prescribed normal velocity。对外法向速度 `g(t)`，通用边界通量在乘几何缩放前可写为：
+
+```text
+F_p = rho0*c0^2*(v_n - g)
+F_v = c0*(g - v_n)*n
+```
+
+其中 `v_n = v dot n`。DG surface lift 前还必须乘每个面节点的几何因子 `Fscale = sJ/J`。此前 CUDA 默认的 local scaled-flux 模式下，RI/ADE 专用 kernel 已经在 kernel 内乘了 `Fscale`，但含 `normal_velocity` 的通用 torch fallback 漏乘该因子，导致 Tweeter source 边界和同一边界上的 hard-wall penalty 尺度错误，长时间推进后 receiver pressure 指数放大。表现就是 10000 步 checkpoint 中 `prec` 可达到 `1e84` 量级。
+
+修复后，通用 fallback 在 `_use_scaled_flux_kernels=True` 时也局部乘 `node["fscale"]`；当 `EDG_ACOUSTICS_SCALED_FLUX_KERNELS=0` 时仍沿用全局统一缩放，不会重复乘。之前生成的 `results_on_the_run.mat` 若包含异常巨大的 `prec`，应视为无效诊断文件，需要用修复后的代码重新运行。
+
 ## 与 EDG 求解边界条件的关系
 
 这些 physical labels 只是把 COMSOL 边界语义带入 mesh。完整复现 COMSOL 结果还需要把 COMSOL pressure-acoustics 边界条件转换成 EDG 当前求解方程使用的边界参数：

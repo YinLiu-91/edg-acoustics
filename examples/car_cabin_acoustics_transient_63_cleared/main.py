@@ -214,6 +214,7 @@ def main() -> int:
         total_time=args.total_time,
         delta_step=max(1, estimated_steps // 20) if args.progress else 0,
         save_step=args.save_step,
+        save_results_dir=str(CASE_DIR),
         save_mesh_step=args.save_mesh_step,
         save_mesh_dir=str(CASE_DIR / "results_on_the_run_msh"),
         format="mat",

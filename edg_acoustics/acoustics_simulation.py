@@ -16,6 +16,7 @@ import time
 import torch
 import sys
 import os
+from pathlib import Path
 import triton
 import triton.language as tl
 
@@ -3661,6 +3662,10 @@ class AcousticsSimulation:
         boundary_temp.add_(bcvar["in"], alpha=0.5)
         boundary_temp.mul_((self.c0**2) * self.rho0)
         boundary_flux[0].copy_(boundary_temp)
+        if self._use_scaled_flux_kernels:
+            # The generic boundary path is used for prescribed normal velocity.
+            # Keep its metric scaling consistent with the specialized kernels.
+            boundary_flux.mul_(node["fscale"].unsqueeze(0))
         flux_flat[node["flux_map_q"]] = boundary_flux.reshape(-1)
 
     def _snapshot_time_state(self):
@@ -4986,6 +4991,7 @@ class AcousticsSimulation:
             total_time (float): total simulation time to be performed, determines the number of time steps given the current time step.
             delta_step (int): print solution every delta_step time steps.
             save_step (int): save solution every save_step time steps.
+            save_results_dir (str): output directory for receiver checkpoints.
             save_mesh_step (int): export a gmsh mesh snapshot every save_mesh_step time steps.
             save_mesh_dir (str): output directory for gmsh snapshots.
             format (str): the format of the file to save the results. Can be either 'mat' or 'npy'. The default format is 'mat'.
@@ -5023,6 +5029,7 @@ class AcousticsSimulation:
         record_receivers = kwargs.get("record_receivers", True)
         output_times = kwargs.get("output_times", None)
         save_step = int(kwargs.get("save_step", 0) or 0)
+        save_results_dir = kwargs.get("save_results_dir", None)
         save_mesh_step = int(kwargs.get("save_mesh_step", 0) or 0)
         save_mesh_dir = kwargs.get("save_mesh_dir", None)
         save_mesh_format = kwargs.get("save_mesh_format", "gmsh22")
@@ -5129,6 +5136,7 @@ class AcousticsSimulation:
                 self._sample_receivers(self._sample_output)
                 self.prec[:, StepIndex].copy_(self._sample_output)
 
+            completed_step = StepIndex + 1
             if (
                 progress
                 and "delta_step" in kwargs
@@ -5158,13 +5166,17 @@ class AcousticsSimulation:
                 )
                 print(f"P at mic locations {self.prec[:,StepIndex]}")
 
-            if save_step > 0 and StepIndex % save_step == 0:
-                self.save_results_on_the_run(format=kwargs.get("format", "mat"))
-            if save_mesh_step > 0 and StepIndex % save_mesh_step == 0:
+            if save_step > 0 and completed_step % save_step == 0:
+                self.save_results_on_the_run(
+                    output_dir=save_results_dir,
+                    format=kwargs.get("format", "mat"),
+                    step_index=completed_step,
+                )
+            if save_mesh_step > 0 and completed_step % save_mesh_step == 0:
                 self.save_mesh_results_on_the_run(
                     output_dir=save_mesh_dir,
-                    step_index=StepIndex + 1,
-                    real_time=(StepIndex + 1) * self.time_integrator.dt,
+                    step_index=completed_step,
+                    real_time=completed_step * self.time_integrator.dt,
                     file_format=save_mesh_format,
                 )
             StepIndex += 1
@@ -5202,66 +5214,63 @@ class AcousticsSimulation:
             self.prec_times = output_times
         return self.prec
 
-    def save_results_on_the_run(self, format: str = "mat"):
+    def save_results_on_the_run(
+        self,
+        *,
+        output_dir: str | Path | None = None,
+        format: str = "mat",
+        step_index: int | None = None,
+    ):
         """Save the temporary simulation results to a file.
 
         Args:
+            output_dir (str | Path | None): output directory for the checkpoint.
             format (str): the format of the file to save the results. Can be either 'mat' or 'npy'. The default format is 'mat'.
+            step_index (int | None): number of completed time steps included in the checkpoint.
         """
         ic_metadata = getattr(self.IC, "metadata", {})
         source_xyz = getattr(self.IC, "source_xyz", numpy.array([]))
         halfwidth = getattr(self.IC, "halfwidth", numpy.nan)
+        output_path = Path("." if output_dir is None else output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        current_step = self.Ntimesteps if step_index is None else int(step_index)
+        current_step = max(0, min(current_step, self.prec.shape[1]))
         prec_times = getattr(
             self,
             "prec_times",
             numpy.arange(1, self.Ntimesteps + 1, dtype=float) * self.time_integrator.dt,
         )
+        prec_times = numpy.asarray(prec_times, dtype=float)[:current_step]
+        if current_step > 0 and prec_times.size >= current_step:
+            current_time = float(prec_times[current_step - 1])
+        else:
+            current_time = current_step * self.time_integrator.dt
+        data = {
+            "BCpara": self.BC.BCpara,
+            "prec": self.prec[:, :current_step].detach().cpu().numpy(),
+            "rec": self.rec,
+            "dt": self.time_integrator.dt,
+            "Ntimesteps": self.Ntimesteps,
+            "total_time": self.Ntimesteps * self.time_integrator.dt,
+            "current_step": current_step,
+            "current_time": current_time,
+            "Np": self.Np,
+            "N_tets": self.N_tets,
+            "rho0": self.rho0,
+            "c0": self.c0,
+            "mesh_filename": self.mesh.filename,
+            "source_xyz": source_xyz,
+            "halfwidth": halfwidth,
+            "IC_metadata": ic_metadata,
+            "prec_times": prec_times,
+            "Nx": self.Nx,
+            "Nt": self.time_integrator.Nt,
+            "CFL": self.time_integrator.CFL,
+        }
         if format == "mat":
-            scipy.io.savemat(
-                "results_on_the_run.mat",
-                {
-                    "BCpara": self.BC.BCpara,
-                    "prec": self.prec.cpu().numpy(),
-                    "rec": self.rec,
-                    "dt": self.time_integrator.dt,
-                    "Ntimesteps": self.Ntimesteps,
-                    "total_time": self.Ntimesteps * self.time_integrator.dt,
-                    "Np": self.Np,
-                    "N_tets": self.N_tets,
-                    "rho0": self.rho0,
-                    "c0": self.c0,
-                    "mesh_filename": self.mesh.filename,
-                    "source_xyz": source_xyz,
-                    "halfwidth": halfwidth,
-                    "IC_metadata": ic_metadata,
-                    "prec_times": prec_times,
-                    "Nx": self.Nx,
-                    "Nt": self.time_integrator.Nt,
-                    "CFL": self.time_integrator.CFL,
-                },
-            )
+            scipy.io.savemat(output_path / "results_on_the_run.mat", data)
         elif format == "npy":
-            numpy.savez(
-                "results_on_the_run.npz",
-                BCpara=self.BC.BCpara,
-                prec=self.prec.cpu().numpy(),
-                rec=self.rec,
-                dt=self.time_integrator.dt,
-                Ntimesteps=self.Ntimesteps,
-                total_time=self.Ntimesteps * self.time_integrator.dt,
-                Np=self.Np,
-                N_tets=self.mesh.N_tets,
-                rho0=self.rho0,
-                c0=self.c0,
-                mesh_filename=self.mesh.filename,
-                source_xyz=source_xyz,
-                halfwidth=halfwidth,
-                IC_metadata=ic_metadata,
-                prec_times=prec_times,
-                Nx=self.Nx,
-                Nt=self.time_integrator.Nt,
-                CFL=self.time_integrator.CFL,
-            )
+            numpy.savez(output_path / "results_on_the_run.npz", **data)
         else:
             raise ValueError(
                 "Invalid format, the format should be either 'mat' or 'npy'."
