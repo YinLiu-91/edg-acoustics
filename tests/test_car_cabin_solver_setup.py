@@ -180,6 +180,23 @@ def test_car_cabin_boundary_parameters_match_comsol_case():
     assert by_label[21]["normal_velocity"]["sigma"] == pytest.approx(0.0005)
 
 
+def test_car_cabin_receivers_match_comsol_microphone_response_points():
+    module = load_case_main()
+
+    assert module.COMSOL_MICROPHONE_POINT_IDS.tolist() == [197, 391, 402]
+    numpy.testing.assert_allclose(
+        module.RECEIVER,
+        numpy.array(
+            [
+                [2.0, 2.5, 2.5],
+                [-0.05, -0.55, 0.55],
+                [1.2, 1.2, 1.2],
+            ],
+            dtype=float,
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "rms_limit"),
     (("seat", 0.08), ("carpet", 5.0e-4), ("roof", 5.0e-4)),

@@ -35,7 +35,17 @@ NX = 4
 NT = 4
 CFL = 0.5
 
-RECEIVER = numpy.array([[2.4], [-0.45], [1.2]], dtype=float)
+# COMSOL result group ``pg12`` ("Microphone Response") plots ``pate.p_t`` at
+# microphone-array point entities 197, 391, and 402, in this order.
+COMSOL_MICROPHONE_POINT_IDS = numpy.array([197, 391, 402], dtype=numpy.int32)
+RECEIVER = numpy.array(
+    [
+        [2.0, 2.5, 2.5],
+        [-0.05, -0.55, 0.55],
+        [1.2, 1.2, 1.2],
+    ],
+    dtype=float,
+)
 
 BC_LABELS = {
     "default_hard_wall": 11,
@@ -142,7 +152,8 @@ def write_result(sim, output_path: Path) -> None:
             "BCpara": sim.BC.BCpara,
             "prec": sim.prec.detach().cpu().numpy(),
             "prec_times": numpy.asarray(sim.prec_times, dtype=float),
-            "rec": RECEIVER,
+            "rec": sim.rec,
+            "receiver_point_ids": COMSOL_MICROPHONE_POINT_IDS,
             "dt": sim.time_integrator.dt,
             "Ntimesteps": sim.Ntimesteps,
             "total_time": sim.Ntimesteps * sim.time_integrator.dt,

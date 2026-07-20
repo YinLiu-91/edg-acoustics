@@ -230,6 +230,16 @@ rtk env EDG_ACOUSTICS_DEVICE=auto python main.py \
 
 `--save-step N` 写出的是当前已经完成的 receiver pressure 历史，文件为本目录下的 `results_on_the_run.mat`。该文件中的 `prec` 和 `prec_times` 只包含 `current_step` 之前的数据；`Ntimesteps` 和 `total_time` 仍记录计划运行的总步数和总物理时间，便于判断 checkpoint 属于完整运行的哪一段。
 
+当前 `main.py` 的 receiver 已按 COMSOL `Microphone Response` 图组 `pg12/ptgr1` 对齐。COMSOL 图中三条曲线的 point entity id 为 `197, 391, 402`，对应坐标为：
+
+| COMSOL point id | x (m) | y (m) | z (m) |
+|---:|---:|---:|---:|
+| 197 | 2.0 | -0.05 | 1.2 |
+| 391 | 2.5 | -0.55 | 1.2 |
+| 402 | 2.5 | 0.55 | 1.2 |
+
+因此新生成的 `prec` 应为 `3 × Nt`，`rec` 应为上表三列坐标。若已有 `results_on_the_run.mat` 仍显示 `rec=(2.4,-0.45,1.2)` 且 `prec` 只有一行，那是早期单 receiver 设置下的旧 checkpoint，不能直接与 COMSOL 的 3 点 `Microphone Response` 对比，需要用当前代码重新运行。
+
 ### `normal_velocity` 边界通量缩放修复
 
 本 case 的 COMSOL source 是边界法向速度 `vn(t)`，EDG 中对应零初始场加 prescribed normal velocity。对外法向速度 `g(t)`，通用边界通量在乘几何缩放前可写为：
