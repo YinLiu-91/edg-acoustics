@@ -1,0 +1,39 @@
+*******************************************
+***COMSOL 6.4.0.293 progress output file***
+*******************************************
+Mon Jul 20 21:42:19 CST 2026
+COMSOL Multiphysics 6.4 (开发版本: 293) 在批处理模式下启动
+正在运行: /media/liu/research/linux/edg-muxi/edg-acoustics/examples/wave_based_room/ExportWaveBasedRoomMesh.class
+FreeTet domain selection fell back to all domains: Illegal_input_vector_illegal_entity_number
+Skipping unsupported global Size setting: Unknown_property
+           当前进度:   0 % - 自由四面体网格 1
+Memory: 1085/1085 10615/10615
+           当前进度:   0 % - 正在创建边界网格
+Memory: 1088/1088 10615/10615
+顶点单元数：468
+           当前进度:   1 % - 正在创建边界网格
+Memory: 1110/1110 10679/10679
+--         当前进度:  21 % - 正在创建边界网格
+Memory: 1114/1114 10679/10679
+--         当前进度:  22 % - 正在创建边界网格
+Memory: 1115/1115 10679/10679
+边单元数：2634
+边界单元数：12997
+----       当前进度:  49 % - 正在创建初始四面体网格
+Memory: 1118/1118 10679/10679
+-----      当前进度:  59 % - 相关边界
+Memory: 1124/1124 10659/10679
+---------  当前进度:  90 % - 正在提高单元质量
+Memory: 1127/1127 10659/10679
+---------  当前进度:  91 % - 正在提高单元质量
+---------  当前进度:  93 % - 正在提高单元质量
+---------  当前进度:  94 % - 正在提高单元质量
+---------  当前进度:  95 % - 正在提高单元质量
+---------  当前进度:  96 % - 正在提高单元质量
+单元数：52900
+最小单元质量：0.09038
+---------- 当前进度: 100 % - 正在定型网格
+Memory: 1123/1127 10659/10679
+Wrote COMSOL pure-tet NASTRAN: wave_based_room_comsol_tet_hmax0p163_hmin0p04.nas
+类运行时: 16 s.
+总时间: 16 s.

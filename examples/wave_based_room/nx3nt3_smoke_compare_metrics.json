@@ -1,0 +1,42 @@
+{
+  "num_samples": 3,
+  "time_start": 1.0262679117094606e-06,
+  "time_end": 3.078803735128382e-06,
+  "receiver_point_ids": [
+    122,
+    121,
+    53,
+    35
+  ],
+  "per_receiver": [
+    {
+      "rms_abs": 0.0,
+      "max_abs": 0.0,
+      "relative_l2": 0.0,
+      "point_id": 122
+    },
+    {
+      "rms_abs": 0.0,
+      "max_abs": 0.0,
+      "relative_l2": 0.0,
+      "point_id": 121
+    },
+    {
+      "rms_abs": 0.0,
+      "max_abs": 0.0,
+      "relative_l2": 0.0,
+      "point_id": 53
+    },
+    {
+      "rms_abs": 0.0,
+      "max_abs": 0.0,
+      "relative_l2": 0.0,
+      "point_id": 35
+    }
+  ],
+  "global": {
+    "rms_abs": 0.0,
+    "max_abs": 0.0,
+    "relative_l2": 0.0
+  }
+}
