@@ -115,7 +115,7 @@ def build_bc_parameters() -> list[dict]:
                 "frequency": F0,
                 "delay": 2.0 * T0,
                 "sigma": 0.5 * T0,
-                "phase": 0.0,
+                "phase": numpy.pi,
                 "baseline": 0.0,
             },
         },
@@ -193,7 +193,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-step", type=int, default=0)
     parser.add_argument("--save-mesh-step", type=int, default=0)
     parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--use-cuda-graph", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use-cuda-graph", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--cuda-graph-chunk-steps", type=int, default=1)
     parser.add_argument(
         "--no-comsol-output-times",
@@ -223,7 +223,7 @@ def main() -> int:
 
     sim.time_integration(
         total_time=args.total_time,
-        delta_step=max(1, estimated_steps // 20) if args.progress else 0,
+        delta_step=max(1, estimated_steps // 20000) if args.progress else 0,
         save_step=args.save_step,
         save_results_dir=str(CASE_DIR),
         save_mesh_step=args.save_mesh_step,

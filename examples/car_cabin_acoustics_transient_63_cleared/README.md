@@ -240,6 +240,53 @@ rtk env EDG_ACOUSTICS_DEVICE=auto python main.py \
 
 因此新生成的 `prec` 应为 `3 × Nt`，`rec` 应为上表三列坐标。若已有 `results_on_the_run.mat` 仍显示 `rec=(2.4,-0.45,1.2)` 且 `prec` 只有一行，那是早期单 receiver 设置下的旧 checkpoint，不能直接与 COMSOL 的 3 点 `Microphone Response` 对比，需要用当前代码重新运行。
 
+### 导出 COMSOL 3 点 microphone golden 并对比
+
+COMSOL golden 应导出为数值表，而不是导出 `pg12` 图片。原因是图片导出只适合人工查看，误差对比需要完整时间序列。本目录的 `ExportComsolMicrophoneGolden.java` 会在 `.mph` 中用 `EvalPoint` 评价 `dset2` 上三点 `197,391,402` 的 `pate.p_t`，输出 `time,p197,p391,p402`：
+
+```bash
+rtk /usr/local/comsol64/multiphysics/bin/comsol compile ExportComsolMicrophoneGolden.java
+
+rtk /usr/local/comsol64/multiphysics/bin/comsol batch \
+  -inputfile ExportComsolMicrophoneGolden.class \
+  car_cabin_acoustics_transient_63_cleared.mph \
+  comsol_microphone_golden.csv \
+  -batchlog export_comsol_microphone_golden.log \
+  -batchlogout \
+  -nosave
+```
+
+若脚本报告 `sol2 is empty`，说明当前 `.mph` 没有可导出的 `Study 2` 解，需要先运行 COMSOL 的 microphone-array study；这个求解可能耗时较长，不应误认为是普通轻量导出。注意 COMSOL batch 在 Java 类抛错时仍可能返回 0，应以 `comsol_microphone_golden.csv` 是否生成以及 `export_comsol_microphone_golden.log` 内容为准：
+
+```bash
+rtk /usr/local/comsol64/multiphysics/bin/comsol batch \
+  -inputfile car_cabin_acoustics_transient_63_cleared.mph \
+  -study std2 \
+  -outputfile car_cabin_acoustics_transient_63_cleared_solved_std2.mph \
+  -batchlog solve_std2.log \
+  -batchlogout
+
+rtk /usr/local/comsol64/multiphysics/bin/comsol batch \
+  -inputfile ExportComsolMicrophoneGolden.class \
+  car_cabin_acoustics_transient_63_cleared_solved_std2.mph \
+  comsol_microphone_golden.csv \
+  -batchlog export_comsol_microphone_golden.log \
+  -batchlogout \
+  -nosave
+```
+
+EDG 结果生成后，用 `compare_microphone_response.py` 将 COMSOL golden 插值到 EDG 的 `prec_times` 并输出误差指标：
+
+```bash
+rtk python compare_microphone_response.py \
+  --comsol comsol_microphone_golden.csv \
+  --edg results_on_the_run.mat \
+  --plot microphone_response_comsol_vs_edg.png \
+  --metrics-out microphone_response_metrics.json
+```
+
+该脚本会先检查 EDG `.mat` 中的 `rec` 是否等于上表三点；如果仍是旧单 receiver checkpoint，会直接报错，避免错误对比。输出误差包括每个麦克风和全局的 absolute RMS、maximum absolute error、relative L2。
+
 ### `normal_velocity` 边界通量缩放修复
 
 本 case 的 COMSOL source 是边界法向速度 `vn(t)`，EDG 中对应零初始场加 prescribed normal velocity。对外法向速度 `g(t)`，通用边界通量在乘几何缩放前可写为：

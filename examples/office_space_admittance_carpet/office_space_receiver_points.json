@@ -1,0 +1,11 @@
+{
+  "point_ids": [230, 233, 467],
+  "coords": [
+    [1.5, 1.5, 4.0],
+    [1.7, 7.3, 6.0],
+    [1.0, 1.0, 1.0]
+  ],
+  "geometry_length_unit": "cm",
+  "coordinate_unit": "m",
+  "source": "COMSOL comp1/geom1.getVertexCoord()"
+}
