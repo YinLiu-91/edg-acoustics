@@ -96,7 +96,7 @@ def build_bc_parameters() -> list[dict]:
                 "frequency": F0,
                 "delay": 2.0 * T0,
                 "sigma": 0.5 * T0,
-                "phase": 0.0,
+                "phase": numpy.pi,
                 "baseline": 0.0,
             },
         },
@@ -150,7 +150,7 @@ def build_simulation(
     nx: int = NX,
     nt: int = NT,
     cfl: float = CFL,
-    receiver_locate_method: str = "scipy",
+    receiver_locate_method: str = "brute_force",
 ):
     mesh = edg_acoustics.Mesh(str(mesh_path), BC_LABELS)
     sim = edg_acoustics.AcousticsSimulation(RHO0, C0, nx, mesh, BC_LABELS)
@@ -232,7 +232,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--receiver-locate-method",
         choices=("scipy", "brute_force"),
-        default="scipy",
+        # The exported COMSOL tetrahedra are not guaranteed to form a
+        # Delaunay triangulation, so use direct barycentric containment.
+        default="brute_force",
     )
     duration = parser.add_mutually_exclusive_group()
     duration.add_argument("--total-time", type=positive_float, default=TEND)

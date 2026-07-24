@@ -15,27 +15,20 @@ public class ExportWaveBasedRoomMesh {
     ModelUtil.initStandalone(true);
     try {
       Model model = ModelUtil.load("wave_based_room", mphPath);
-      MeshSequence mesh = model.component("comp1").mesh().create("mesh_edg", "geom1");
-      mesh.autoMeshSize(5);
+      /*
+       * mesh1 is a swept hybrid mesh (hex/wedge/pyramid/tetra), while EDG
+       * accepts only tetrahedra. Rebuild a temporary all-domain FreeTet mesh
+       * using the size controls persisted in mesh1, rather than silently
+       * falling back to COMSOL's autoMeshSize(5) defaults.
+       */
+       MeshSequence mesh = model.component("comp1").mesh().create("mesh_edg", "geom1");
+       mesh.feature("size").set("custom", true);
+      mesh.feature("size").set("hmax", "lam0/3");
+      mesh.feature("size").set("hmin", 0.04);
+      mesh.feature("size").set("hcurve", 0.3);
       mesh.create("ftet1", "FreeTet");
-      try {
-        mesh.feature("ftet1").selection().geom("geom1", 3);
-        mesh.feature("ftet1").selection().set(new int[] {1, 2, 3, 4});
-      } catch (Exception error) {
-        System.out.println("FreeTet domain selection fell back to all domains: " + error.getMessage());
-        mesh.feature("ftet1").selection().all();
-      }
-      try {
-        mesh.feature("size").set("custom", "on");
-        mesh.feature("size").set("hmaxactive", "on");
-        mesh.feature("size").set("hmax", "0.16333333333333333");
-        mesh.feature("size").set("hminactive", "on");
-        mesh.feature("size").set("hmin", "0.04");
-        mesh.feature("size").set("curvactive", "on");
-        mesh.feature("size").set("curv", "0.3");
-      } catch (Exception error) {
-        System.out.println("Skipping unsupported global Size setting: " + error.getMessage());
-      }
+      mesh.feature("ftet1").selection().geom("geom1", 3);
+      mesh.feature("ftet1").selection().all();
       mesh.run();
 
       MeshExport export = mesh.export();
@@ -48,7 +41,7 @@ public class ExportWaveBasedRoomMesh {
       trySet(export, "fieldformat", "free");
       trySet(export, "nastranquadratic", "off");
       mesh.export(outputPath);
-      System.out.println("Wrote COMSOL pure-tet NASTRAN: " + outputPath);
+      System.out.println("Wrote COMSOL mesh1-equivalent pure-tet NASTRAN: " + outputPath);
     } finally {
       ModelUtil.disconnect();
     }

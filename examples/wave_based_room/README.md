@@ -35,7 +35,11 @@ PYTHONPATH=/media/liu/research/linux/edg-muxi/edg-acoustics \
 python examples/wave_based_room/fit_wave_based_room_admittance.py
 ```
 
-Export a pure-tet COMSOL mesh and convert it:
+Export a pure-tetrahedral mesh and convert it. `comp1/mesh1` is a hybrid
+swept mesh, so the exporter creates a temporary all-domain `FreeTet` mesh
+using its persisted size controls: `hmax=lam0/3`, `hmin=0.04`, and
+`hcurve=0.3`. It must not use COMSOL's default `autoMeshSize()` settings,
+which substantially coarsen the mesh.
 
 ```bash
 cd /media/liu/research/linux/edg-muxi/edg-acoustics/examples/wave_based_room
