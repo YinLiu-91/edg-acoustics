@@ -1,8 +1,11 @@
-% Fit COMSOL car-cabin admittance tables to EDG AbsorbBC coefficients.
+% Fit the smooth COMSOL car-cabin admittance tables to EDG AbsorbBC coefficients.
 %
 % The input tables store acoustic admittance Y.  EDG AbsorbBC expects a
 % rational approximation of the normal-incidence reflection coefficient
 % R = (1 - rho0*c0*Y) / (1 + rho0*c0*Y).
+%
+% Seat has a narrow 1 kHz resonance and is fitted by
+% fit_seat_admittance.py, which enforces passivity during optimization.
 
 function fit_car_cabin_admittance()
 close all;
@@ -18,7 +21,6 @@ freq_max_passivity = 2000.0;
 n_iter = 20;
 
 materials = {
-  'seat',   'seat_admittance_63.txt',   12, 0.08;
   'carpet', 'carpet_admittance_63.txt',  8, 5.0e-4;
   'roof',   'roof_admittance_63.txt',    8, 5.0e-4;
 };

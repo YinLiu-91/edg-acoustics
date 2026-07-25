@@ -4237,7 +4237,7 @@ class AcousticsSimulation:
             Nx
         )  # get the number of collocation points per face
 
-        Fmask = torch.zeros([4, Nfp], device=device, dtype=torch.int32)
+        Fmask = torch.zeros([4, Nfp], device=device, dtype=torch.long)
 
         # Find all the nodes that lie on each surface
         Fmask[0] = torch.nonzero(torch.abs(1 + rst[2]) < node_tol).flatten()
@@ -4485,6 +4485,96 @@ class AcousticsSimulation:
         Nfp = AcousticsSimulation.compute_Nfp(
             Nx
         )  # the number of nodes per surface for basis of polynomial degree Nx
+        target_device = xyz.device
+        compute_device = torch.device("cpu")
+        if compute_device != target_device:
+            xyz = xyz.detach().to(compute_device)
+            EToE = EToE.detach().to(compute_device)
+            EToF = EToF.detach().to(compute_device)
+            Fmask = Fmask.detach().to(compute_device)
+
+        nodeids = torch.arange(
+            N_tets * Np, device=compute_device, dtype=torch.long
+        ).reshape(Np, N_tets)
+
+        xV = xyz[0].reshape(-1)  # flatten the x-coordinates
+        yV = xyz[1].reshape(-1)
+        zV = xyz[2].reshape(-1)
+
+        # --- vmapM: batch indexing (single GPU op replaces N_tets*4 kernel launches) ---
+        vmapM = nodeids[Fmask.reshape(-1)].reshape(4, Nfp, N_tets)
+
+        # --- vmapP: batched distance-matrix matching ---
+        # Neighbor tet and face indices for each (face, tet) pair.
+        ke2 = EToE  # [4, N_tets]
+        face2 = EToF  # [4, N_tets]
+
+        # Gather neighbour-face node indices.
+        # vmapM has shape [4, Nfp, N_tets]; flatten the (face, tet) dims to [4*N_tets, Nfp].
+        vmapM_2d = vmapM.permute(0, 2, 1).reshape(-1, Nfp)  # [4*N_tets, Nfp]
+        neighbor_idx = (face2 * N_tets + ke2).to(torch.long)  # [4, N_tets]
+        vidP = vmapM_2d[neighbor_idx]  # [4, N_tets, Nfp]
+
+        # Gather coordinates for this face and its neighbour.
+        vidM_flat = vmapM.permute(0, 2, 1).reshape(-1)  # [4*N_tets*Nfp]
+        vidP_flat = vidP.reshape(-1)  # [4*N_tets*Nfp]
+
+        xM = xV[vidM_flat].reshape(4, N_tets, Nfp)
+        yM = yV[vidM_flat].reshape(4, N_tets, Nfp)
+        zM = zV[vidM_flat].reshape(4, N_tets, Nfp)
+        xP = xV[vidP_flat].reshape(4, N_tets, Nfp)
+        yP = yV[vidP_flat].reshape(4, N_tets, Nfp)
+        zP = zV[vidP_flat].reshape(4, N_tets, Nfp)
+
+        # Pairwise squared-distance matrix: [4, N_tets, Nfp, Nfp]
+        dx = xM.unsqueeze(-1) - xP.unsqueeze(-2)
+        dy = yM.unsqueeze(-1) - yP.unsqueeze(-2)
+        dz = zM.unsqueeze(-1) - zP.unsqueeze(-2)
+        D_all = dx * dx + dy * dy + dz * dz
+
+        # For each (face, tet, this_node), find the closest neighbour node.
+        matches = torch.argmin(D_all, dim=-1)  # [4, N_tets, Nfp]
+
+        # Build vmapP from vidP using the matches.
+        vidP_gather = vidP.reshape(-1, Nfp)  # [4*N_tets, Nfp]
+        matches_gather = matches.reshape(-1, Nfp).to(torch.long)  # [4*N_tets, Nfp]
+        vmapP_perm = torch.gather(vidP_gather, dim=1, index=matches_gather)  # [4*N_tets, Nfp]
+        vmapP = vmapP_perm.reshape(4, N_tets, Nfp).permute(0, 2, 1).to(torch.int32)
+
+        return (
+            vmapM.reshape(-1).to(target_device),
+            vmapP.reshape(-1).to(target_device),
+        )
+    @staticmethod
+    @profile
+    def build_maps_3dgpu(
+        xyz: torch.tensor,
+        EToE: torch.tensor,
+        EToF: torch.tensor,
+        Fmask: torch.tensor,
+        node_tol: float,
+    ):
+        """Find connectivity for nodes given per surface in all elements
+
+        Args:
+            xyz (torch.tensor): see :attr:`xyz`.
+            EToE (torch.tensor): see :any:`edg_acoustics.Mesh.EToE`.
+            EToF (torch.tensor): see :any:`edg_acoustics.Mesh.EToF`.
+            Fmask (torch.tensor): see :attr:`Fmask`.
+            node_tol (float): see :attr:`node_tolerance`.
+        Returns:
+            vmapM (torch.tensor): see :attr:`vmapM`.
+            vmapP (torch.tensor): see :attr:`vmapP`.
+        """
+
+        N_tets = xyz.shape[2]  # number of elements
+        Np = xyz.shape[1]  # number of collocation points
+        Nx = AcousticsSimulation.compute_Nx_from_Np(
+            Np
+        )  # get the polynomial degree of approximation
+        Nfp = AcousticsSimulation.compute_Nfp(
+            Nx
+        )  # the number of nodes per surface for basis of polynomial degree Nx
         nodeids = torch.arange(N_tets * Np).reshape(Np, N_tets).to(device_ini.device)
 
         vmapM = torch.zeros(
@@ -4694,36 +4784,50 @@ class AcousticsSimulation:
         """
         if methodLocate == "scipy":
             tri = Delaunay(node_coordinates.T, qhull_options="QJ")
-            tri.simplices = EToV.T  # type: ignore
+            tri.simplices = numpy.asarray(EToV.T, dtype=tri.simplices.dtype)  # type: ignore
             tri.nsimplex = EToV.shape[1]  # type: ignore
 
             nodeindex = tri.find_simplex(rec.T)  # type: ignore
 
+            # When the mesh is not a Delaunay triangulation, replacing simplices
+            # breaks the internal neighbour graph that find_simplex relies on.
+            # Fall back to brute-force for any points that were not located.
+            missing = numpy.flatnonzero(nodeindex < 0)
+            if missing.size:
+                nodeindex_missing = AcousticsSimulation.locate_simplex(
+                    node_coordinates, EToV, rec[:, missing], "brute_force"
+                )
+                nodeindex[missing] = nodeindex_missing
+
         elif methodLocate == "brute_force":
-            EToV = EToV.T
-            ori = node_coordinates.T[EToV[:, 0], :]
-            v1 = node_coordinates.T[EToV[:, 1], :] - ori
-            v2 = node_coordinates.T[EToV[:, 2], :] - ori
-            v3 = node_coordinates.T[EToV[:, 3], :] - ori
-            n_tet = len(EToV)
-            v1r = v1.T.reshape((3, 1, n_tet))
-            v2r = v2.T.reshape((3, 1, n_tet))
-            v3r = v3.T.reshape((3, 1, n_tet))
-            mat = numpy.concatenate((v1r, v2r, v3r), axis=1)
-            inv_mat = numpy.linalg.inv(
-                mat.T
-            ).T  # https://stackoverflow.com/a/41851137/12056867
+            tetrahedra = node_coordinates.T[EToV.T]
             N_rec = rec.shape[1]
-            orir = numpy.repeat(ori[:, :, numpy.newaxis], N_rec, axis=2)
-            newp = numpy.einsum("imk,kmj->kij", inv_mat, rec - orir)
-            val = (
-                numpy.all(newp >= 0, axis=1)
-                & numpy.all(newp <= 1, axis=1)
-                & (numpy.sum(newp, axis=1) <= 1)
-            )
-            id_tet, id_p = numpy.nonzero(val)
-            nodeindex = -numpy.ones(N_rec, dtype=id_tet.dtype)  # Sentinel value
-            nodeindex[id_p] = id_tet
+            nodeindex = -numpy.ones(N_rec, dtype=int)
+            tolerance = 1.0e-8
+
+            # Solve the barycentric system directly rather than forming explicit
+            # inverses. This remains stable for points on shared faces or vertices.
+            for start in range(0, tetrahedra.shape[0], 8192):
+                stop = min(start + 8192, tetrahedra.shape[0])
+                vertices = tetrahedra[start:stop]
+                origin = vertices[:, 0, :]
+                matrix = numpy.swapaxes(vertices[:, 1:, :] - origin[:, None, :], 1, 2)
+                rhs = rec.T[None, :, :] - origin[:, None, :]
+                barycentric = numpy.linalg.solve(matrix, numpy.swapaxes(rhs, 1, 2))
+                weights = numpy.concatenate(
+                    (
+                        1.0 - barycentric.sum(axis=1, keepdims=True),
+                        barycentric,
+                    ),
+                    axis=1,
+                )
+                contains = numpy.all(
+                    (weights >= -tolerance) & (weights <= 1.0 + tolerance), axis=1
+                )
+                for receiver_index in numpy.flatnonzero(nodeindex < 0):
+                    matches = numpy.flatnonzero(contains[:, receiver_index])
+                    if matches.size:
+                        nodeindex[receiver_index] = start + matches[0]
         else:
             raise ValueError(
                 f"{methodLocate} is not an available search method, see documentation for available methods"
@@ -4750,19 +4854,49 @@ class AcousticsSimulation:
             self.rec,
             methodLocate,
         )
-
-        old_nodes = self.xyz[
-            :, :, nodeindex
-        ]  # old_nodes.shape = (3, Np, N_rec) #type: ignore
-        simplex_basis = modepy.simplex_onb(self.dim, self.Nx)
-        v_new = modepy.vandermonde(simplex_basis, self.rec)
-        sampleWeight = numpy.zeros([self.rec.shape[1], len(simplex_basis)])
-
-        for i in range(old_nodes.shape[2]):
-            v_old = modepy.vandermonde(
-                simplex_basis, torch.Tensor.numpy(old_nodes[:, :, i].cpu())
+        invalid = numpy.flatnonzero(
+            (nodeindex < 0) | (nodeindex >= self.mesh.EToV.shape[1])
+        )
+        if invalid.size:
+            coordinates = self.rec[:, invalid].T.tolist()
+            raise ValueError(
+                "Receiver points are outside the tetrahedral mesh: "
+                f"indices={invalid.tolist()}, coordinates={coordinates}"
             )
-            sampleWeight[i] = v_new[i] @ numpy.linalg.inv(v_old)  # type: ignore
+
+        vertices = self.mesh.vertices.T
+        element_to_vertex = self.mesh.EToV.cpu().numpy().T
+        element_vertices = vertices[element_to_vertex[nodeindex]]
+        origins = element_vertices[:, 0, :]
+        transforms = numpy.swapaxes(
+            element_vertices[:, 1:, :] - origins[:, None, :], 1, 2
+        )
+        try:
+            barycentric = numpy.linalg.solve(
+                transforms, (self.rec.T - origins)[..., numpy.newaxis]
+            ).squeeze(-1)
+        except numpy.linalg.LinAlgError as error:
+            raise ValueError(
+                "Receiver interpolation selected a tetrahedron with a singular "
+                "physical-to-reference map."
+            ) from error
+
+        # The DG basis is defined on the reference tetrahedron. Physical metre
+        # coordinates make the Vandermonde matrix ill-conditioned on small cells.
+        receiver_rst = 2.0 * barycentric - 1.0
+        simplex_basis = modepy.simplex_onb(self.dim, self.Nx)
+        receiver_vandermonde = modepy.vandermonde(simplex_basis, receiver_rst.T)
+        reference_vandermonde = self.V.detach().cpu().numpy()
+        sampleWeight = numpy.linalg.solve(
+            reference_vandermonde.T, receiver_vandermonde.T
+        ).T
+        if not numpy.isfinite(sampleWeight).all() or not numpy.allclose(
+            sampleWeight.sum(axis=1), 1.0, rtol=0.0, atol=1.0e-10
+        ):
+            raise FloatingPointError(
+                "Receiver interpolation weights are not finite or do not "
+                "preserve a constant field."
+            )
 
         return (
             torch.from_numpy(sampleWeight).to(self.device).to(device_ini.dtype),
@@ -5033,6 +5167,8 @@ class AcousticsSimulation:
         save_mesh_step = int(kwargs.get("save_mesh_step", 0) or 0)
         save_mesh_dir = kwargs.get("save_mesh_dir", None)
         save_mesh_format = kwargs.get("save_mesh_format", "gmsh22")
+        stability_check_step = int(kwargs.get("stability_check_step", 0) or 0)
+        max_field_abs = float(kwargs.get("max_field_abs", numpy.inf))
         cuda_graph_chunk_steps = max(1, int(kwargs.get("cuda_graph_chunk_steps", 1)))
         use_cuda_graph = (
             kwargs.get("use_cuda_graph", False)
@@ -5138,9 +5274,25 @@ class AcousticsSimulation:
 
             completed_step = StepIndex + 1
             if (
+                stability_check_step > 0
+                and completed_step % stability_check_step == 0
+                and hasattr(self, "Q_flat")
+            ):
+                field_max = torch.max(torch.abs(self.Q_flat))
+                if not bool(torch.isfinite(field_max).item()):
+                    raise FloatingPointError(
+                        f"EDG field contains NaN or Inf at step {completed_step}"
+                    )
+                field_max_value = float(field_max.item())
+                if field_max_value > max_field_abs:
+                    raise FloatingPointError(
+                        f"EDG field max_abs={field_max_value:.17g} exceeds "
+                        f"limit {max_field_abs:.17g} at step {completed_step}"
+                    )
+            if (
                 progress
                 and "delta_step" in kwargs
-                and StepIndex % kwargs["delta_step"] == 0
+                and completed_step % kwargs["delta_step"] == 0
             ):
                 newTime = time.time()
                 elapsed = newTime - curTime
@@ -5228,8 +5380,19 @@ class AcousticsSimulation:
             format (str): the format of the file to save the results. Can be either 'mat' or 'npy'. The default format is 'mat'.
             step_index (int | None): number of completed time steps included in the checkpoint.
         """
-        ic_metadata = getattr(self.IC, "metadata", {})
-        source_xyz = getattr(self.IC, "source_xyz", numpy.array([]))
+        def checkpoint_value(value):
+            if torch.is_tensor(value):
+                return value.detach().cpu().numpy()
+            if isinstance(value, dict):
+                return {key: checkpoint_value(item) for key, item in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [checkpoint_value(item) for item in value]
+            return value
+
+        ic_metadata = checkpoint_value(getattr(self.IC, "metadata", {}))
+        source_xyz = checkpoint_value(
+            getattr(self.IC, "source_xyz", numpy.array([]))
+        )
         halfwidth = getattr(self.IC, "halfwidth", numpy.nan)
         output_path = Path("." if output_dir is None else output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -5246,7 +5409,7 @@ class AcousticsSimulation:
         else:
             current_time = current_step * self.time_integrator.dt
         data = {
-            "BCpara": self.BC.BCpara,
+            "BCpara": checkpoint_value(self.BC.BCpara),
             "prec": self.prec[:, :current_step].detach().cpu().numpy(),
             "rec": self.rec,
             "dt": self.time_integrator.dt,
@@ -5268,8 +5431,16 @@ class AcousticsSimulation:
             "CFL": self.time_integrator.CFL,
         }
         if format == "mat":
+            checkpoint_path = output_path / (
+                f"results_step{current_step:06d}_t{current_time:.6e}.mat"
+            )
+            scipy.io.savemat(checkpoint_path, data)
             scipy.io.savemat(output_path / "results_on_the_run.mat", data)
         elif format == "npy":
+            checkpoint_path = output_path / (
+                f"results_step{current_step:06d}_t{current_time:.6e}.npz"
+            )
+            numpy.savez(checkpoint_path, **data)
             numpy.savez(output_path / "results_on_the_run.npz", **data)
         else:
             raise ValueError(

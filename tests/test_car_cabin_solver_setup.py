@@ -14,15 +14,20 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CASE_DIR = REPO_ROOT / "examples" / "car_cabin_acoustics_transient_63_cleared"
 MAIN_PATH = CASE_DIR / "main.py"
+COMPARE_PATH = CASE_DIR / "compare_microphone_response.py"
 
 
-def load_case_main():
-    spec = importlib.util.spec_from_file_location("car_cabin_main", MAIN_PATH)
+def load_python_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_case_main():
+    return load_python_module("car_cabin_main", MAIN_PATH)
 
 
 def test_gaussian_modulated_sine_normal_velocity_derivative():
@@ -195,6 +200,56 @@ def test_car_cabin_receivers_match_comsol_microphone_response_points():
             dtype=float,
         ),
     )
+
+
+def test_car_cabin_comsol_golden_export_targets_microphone_response_points():
+    source = (CASE_DIR / "ExportComsolMicrophoneGolden.java").read_text()
+
+    assert "POINT_IDS = new int[] {197, 391, 402}" in source
+    assert 'set("data", "dset2")' in source
+    assert 'setIndex("expr", "pate.p_t", 0)' in source
+    assert "EXPECTED_NSAMPLES = 2401" in source
+
+
+def test_car_cabin_microphone_compare_metrics(tmp_path: Path):
+    compare = load_python_module("compare_microphone_response", COMPARE_PATH)
+    comsol_path = tmp_path / "comsol.csv"
+    edg_path = tmp_path / "edg.mat"
+
+    comsol_path.write_text(
+        "\n".join(
+            [
+                "# test golden",
+                "time,p197,p391,p402",
+                "0.0,0.0,1.0,2.0",
+                "0.1,0.1,1.1,2.1",
+                "0.2,0.2,1.2,2.2",
+            ]
+        )
+        + "\n"
+    )
+    scipy.io.savemat(
+        edg_path,
+        {
+            "prec": numpy.array([[0.05, 0.16], [1.05, 1.16], [2.05, 2.16]]),
+            "prec_times": numpy.array([0.05, 0.15]),
+            "rec": compare.COMSOL_RECEIVER,
+            "receiver_point_ids": compare.COMSOL_POINT_IDS,
+        },
+    )
+
+    t_comsol, p_comsol = compare.load_comsol_golden(comsol_path)
+    t_edg, p_edg, receiver, point_ids = compare.load_edg_result(edg_path)
+    compare.validate_edg_receiver(receiver, point_ids)
+    p_ref = compare.interpolate_comsol_to_edg(t_comsol, p_comsol, t_edg)
+    metrics = compare.compute_metrics(t_edg, p_edg, p_ref)
+
+    numpy.testing.assert_allclose(
+        p_ref,
+        numpy.array([[0.05, 0.15], [1.05, 1.15], [2.05, 2.15]]),
+    )
+    assert metrics["global"]["max_abs"] == pytest.approx(0.01)
+    assert metrics["per_receiver"][0]["point_id"] == 197
 
 
 @pytest.mark.parametrize(

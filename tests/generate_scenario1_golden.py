@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import numpy
 
+import edg_acoustics
 from scenario1_utils import GOLDEN_DIR, build_scenario1_simulation, clone_bcvar, tensor_to_numpy
 
 
 GOLDEN_FILE = GOLDEN_DIR / "scenario1_fp64_short.npz"
+POSTPROCESSED_GOLDEN_FILE = GOLDEN_DIR / "scenario1_postprocessed.npz"
 N_TIME_STEPS = 20
+POSTPROCESS_TOTAL_TIME = 0.005
 
 
 def collect_bc_state(prefix: str, bcvar: list[dict], output: dict):
@@ -24,7 +27,7 @@ def collect_bc_state(prefix: str, bcvar: list[dict], output: dict):
 
 
 def main():
-    rhs_sim = build_scenario1_simulation()
+    rhs_sim = build_scenario1_simulation(device="cpu")
     rhs_bcvar = clone_bcvar(rhs_sim.BC.BCvar)
     rhs_p, rhs_vx, rhs_vy, rhs_vz, rhs_bcvar = rhs_sim.RHS_operator(
         rhs_sim.P,
@@ -34,7 +37,7 @@ def main():
         rhs_bcvar,
     )
 
-    time_sim = build_scenario1_simulation()
+    time_sim = build_scenario1_simulation(device="cpu")
     time_sim.time_integration(n_time_steps=N_TIME_STEPS)
 
     data = {
@@ -59,6 +62,17 @@ def main():
 
     numpy.savez_compressed(GOLDEN_FILE, **data)
     print(f"Wrote {GOLDEN_FILE}")
+
+    postprocess_sim = build_scenario1_simulation(device="cpu")
+    postprocess_sim.time_integration(total_time=POSTPROCESS_TOTAL_TIME)
+    postprocessor = edg_acoustics.Monopole_postprocessor(postprocess_sim, 1)
+    postprocessor.apply_correction()
+    numpy.savez_compressed(
+        POSTPROCESSED_GOLDEN_FILE,
+        TR=postprocessor.TR,
+        IRnew=postprocessor.IRnew,
+    )
+    print(f"Wrote {POSTPROCESSED_GOLDEN_FILE}")
 
 
 if __name__ == "__main__":

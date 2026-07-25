@@ -193,19 +193,25 @@ rtk gmsh -check car_cabin_comsol_virtual_hmax0p114_hmin0p02.msh -
 - `RoofTrim` -> `roof_admittance_63.txt` -> `roof.mat`
 - `LeatherSeats` -> `seat_admittance_63.txt` -> `seat.mat`
 
-使用 vector fitting 生成 EDG `AbsorbBC` 的 `RI/RP/CP` 系数：
+使用受被动性约束的优化生成 seat 的 EDG `RI/CP` 系数；carpet 和 roof
+继续使用 vector fitting：
 
 ```bash
+python fit_seat_admittance.py
 rtk octave -qf fit_car_cabin_admittance.m
 ```
 
 当前拟合误差和 passivity 检查：
 
-| material | pole count | RMS `|R_fit-R_target|` | max `|R|` |
-|---|---:|---:|---:|
-| seat | 12 | `6.9437e-02` | `1.000000` |
-| carpet | 8 | `5.8947e-05` | `0.999184` |
-| roof | 8 | `1.1537e-04` | `0.999151` |
+| material | pole count | RMS `|R_fit-R_target|` | max `|R_fit-R_target|` | max `|R|` |
+|---|---:|---:|---:|---:|
+| seat | 21 complex | `5.7981e-02` | `9.9995e-02` | `0.999990` |
+| carpet | 8 | `5.8947e-05` | `1.6610e-04` | `0.999184` |
+| roof | 8 | `1.1537e-04` | `3.0465e-04` | `0.999151` |
+
+`fit_seat_admittance.py` validates `|R|` at 100001 frequencies from 0 to
+2 kHz. It also constrains the source-spectrum-weighted seat RMS below
+`5.0e-02`, which protects the 1 kHz Gaussian-modulated source band.
 
 运行 EDG case：
 

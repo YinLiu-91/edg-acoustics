@@ -28,7 +28,7 @@ C0 = 343.0
 F0 = 1000.0
 FMAX = 1500.0
 T0 = 0.001
-TEND = 0.06
+TEND = 0.02
 OUTPUT_DT = T0 / 40.0
 
 NX = 4
@@ -74,7 +74,9 @@ def load_edg_material(label: int, mat_path: Path) -> dict:
     if not mat_path.exists():
         raise FileNotFoundError(
             f"Missing fitted material file: {mat_path}. "
-            "Run fit_car_cabin_admittance.m first."
+            "Run `python fit_seat_admittance.py` for seat.mat, and "
+            "`rtk octave -qf fit_car_cabin_admittance.m` for carpet.mat "
+            "and roof.mat."
         )
 
     mat = scipy.io.loadmat(mat_path)

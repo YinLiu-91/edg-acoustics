@@ -314,14 +314,12 @@ class Mesh:
             )  # number of triangles with label BC_label
             self.BC_triangles[BC_label] = torch.from_numpy(
                 mesh_data.cells_dict["triangle"][triangles_have_label]
-            ).to(
-                device_ini.device
-            )  # get the triangles with BC_label
+            ).to(device=device_ini.device, dtype=torch.long)  # get the triangles with BC_label
 
         # Read the number of tetrahedra (computational elements) and their definitions
         self.N_tets = mesh_data.cells_dict["tetra"].shape[0]
         self.EToV = torch.from_numpy(mesh_data.cells_dict["tetra"].transpose()).to(
-            device_ini.device
+            device=device_ini.device, dtype=torch.long
         )
 
         # Compute the mesh connectivity
