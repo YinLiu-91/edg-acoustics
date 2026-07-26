@@ -28,7 +28,7 @@ C0 = 343.0
 F0 = 1000.0
 FMAX = 1500.0
 T0 = 0.001
-TEND = 0.02
+TEND = 0.06
 OUTPUT_DT = T0 / 40.0
 
 NX = 4
@@ -75,8 +75,8 @@ def load_edg_material(label: int, mat_path: Path) -> dict:
         raise FileNotFoundError(
             f"Missing fitted material file: {mat_path}. "
             "Run `python fit_seat_admittance.py` for seat.mat, and "
-            "`rtk octave -qf fit_car_cabin_admittance.m` for carpet.mat "
-            "and roof.mat."
+            "`python fit_car_cabin_pff_admittance.py` for carpet.mat "
+            "and roof.mat after exporting COMSOL pff2/pff3."
         )
 
     mat = scipy.io.loadmat(mat_path)
@@ -181,6 +181,13 @@ def positive_float(value: str) -> float:
     return parsed
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mesh", type=Path, default=None, help="Gmsh .msh file")
@@ -195,6 +202,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-step", type=int, default=0)
     parser.add_argument("--save-mesh-step", type=int, default=0)
     parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--progress-step", type=positive_int, default=None)
     parser.add_argument("--use-cuda-graph", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--cuda-graph-chunk-steps", type=int, default=1)
     parser.add_argument(
@@ -202,6 +210,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep every EDG step instead of interpolating to COMSOL range(0,T0/40,Tend).",
     )
+    parser.add_argument("--stability-check-step", type=positive_int, default=1000)
+    parser.add_argument("--max-field-abs", type=positive_float, default=1.0e6)
     return parser.parse_args()
 
 
@@ -225,7 +235,13 @@ def main() -> int:
 
     sim.time_integration(
         total_time=args.total_time,
-        delta_step=max(1, estimated_steps // 20000) if args.progress else 0,
+        delta_step=(
+            args.progress_step
+            if args.progress_step is not None
+            else max(1, estimated_steps // 20000)
+        )
+        if args.progress
+        else 0,
         save_step=args.save_step,
         save_results_dir=str(CASE_DIR),
         save_mesh_step=args.save_mesh_step,
@@ -235,6 +251,8 @@ def main() -> int:
         output_times=output_times,
         use_cuda_graph=args.use_cuda_graph,
         cuda_graph_chunk_steps=args.cuda_graph_chunk_steps,
+        stability_check_step=args.stability_check_step,
+        max_field_abs=args.max_field_abs,
     )
     write_result(sim, args.output)
     print(f"Finished. Result written to {args.output}")

@@ -254,7 +254,7 @@ def test_car_cabin_microphone_compare_metrics(tmp_path: Path):
 
 @pytest.mark.parametrize(
     ("name", "rms_limit"),
-    (("seat", 0.08), ("carpet", 5.0e-4), ("roof", 5.0e-4)),
+    (("seat", 1.0e-10), ("carpet", 1.0e-10), ("roof", 1.0e-10)),
 )
 def test_car_cabin_material_fits_are_passive(name: str, rms_limit: float):
     mat_path = CASE_DIR / f"{name}.mat"

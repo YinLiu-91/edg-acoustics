@@ -187,31 +187,77 @@ rtk gmsh -check car_cabin_comsol_virtual_hmax0p114_hmin0p02.msh -
 
 ## 材料拟合与求解命令
 
-三类频率相关边界来自 COMSOL admittance 表：
+三类频率相关边界都使用 COMSOL partial-fraction function：
 
-- `CarpetFloor` -> `carpet_admittance_63.txt` -> `carpet.mat`
-- `RoofTrim` -> `roof_admittance_63.txt` -> `roof.mat`
-- `LeatherSeats` -> `seat_admittance_63.txt` -> `seat.mat`
+- `LeatherSeats`: `imp4 -> pff1 -> seat_admittance_comsol_pff.txt -> seat.mat`
+- `CarpetFloor`: `imp5 -> pff2 -> carpet_admittance_comsol_pff2.txt -> carpet.mat`
+- `RoofTrim`: `imp6 -> pff3 -> roof_admittance_comsol_pff3.txt -> roof.mat`
 
-使用受被动性约束的优化生成 seat 的 EDG `RI/CP` 系数；carpet 和 roof
-继续使用 vector fitting：
+`Impedance 4 - Seat` 不直接使用旧的 `seat_admittance_63.txt`。MPH 中该
+feature 的 `ApproximantFunctionReference` 是 `pff1`，即 COMSOL 已先把原始
+导纳表拟合为 2 个实极点和 1 对复极点的 rational admittance。用
+`ExportComsolSeatAdmittance.java` 在原始 59 个频率上评价 `pff1`：
 
 ```bash
-python fit_seat_admittance.py
-rtk octave -qf fit_car_cabin_admittance.m
+rtk /usr/local/comsol64/multiphysics/bin/comsol compile \
+  ExportComsolSeatAdmittance.java
+rtk /usr/local/comsol64/multiphysics/bin/comsol batch \
+  -inputfile ExportComsolSeatAdmittance.class \
+  car_cabin_acoustics_transient_63_cleared.mph \
+  -batchlog seat_admittance_comsol_pff_export.log \
+  -batchlogout \
+  -nosave
 ```
+
+导出器用 `BEGIN_COMSOL_SEAT_ADMITTANCE` / `END_COMSOL_SEAT_ADMITTANCE`
+标记数据段。仓库中的 `seat_admittance_comsol_pff.txt` 是该数据段的可审计
+副本。`fit_seat_admittance.py` 将 active `pff1` 导纳转换为反射系数，再做
+四阶实系数 rational identification，得到 EDG 的 `RI/RP/CP`，并生成
+`seat_fit_diagnostics.png`。图中 active `pff1` 是主目标，旧 raw table
+只作为对照曲线。
+
+Carpet 和 roof 同样不能把原始导纳表直接当作 active COMSOL 边界。
+`Impedance 5 - Carpet` 和 `Impedance 6 - Roof` 的
+`ApproximantFunctionReference` 分别为 `pff2` 和 `pff3`。通过 COMSOL API
+直接评价这两个函数，并从 stdout 日志提取可审计数据：
+
+```bash
+rtk /usr/local/comsol64/multiphysics/bin/comsol compile \
+  ExportComsolMaterialAdmittance.java
+rtk /usr/local/comsol64/multiphysics/bin/comsol batch \
+  -inputfile ExportComsolMaterialAdmittance.class \
+  car_cabin_acoustics_transient_63_cleared.mph \
+  -batchlog material_admittance_comsol_pff_progress.log \
+  -nosave > material_admittance_comsol_pff_export.log
+rtk python fit_car_cabin_pff_admittance.py \
+  --export-log material_admittance_comsol_pff_export.log
+rtk python fit_seat_admittance.py
+```
+
+`fit_car_cabin_pff_admittance.py` 解析标记数据段、把导纳转换为反射系数，
+再做三阶实系数 rational identification。它同时生成 `carpet.mat`、
+`roof.mat`、`carpet_fit_diagnostics.png` 和
+`roof_fit_diagnostics.png`。旧 `fit_car_cabin_admittance.m` 只保留为 raw
+table 诊断和 COMSOL 无法运行时的显式回退，输出
+`carpet_raw_table_fit.mat`/`roof_raw_table_fit.mat`，不会覆盖求解器首选材料。
 
 当前拟合误差和 passivity 检查：
 
 | material | pole count | RMS `|R_fit-R_target|` | max `|R_fit-R_target|` | max `|R|` |
 |---|---:|---:|---:|---:|
-| seat | 21 complex | `5.7981e-02` | `9.9995e-02` | `0.999990` |
-| carpet | 8 | `5.8947e-05` | `1.6610e-04` | `0.999184` |
-| roof | 8 | `1.1537e-04` | `3.0465e-04` | `0.999151` |
+| seat (`pff1` target) | 2 real + 1 complex pair | `1.4716e-15` | `2.7204e-15` | `0.758434` |
+| carpet (`pff2` target) | 3 real | `2.2172e-15` | `3.6764e-15` | `0.999707` |
+| roof (`pff3` target) | 3 real | `4.1413e-15` | `5.4743e-15` | `0.999753` |
 
-`fit_seat_admittance.py` validates `|R|` at 100001 frequencies from 0 to
-2 kHz. It also constrains the source-spectrum-weighted seat RMS below
-`5.0e-02`, which protects the 1 kHz Gaussian-modulated source band.
+`seat_admittance_63.txt` 来自 COMSOL 6.2 的旧模型，而当前 MPH 内嵌的
+carpet/roof 表来自 COMSOL 6.3。COMSOL seat `pff1` 对旧原表
+本身已有明显偏差：转换为反射系数后 RMS 为 `1.3716e-01`，最大误差为
+`3.2013e-01`。这些值作为 `raw_table_rms_error` 和
+`raw_table_max_error` 保存在 `seat.mat` 中；它们不能作为 EDG 对 active
+COMSOL 边界的拟合误差。Carpet/roof 对 raw table 的 RMS 诊断差异分别为
+`1.7956e-04` 和 `2.3474e-04`，同样单独保存在对应 `mat` 中。
+三类材料拟合都在 0–20 kHz 线性网格和 20 kHz–2 MHz 对数网格上检查
+passivity，并验证所有极点稳定。
 
 运行 EDG case：
 

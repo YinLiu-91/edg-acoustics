@@ -1,4 +1,4 @@
-"""Regression checks for the constrained car-cabin seat material fit."""
+"""Regression checks for the active COMSOL car-cabin seat material fit."""
 
 from __future__ import annotations
 
@@ -23,10 +23,12 @@ def load_fit_module():
     return module
 
 
-def test_constrained_seat_fit_is_accurate_stable_and_passive():
+def test_comsol_pff_seat_fit_is_accurate_stable_and_passive():
     fit = load_fit_module()
     data = scipy.io.loadmat(CASE_DIR / "seat.mat")
     frequency_hz, target = fit.load_target()
+    as_ = numpy.asarray(data["AS"]).reshape(-1)
+    lambda_ = numpy.asarray(data["lambdaS"]).reshape(-1)
     bs = numpy.asarray(data["BS"]).reshape(-1)
     cs = numpy.asarray(data["CS"]).reshape(-1)
     alpha = numpy.asarray(data["alphaS"]).reshape(-1)
@@ -34,6 +36,8 @@ def test_constrained_seat_fit_is_accurate_stable_and_passive():
     approximation = fit.evaluate_reflection(
         2.0 * numpy.pi * frequency_hz,
         float(numpy.asarray(data["RI"]).reshape(-1)[0]),
+        as_,
+        lambda_,
         bs,
         cs,
         alpha,
@@ -46,30 +50,20 @@ def test_constrained_seat_fit_is_accurate_stable_and_passive():
     validation_reflection = fit.evaluate_reflection(
         validation_omega,
         float(numpy.asarray(data["RI"]).reshape(-1)[0]),
+        as_,
+        lambda_,
         bs,
         cs,
         alpha,
         beta,
     )
 
-    assert "AS" not in data or numpy.asarray(data["AS"]).size == 0
-    assert "lambdaS" not in data or numpy.asarray(data["lambdaS"]).size == 0
-    assert len(bs) == len(fit.POLE_FREQUENCIES_HZ)
+    assert len(as_) == 2
+    assert len(lambda_) == len(as_)
+    assert len(bs) == 1
     assert len(cs) == len(bs)
     assert len(alpha) == len(bs)
     assert len(beta) == len(bs)
-    numpy.testing.assert_allclose(
-        numpy.asarray(data["pole_frequencies_hz"]).reshape(-1),
-        fit.POLE_FREQUENCIES_HZ,
-        rtol=0.0,
-        atol=1.0e-12,
-    )
-    numpy.testing.assert_allclose(
-        beta / (2.0 * numpy.pi),
-        fit.POLE_FREQUENCIES_HZ,
-        rtol=0.0,
-        atol=1.0e-12,
-    )
     numpy.testing.assert_allclose(
         approximation,
         numpy.asarray(data["ApproxValue"]).reshape(-1),
@@ -82,6 +76,8 @@ def test_constrained_seat_fit_is_accurate_stable_and_passive():
         rtol=1.0e-12,
         atol=1.0e-12,
     )
+    assert abs(float(numpy.asarray(data["RI"]).reshape(-1)[0])) <= 1.0
+    assert numpy.all(lambda_ > 0.0)
     assert numpy.all(alpha > 0.0)
     assert numpy.all(beta > 0.0)
     assert numpy.sqrt(numpy.mean(numpy.abs(error) ** 2)) <= fit.RMS_ERROR_LIMIT
@@ -95,3 +91,40 @@ def test_constrained_seat_fit_is_accurate_stable_and_passive():
         <= fit.SOURCE_WEIGHTED_RMS_LIMIT
     )
     assert numpy.abs(validation_reflection).max() <= 1.0 + 1.0e-8
+    assert fit.DEFAULT_DIAGNOSTICS_PATH.exists()
+    assert fit.DEFAULT_DIAGNOSTICS_PATH.stat().st_size > 10000
+
+
+def test_seat_fit_records_legacy_raw_table_mismatch():
+    fit = load_fit_module()
+    data = scipy.io.loadmat(CASE_DIR / "seat.mat")
+    raw_frequency_hz, raw_admittance = fit.load_admittance(fit.RAW_INPUT_PATH)
+    keep = raw_frequency_hz > 0.0
+    raw_frequency_hz = raw_frequency_hz[keep]
+    raw_target = fit.admittance_to_reflection(raw_admittance[keep])
+    raw_approximation = fit.evaluate_reflection(
+        2.0 * numpy.pi * raw_frequency_hz,
+        float(numpy.asarray(data["RI"]).reshape(-1)[0]),
+        numpy.asarray(data["AS"]).reshape(-1),
+        numpy.asarray(data["lambdaS"]).reshape(-1),
+        numpy.asarray(data["BS"]).reshape(-1),
+        numpy.asarray(data["CS"]).reshape(-1),
+        numpy.asarray(data["alphaS"]).reshape(-1),
+        numpy.asarray(data["betaS"]).reshape(-1),
+    )
+    raw_rms = numpy.sqrt(numpy.mean(numpy.abs(raw_approximation - raw_target) ** 2))
+
+    numpy.testing.assert_allclose(
+        raw_approximation,
+        numpy.asarray(data["raw_ApproxValue"]).reshape(-1),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+    numpy.testing.assert_allclose(
+        raw_target,
+        numpy.asarray(data["raw_trueValue"]).reshape(-1),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+    assert raw_rms == numpy.asarray(data["raw_table_rms_error"]).reshape(-1)[0]
+    assert raw_rms > 0.1

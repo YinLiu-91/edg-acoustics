@@ -1,8 +1,8 @@
-% Fit the smooth COMSOL car-cabin admittance tables to EDG AbsorbBC coefficients.
+% Legacy raw-table fit retained for diagnostics and fallback only.
 %
-% The input tables store acoustic admittance Y.  EDG AbsorbBC expects a
-% rational approximation of the normal-incidence reflection coefficient
-% R = (1 - rho0*c0*Y) / (1 + rho0*c0*Y).
+% The active COMSOL boundaries consume pff2/pff3, not these raw tables.
+% Use fit_car_cabin_pff_admittance.py for carpet.mat and roof.mat whenever
+% COMSOL can load the MPH and evaluate the active functions.
 %
 % Seat has a narrow 1 kHz resonance and is fitted by
 % fit_seat_admittance.py, which enforces passivity during optimization.
@@ -117,7 +117,7 @@ for material_index = 1:size(materials, 1)
 
   ApproxValue = fit_edg;
   trueValue = target;
-  output_path = fullfile(case_dir, [name '.mat']);
+  output_path = fullfile(case_dir, [name '_raw_table_fit.mat']);
   save('-mat', output_path, 'RI', 'AS', 'lambdaS', 'BS', 'CS', ...
        'alphaS', 'betaS', 'freq', 'ApproxValue', 'trueValue', ...
        'rms_error', 'max_error', 'max_abs_R');
