@@ -11,6 +11,14 @@
 
 Let `Z0 = rho0*c0`. Determine the physical quantity stored by every COMSOL table or feature before fitting.
 
+Select the primary fit target in this order:
+
+1. If the active physics feature references a partial-fraction, interpolation, or other COMSOL function, evaluate that exact function through the COMSOL API at the fit frequencies. Export marked stdout blocks because COMSOL method security may prohibit direct Java filesystem writes.
+2. If the active feature directly consumes an imported table, extract and fit that table.
+3. Reconstruct a COMSOL rational function from archived coefficients only when direct evaluation is unavailable and its variable normalization, units, residue convention, complex pairing, and asymptotic term have all been verified.
+
+Do not assume an imported table or a `p:fitteddata` array is the active transfer function. Preserve it as a raw-source diagnostic and report both active-target error and raw-table mismatch. Use `assets/templates/ExportComsolAdmittance.java.template` for direct evaluation and `scripts/extract_comsol_admittance.py` to extract one marked block.
+
 - From normalized specific admittance `Y`:
 
   `R(omega) = (1 - Z0*Y(omega)) / (1 + Z0*Y(omega))`
@@ -39,7 +47,17 @@ Require `lambda_k > 0`, `alpha_k > 0`, and conjugate pairing. Store MATLAB array
 
 Choose the fit band from the source spectrum, mesh resolution, and COMSOL material definition. Check passivity over the simulation band plus a documented margin. Pole count and RMS tolerance are case-specific; increase complexity only when diagnostics show a material error relevant to the excitation band.
 
+When COMSOL already uses an order-`N` partial-fraction function, first identify an order-`N` real rational reflection model from direct COMSOL samples. The admittance-to-reflection Mobius transform does not increase rational order. Prefer this deterministic identification over a higher-order vector fit when it reaches numerical precision with stable poles.
+
 Plot at least magnitude and phase or real and imaginary parts. A small global RMS can hide a large local error near the carrier frequency.
+
+For active-function fits, also store:
+
+- active function tag and exported target filename;
+- raw source filename;
+- raw-table RMS and maximum mismatch;
+- rational order and normalized numerator/denominator;
+- passivity validation frequency limit.
 
 ## 3. Build the EDG case entrypoint
 

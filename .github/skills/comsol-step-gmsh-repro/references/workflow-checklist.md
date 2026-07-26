@@ -26,6 +26,7 @@ unzip -l case.mph | sed -n '1,120p'
 - [ ] Record evaluated `rho0`, `c0`, impedance/admittance parameters, source function parameters, receiver coordinates, solver order, time range, and output range.
 - [ ] Resolve conflicts in favor of active physics and document every override.
 - [ ] Extract imported material/function tables from `resources/*` or document their external source.
+- [ ] For every active fitted/interpolated material, record the referenced function tag and distinguish its evaluated response from imported/raw source data.
 
 ## 3. Physical-label mapping
 
@@ -66,10 +67,13 @@ For COMSOL mesh export:
 ## 6. Boundary equations and material fitting
 
 - [ ] Confirm whether source data represent impedance `Z`, admittance `Y`, absorption, or reflection `R`.
+- [ ] If active physics references a COMSOL function, export that function through COMSOL as the primary fit target; do not substitute the imported table or `p:fitteddata`.
+- [ ] Retain raw/imported material samples as provenance and quantify their mismatch from the fitted active boundary.
 - [ ] Convert to EDG's reflection convention using the same `rho0*c0` as the case.
 - [ ] Choose and document fit frequency band, sample weighting, pole count, iterations, and error limits.
 - [ ] Require stable real/complex poles and verify `max |R| <= 1` over the simulation band plus a documented margin.
 - [ ] Save `RI`, real-pole coefficients, complex-pole coefficients, source/fit samples, RMS/max error, and passivity metric in each `.mat`.
+- [ ] Save active function/target provenance, rational order, raw-table diagnostic errors, and the passivity frequency limit.
 - [ ] Plot magnitude/phase or real/imaginary diagnostics and inspect large local errors even when RMS passes.
 
 ## 7. EDG entrypoint

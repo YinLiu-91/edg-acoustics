@@ -1,0 +1,53 @@
+import com.comsol.model.Model;
+import com.comsol.model.util.ModelUtil;
+import java.util.Locale;
+
+public class ExportComsolAdmittance {
+  // Replace these values from the active PhysicsFeature and FunctionFeature.
+  private static final String FUNCTION_TAG = "pff1";
+  private static final String OUTPUT_MARKER = "MATERIAL";
+  private static final double[] FREQUENCIES_HZ =
+      new double[] {100.0, 125.0, 150.0};
+
+  private static void log(String line) {
+    // COMSOL batch method security may reject Java filesystem writes.
+    System.out.println(line);
+  }
+
+  public static void main(String[] args) throws Exception {
+    if (args.length != 1) {
+      throw new IllegalArgumentException(
+          "Usage: ExportComsolAdmittance input.mph");
+    }
+
+    ModelUtil.initStandalone(true);
+    try {
+      Model model = ModelUtil.load("case_model", args[0]);
+      log("BEGIN_COMSOL_" + OUTPUT_MARKER + "_ADMITTANCE");
+      log("% function: " + FUNCTION_TAG);
+      log("% evaluated through model.param().evaluateComplex");
+      log("% freq (Hz) real(Y) imag(Y)");
+      for (double frequencyHz : FREQUENCIES_HZ) {
+        double[] value =
+            model
+                .param()
+                .evaluateComplex(
+                    String.format(
+                        Locale.ROOT,
+                        "%s(%.17g[Hz])",
+                        FUNCTION_TAG,
+                        frequencyHz));
+        log(
+            String.format(
+                Locale.ROOT,
+                "%.17g %.17g %.17g",
+                frequencyHz,
+                value[0],
+                value[1]));
+      }
+      log("END_COMSOL_" + OUTPUT_MARKER + "_ADMITTANCE");
+    } finally {
+      ModelUtil.disconnect();
+    }
+  }
+}

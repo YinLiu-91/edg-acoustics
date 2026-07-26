@@ -1,4 +1,8 @@
-% Fit COMSOL admittance tables to EDG AbsorbBC RI/RP/CP coefficients.
+% Fit exported active COMSOL admittance samples to EDG RI/RP/CP coefficients.
+%
+% Prefer samples obtained by evaluating the function referenced by the active
+% impedance feature.  Use an imported/raw table only when the physics consumes
+% it directly or as an explicitly documented fallback.
 %
 % Configure the materials table below, then run with:
 %   octave -qf fit_admittance.m
@@ -21,7 +25,7 @@ freq_max_passivity = 2000.0;
 n_iter = 20;
 
 materials = {
-  % 'name', 'admittance_table.txt', n_poles, rms_limit;
+  % 'name', 'active_admittance_export.txt', n_poles, rms_limit;
 };
 
 if isempty(materials)
